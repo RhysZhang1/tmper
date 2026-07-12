@@ -26,9 +26,11 @@ pub enum InsertMode {
     Typing(String),
 }
 
+#[allow(dead_code)]
 pub struct PlaylistManagerState {
     pub playlists: Vec<PlaylistData>,
     pub library_paths: Vec<PathBuf>,
+    pub cursor: usize,
     pub selected_playlist: usize,
     pub selected_song_in_playlist: usize,
     pub selected_library_song: usize,
@@ -36,6 +38,8 @@ pub struct PlaylistManagerState {
     pub insert_mode: InsertMode,
     pub notification: Option<(String, std::time::Instant)>,
     pub expanded_playlist: Option<usize>,
+    pub scroll_library: usize,
+    pub scroll_playlists: usize,
 }
 
 impl Default for PlaylistManagerState {
@@ -43,6 +47,7 @@ impl Default for PlaylistManagerState {
         Self {
             playlists: Vec::new(),
             library_paths: Vec::new(),
+            cursor: 0,
             selected_playlist: 0,
             selected_song_in_playlist: 0,
             selected_library_song: 0,
@@ -50,6 +55,8 @@ impl Default for PlaylistManagerState {
             insert_mode: InsertMode::Off,
             notification: None,
             expanded_playlist: None,
+            scroll_library: 0,
+            scroll_playlists: 0,
         }
     }
 }

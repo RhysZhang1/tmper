@@ -635,6 +635,24 @@ impl App {
         self.ui_state.file_browser_state.selected_fs_index = 0;
     }
 
+    #[allow(dead_code)]
+    fn playlist_visible_lines(
+        state: &crate::ui::views::playlist_view::PlaylistManagerState,
+    ) -> usize {
+        let mut count = 1; // "..."
+        for (i, pl) in state.playlists.iter().enumerate() {
+            count += 1; // playlist name
+            if Some(i) == state.expanded_playlist {
+                if pl.songs.is_empty() {
+                    count += 1; // "(empty)"
+                } else {
+                    count += pl.songs.len();
+                }
+            }
+        }
+        count
+    }
+
     fn handle_playlist_key(&mut self, key: &crossterm::event::KeyEvent) {
         let state = &mut self.ui_state.playlist_state;
 
@@ -862,13 +880,11 @@ impl App {
                     }
                 }
             }
-            KeyCode::Backspace => {
-                if state.focused == BrowserPanel::Filesystem {
-                    if let Some(parent) = state.current_dir.parent().map(|p| p.to_path_buf()) {
-                        if parent.starts_with(&state.home_dir) || parent == state.home_dir {
-                            state.current_dir = parent;
-                            self.refresh_file_browser();
-                        }
+            KeyCode::Backspace if state.focused == BrowserPanel::Filesystem => {
+                if let Some(parent) = state.current_dir.parent().map(|p| p.to_path_buf()) {
+                    if parent.starts_with(&state.home_dir) || parent == state.home_dir {
+                        state.current_dir = parent;
+                        self.refresh_file_browser();
                     }
                 }
             }
@@ -905,7 +921,7 @@ impl App {
         }
     }
 
-    fn load_and_play_collect(&mut self, path: &std::path::PathBuf) {
+    fn load_and_play_collect(&mut self, path: &std::path::Path) {
         if let Ok(info) = read_metadata(path) {
             let title = info.title.clone();
             let artist = info
