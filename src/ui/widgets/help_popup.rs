@@ -80,8 +80,10 @@ pub fn render_help(f: &mut Frame) {
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from("  1            播放器视图（默认：频谱 + 歌词 + 播放列表）"),
+        Line::from("  2            曲库浏览器（艺术家 / 专辑 / 曲目）"),
         Line::from("  3            全屏歌词视图（KTV 风格，居中显示）"),
         Line::from("  4            全屏频谱视图（鱼缸模式，铺满终端）"),
+        Line::from("  5            曲库浏览器"),
         Line::from("  0            显示 / 关闭本帮助"),
         Line::from(""),
         Line::from(Span::styled(

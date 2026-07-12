@@ -259,16 +259,31 @@ impl App {
                     }
 
                     // ── View switching ──
-                    KeyCode::Char('4') => {
+                    KeyCode::Char('1') => {
+                        self.ui_state.active_view = ViewMode::Player;
+                    }
+                    KeyCode::Char('2') => {
                         self.ui_state.active_view = match self.ui_state.active_view {
-                            ViewMode::Visualizer => ViewMode::Player,
-                            _ => ViewMode::Visualizer,
+                            ViewMode::Library => ViewMode::Player,
+                            _ => ViewMode::Library,
                         };
                     }
                     KeyCode::Char('3') => {
                         self.ui_state.active_view = match self.ui_state.active_view {
                             ViewMode::Lyrics => ViewMode::Player,
                             _ => ViewMode::Lyrics,
+                        };
+                    }
+                    KeyCode::Char('4') => {
+                        self.ui_state.active_view = match self.ui_state.active_view {
+                            ViewMode::Visualizer => ViewMode::Player,
+                            _ => ViewMode::Visualizer,
+                        };
+                    }
+                    KeyCode::Char('5') => {
+                        self.ui_state.active_view = match self.ui_state.active_view {
+                            ViewMode::Library => ViewMode::Player, // reuse library for now
+                            _ => ViewMode::Library,
                         };
                     }
 

@@ -30,6 +30,7 @@ impl RepeatMode {
 #[allow(dead_code)]
 pub enum ViewMode {
     Player,
+    Library,
     Lyrics,
     Visualizer,
 }
@@ -115,6 +116,20 @@ pub fn render(f: &mut Frame, state: &UiState) {
             f.area(),
             &state.visualizer_data,
         );
+        return;
+    }
+    if state.active_view == ViewMode::Library {
+        // Show a simple library placeholder for now
+        let para = ratatui::widgets::Paragraph::new(
+            "Library browser — coming soon\n\nUse config/config.toml to set music_dirs",
+        )
+        .block(
+            ratatui::widgets::Block::default()
+                .borders(ratatui::widgets::Borders::ALL)
+                .title(" Library "),
+        )
+        .alignment(ratatui::layout::Alignment::Center);
+        f.render_widget(para, f.area());
         return;
     }
 
@@ -277,6 +292,7 @@ fn render_status_bar(f: &mut Frame, area: Rect, state: &UiState) {
     let view_label = match state.active_view {
         ViewMode::Player => "Player",
         ViewMode::Lyrics => "Lyrics",
+        ViewMode::Library => "Library",
         ViewMode::Visualizer => "Visualizer",
     };
 
