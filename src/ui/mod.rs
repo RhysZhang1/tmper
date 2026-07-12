@@ -31,6 +31,7 @@ impl RepeatMode {
 pub enum ViewMode {
     Player,
     Lyrics,
+    Visualizer,
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +58,7 @@ pub struct UiState {
     pub lyric_track: Option<LyricTrack>,
     pub current_lyric_index: usize,
     pub lyrics_offset_ms: i64,
+    pub visualizer_data: Vec<f32>,
     pub active_view: ViewMode,
     pub playlist_name: String,
     pub tracks: Vec<TrackDisplay>,
@@ -80,6 +82,7 @@ impl Default for UiState {
             lyric_track: None,
             current_lyric_index: 0,
             lyrics_offset_ms: 0,
+            visualizer_data: Vec::new(),
             active_view: ViewMode::Player,
             playlist_name: "Default".into(),
             tracks: Vec::new(),
@@ -103,6 +106,14 @@ pub fn render(f: &mut Frame, state: &UiState) {
             );
             return;
         }
+    }
+    if state.active_view == ViewMode::Visualizer {
+        crate::ui::widgets::visualizer_panel::render_visualizer(
+            f,
+            f.area(),
+            &state.visualizer_data,
+        );
+        return;
     }
 
     let area = f.area();
@@ -260,6 +271,7 @@ fn render_status_bar(f: &mut Frame, area: Rect, state: &UiState) {
     let view_label = match state.active_view {
         ViewMode::Player => "Player",
         ViewMode::Lyrics => "Lyrics",
+        ViewMode::Visualizer => "Visualizer",
     };
 
     let status = format!(

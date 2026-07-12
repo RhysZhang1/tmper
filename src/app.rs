@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::{Event as CrosstermEvent, EventStream, KeyCode, KeyModifiers};
@@ -18,6 +19,8 @@ use crate::input::handler::KeyHandler;
 use crate::lyrics::engine::LyricEngine;
 use crate::metadata::reader::read_metadata;
 use crate::ui::{self, RepeatMode, TrackDisplay, UiState, ViewMode};
+use crate::visualizer::fft::FftAnalyzer;
+use crate::visualizer::processor::SpectrumProcessor;
 
 pub struct App {
     ui_state: UiState,
@@ -25,6 +28,8 @@ pub struct App {
     should_quit: bool,
     search_mode: bool,
     key_handler: KeyHandler,
+    fft_running: Arc<Mutex<bool>>,
+    fft_data: Arc<Mutex<Vec<f32>>>,
 }
 
 impl App {
@@ -39,6 +44,8 @@ impl App {
             should_quit: false,
             search_mode: false,
             key_handler: KeyHandler::new(200),
+            fft_running: Arc::new(Mutex::new(false)),
+            fft_data: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -59,6 +66,7 @@ impl App {
 
         if let Some(Command::Play { file }) = cli.command {
             self.load_and_play(&file);
+            self.start_fft();
         }
 
         let mut reader = EventStream::new();
@@ -99,6 +107,8 @@ impl App {
             }
         }
 
+        // Stop FFT
+        *self.fft_running.lock().unwrap() = false;
         disable_raw_mode().ok();
         execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
 
@@ -119,6 +129,9 @@ impl App {
                 if len > 0 {
                     self.ui_state.selected_index = len.saturating_sub(1);
                 }
+            }
+            AppEvent::VisualizerData(bars) => {
+                self.ui_state.visualizer_data = bars;
             }
             AppEvent::RemoveSelected => {
                 let idx = self.ui_state.selected_index;
@@ -187,9 +200,7 @@ impl App {
                         self.move_selection(half, visible_h);
                         self.move_scroll(half);
                     }
-                    KeyCode::Char('g') | KeyCode::Char('d') => {
-                        // Handled by KeyHandler
-                    }
+                    KeyCode::Char('g') | KeyCode::Char('d') => {}
 
                     // ── Track change ──
                     KeyCode::Char('n') => {
@@ -232,6 +243,12 @@ impl App {
                     }
 
                     // ── View switching ──
+                    KeyCode::Char('4') => {
+                        self.ui_state.active_view = match self.ui_state.active_view {
+                            ViewMode::Visualizer => ViewMode::Player,
+                            _ => ViewMode::Visualizer,
+                        };
+                    }
                     KeyCode::Char('3') => {
                         self.ui_state.active_view = match self.ui_state.active_view {
                             ViewMode::Lyrics => ViewMode::Player,
@@ -240,18 +257,10 @@ impl App {
                     }
 
                     // ── Lyrics offset ──
-                    KeyCode::Char('[') => {
-                        self.ui_state.lyrics_offset_ms -= 500;
-                    }
-                    KeyCode::Char(']') => {
-                        self.ui_state.lyrics_offset_ms += 500;
-                    }
-                    KeyCode::Char('{') => {
-                        self.ui_state.lyrics_offset_ms -= 2000;
-                    }
-                    KeyCode::Char('}') => {
-                        self.ui_state.lyrics_offset_ms += 2000;
-                    }
+                    KeyCode::Char('[') => self.ui_state.lyrics_offset_ms -= 500,
+                    KeyCode::Char(']') => self.ui_state.lyrics_offset_ms += 500,
+                    KeyCode::Char('{') => self.ui_state.lyrics_offset_ms -= 2000,
+                    KeyCode::Char('}') => self.ui_state.lyrics_offset_ms += 2000,
 
                     // ── Search ──
                     KeyCode::Char('/') => {
@@ -284,7 +293,23 @@ impl App {
                     self.ui_state.duration = dur;
                 }
 
-                // Sync lyrics
+                // Read FFT data
+                if let Ok(data) = self.fft_data.lock() {
+                    if !data.is_empty() {
+                        self.ui_state.visualizer_data = data.clone();
+                    } else if !self.ui_state.is_playing {
+                        // Decay on pause
+                        let mut bars = self.ui_state.visualizer_data.clone();
+                        for v in bars.iter_mut() {
+                            *v *= 0.9;
+                            if *v < 0.01 {
+                                *v = 0.0;
+                            }
+                        }
+                        self.ui_state.visualizer_data = bars;
+                    }
+                }
+
                 self.sync_lyrics(pos);
 
                 if self.ui_state.is_playing
@@ -358,6 +383,45 @@ impl App {
 
         self.ui_state.is_playing = false;
         self.engine.stop();
+    }
+
+    fn start_fft(&mut self) {
+        *self.fft_running.lock().unwrap() = true;
+        let pcm_buf = self.engine.pcm_buffer.clone();
+        let running = self.fft_running.clone();
+        let fft_data = self.fft_data.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let fft_size = 2048;
+            let mut analyzer = FftAnalyzer::new(fft_size);
+            let mut processor = SpectrumProcessor::new(32, 0.35);
+
+            while *running.lock().unwrap() {
+                let samples: Vec<f32> = {
+                    let buf = pcm_buf.lock().unwrap();
+                    if buf.len() < fft_size {
+                        drop(buf);
+                        std::thread::sleep(Duration::from_millis(16));
+                        continue;
+                    }
+                    buf.iter().take(fft_size).copied().collect()
+                };
+
+                if samples.len() < fft_size {
+                    std::thread::sleep(Duration::from_millis(16));
+                    continue;
+                }
+
+                let magnitudes = analyzer.process(&samples);
+                let bars = processor.process(&magnitudes, 44100);
+
+                if let Ok(mut data) = fft_data.lock() {
+                    *data = bars;
+                }
+
+                std::thread::sleep(Duration::from_millis(32));
+            }
+        });
     }
 
     fn load_lyrics_for_current(&mut self) {
@@ -436,6 +500,7 @@ impl App {
                         self.ui_state.is_playing = true;
                         self.engine.set_volume(self.ui_state.volume);
                         self.load_lyrics_for_current();
+                        self.start_fft();
                         tracing::info!("Now playing: {:?}", path);
                     }
                     Err(e) => {

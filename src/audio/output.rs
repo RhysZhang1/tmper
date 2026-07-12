@@ -30,6 +30,10 @@ impl AudioOutput {
         self.sink.append(source);
     }
 
+    pub fn append_source(&self, source: rodio::buffer::SamplesBuffer<f32>) {
+        self.sink.append(source);
+    }
+
     pub fn pause(&self) {
         self.sink.pause();
     }

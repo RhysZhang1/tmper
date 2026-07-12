@@ -9,4 +9,5 @@ pub enum AppEvent {
     JumpTop,
     JumpBottom,
     RemoveSelected,
+    VisualizerData(Vec<f32>),
 }
