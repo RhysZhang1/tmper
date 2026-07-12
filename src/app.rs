@@ -284,8 +284,12 @@ impl App {
                         self.ui_state.search_query.clear();
                     }
                     KeyCode::Esc => {
-                        self.search_mode = false;
-                        self.ui_state.search_query.clear();
+                        if self.ui_state.show_help {
+                            self.ui_state.show_help = false;
+                        } else {
+                            self.search_mode = false;
+                            self.ui_state.search_query.clear();
+                        }
                     }
 
                     _ => {
