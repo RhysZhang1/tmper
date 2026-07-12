@@ -77,6 +77,7 @@ impl App {
         })?;
 
         self.load_library_paths();
+        self.load_playlists();
         if let Some(Command::Play { file }) = cli.command {
             self.load_and_play(&file);
             self.start_fft();
@@ -504,6 +505,62 @@ impl App {
             }
         });
     }
+    fn save_playlists(&self) {
+        use serde::Serialize;
+        #[derive(Serialize)]
+        struct SavePlaylist {
+            name: String,
+            songs: Vec<String>,
+        }
+        let path = crate::paths::data_dir().join("playlists.json");
+        let save: Vec<SavePlaylist> = self
+            .ui_state
+            .playlist_state
+            .playlists
+            .iter()
+            .map(|pl| SavePlaylist {
+                name: pl.name.clone(),
+                songs: pl
+                    .songs
+                    .iter()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .collect(),
+            })
+            .collect();
+        if let Ok(json) = serde_json::to_string_pretty(&save) {
+            let _ = std::fs::write(&path, json);
+        }
+    }
+
+    fn load_playlists(&mut self) {
+        use serde::Deserialize;
+        #[derive(Deserialize)]
+        struct SavePlaylist {
+            name: String,
+            songs: Vec<String>,
+        }
+        let path = crate::paths::data_dir().join("playlists.json");
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(save) = serde_json::from_str::<Vec<SavePlaylist>>(&content) {
+                for sp in save {
+                    let songs: Vec<std::path::PathBuf> = sp
+                        .songs
+                        .iter()
+                        .filter(|s| std::path::Path::new(s).exists())
+                        .map(std::path::PathBuf::from)
+                        .collect();
+                    self.ui_state.playlist_state.playlists.push(
+                        crate::ui::views::playlist_view::PlaylistData {
+                            name: sp.name,
+                            songs,
+                            expanded: false,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
     fn load_lyrics_for_current(&mut self) {
         if let Some(idx) = self.ui_state.playing_index {
             if idx < self.ui_state.tracks.len() {
@@ -685,7 +742,17 @@ impl App {
                     new_s.push(c);
                     state.insert_mode = InsertMode::Typing(new_s);
                 }
-                _ => {}
+                _ => {
+                    let mut new_s = s.clone();
+                    match &key.code {
+                        KeyCode::Char(c) => {
+                            new_s.push(*c);
+                        }
+                        KeyCode::Enter | KeyCode::Esc => {}
+                        _ => {}
+                    }
+                    state.insert_mode = InsertMode::Typing(new_s);
+                }
             }
             return;
         }
@@ -753,6 +820,7 @@ impl App {
                                 let path = state.library_paths[lib_idx].clone();
                                 if !state.playlists[ep].songs.contains(&path) {
                                     state.playlists[ep].songs.push(path);
+                                    self.save_playlists();
                                 }
                             }
                         } else {
@@ -834,6 +902,9 @@ impl App {
                 }
                 BrowserPanel::Filesystem => {
                     state.selected_fs_index = state.selected_fs_index.saturating_sub(1);
+                    if state.selected_fs_index < state.scroll_fs {
+                        state.scroll_fs = state.selected_fs_index;
+                    }
                 }
             },
             KeyCode::Enter => {
