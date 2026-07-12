@@ -368,6 +368,13 @@ impl App {
                 }
             }
             AppEvent::Tick => {
+                // ISSUE 1: Notification auto-dismiss after 1 second
+                if let Some((_, time)) = &self.ui_state.playlist_state.notification {
+                    if time.elapsed().as_secs_f64() >= 1.0 {
+                        self.ui_state.playlist_state.notification = None;
+                    }
+                }
+
                 let pos = self.engine.position_secs();
                 self.ui_state.position = pos;
 
@@ -761,13 +768,13 @@ impl App {
         state.notification = None;
 
         match key.code {
-            KeyCode::Tab | KeyCode::Char('l') => {
+            KeyCode::Tab | KeyCode::Char('l') | KeyCode::Right => {
                 state.focused = match state.focused {
                     PlaylistPanel::Library => PlaylistPanel::Playlists,
                     PlaylistPanel::Playlists => PlaylistPanel::Library,
                 };
             }
-            KeyCode::Char('h') => {
+            KeyCode::Char('h') | KeyCode::Left => {
                 state.focused = PlaylistPanel::Library;
             }
             KeyCode::Char('j') | KeyCode::Down => {
@@ -864,13 +871,13 @@ impl App {
     fn handle_file_browser_key(&mut self, key: &crossterm::event::KeyEvent) {
         let state = &mut self.ui_state.file_browser_state;
         match key.code {
-            KeyCode::Tab | KeyCode::Char('l') => {
+            KeyCode::Tab | KeyCode::Char('l') | KeyCode::Right => {
                 state.focused = match state.focused {
                     BrowserPanel::Library => BrowserPanel::Filesystem,
                     BrowserPanel::Filesystem => BrowserPanel::Library,
                 };
             }
-            KeyCode::Char('h') => state.focused = BrowserPanel::Library,
+            KeyCode::Char('h') | KeyCode::Left => state.focused = BrowserPanel::Library,
             KeyCode::Char('j') | KeyCode::Down => {
                 match state.focused {
                     BrowserPanel::Library => {
@@ -884,7 +891,7 @@ impl App {
                         }
                     }
                     BrowserPanel::Filesystem => {
-                        let max = state.fs_items.len(); // total items
+                        let max = state.fs_items.len().saturating_sub(1);
                         state.selected_fs_index = (state.selected_fs_index + 1).min(max);
                         // Auto scroll
                         let vis_h = 10u16;
@@ -930,7 +937,7 @@ impl App {
                                 self.refresh_file_browser();
                             }
                         } else {
-                            let fs_idx = state.selected_fs_index.saturating_sub(1);
+                            let fs_idx = state.selected_fs_index;
                             if fs_idx < state.fs_items.len() {
                                 match &state.fs_items[fs_idx] {
                                     FsItem::Dir(_) => {

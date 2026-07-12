@@ -95,13 +95,16 @@ fn render_library_panel(f: &mut Frame, area: Rect, state: &PlaylistManagerState)
         Style::default().fg(Color::DarkGray)
     };
 
-    let items: Vec<ListItem> = state
-        .library_paths
+    // ISSUE 4: cursor always visible
+    let vis_h = area.height.saturating_sub(2) as usize;
+    let start = state.scroll_library;
+    let end = (start + vis_h).min(state.library_paths.len());
+    let items: Vec<ListItem> = state.library_paths[start..end]
         .iter()
         .enumerate()
         .map(|(i, p)| {
             let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
-            let style = if i == state.selected_library_song && is_focused {
+            let style = if (start + i) == state.selected_library_song && is_focused {
                 Style::default()
                     .fg(Color::White)
                     .bg(Color::DarkGray)
@@ -130,75 +133,96 @@ fn render_playlists_panel(f: &mut Frame, area: Rect, state: &PlaylistManagerStat
         Style::default().fg(Color::DarkGray)
     };
 
-    let mut lines: Vec<Line> = Vec::new();
+    // Build flat line list — cursor index = state.selected_playlist for ALL rows
+    let mut lines: Vec<(String, Style)> = Vec::new();
+    let mut line_idx: usize = 0;
 
-    // First row: "..." for creating new playlist
-    let create_style = if is_focused && state.selected_playlist == 0 {
-        Style::default()
-            .fg(Color::White)
-            .bg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Yellow)
-    };
-
+    // Row 0: "..." for creating playlist
+    let is_cursor = is_focused && state.selected_playlist == line_idx;
     if matches!(state.insert_mode, InsertMode::Typing(_)) {
         let name = match &state.insert_mode {
             InsertMode::Typing(s) => format!("... {}", s),
             _ => String::new(),
         };
-        lines.push(Line::from(Span::styled(
+        lines.push((
             name,
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
-        )));
+        ));
     } else {
-        lines.push(Line::from(Span::styled("...", create_style)));
+        lines.push((
+            "...".to_string(),
+            if is_cursor {
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Yellow)
+            },
+        ));
     }
+    line_idx += 1;
 
-    // Rest: playlists
+    // Playlist rows
     for (i, pl) in state.playlists.iter().enumerate() {
-        let idx = i + 1; // offset for "..." row
-        let is_selected = is_focused && state.selected_playlist == idx;
         let is_expanded = state.expanded_playlist == Some(i);
+        let is_cursor = is_focused && state.selected_playlist == line_idx;
 
         let icon = if is_expanded { "▼" } else { "▶" };
-        let line_style = if is_selected {
-            Style::default().fg(Color::White).bg(Color::DarkGray)
+        let style = if is_cursor {
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Gray)
         };
-        lines.push(Line::from(Span::styled(
-            format!("{} {}", icon, pl.name),
-            line_style,
-        )));
+        lines.push((format!("{} {}", icon, pl.name), style));
+        line_idx += 1;
 
-        // If expanded, show songs or empty line
+        // Song rows (if expanded)
         if is_expanded {
             if pl.songs.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    "  (empty)",
-                    Style::default().fg(Color::DarkGray),
-                )));
-            } else {
-                for (si, song) in pl.songs.iter().enumerate() {
-                    let name = song.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
-                    let song_style = if is_focused && state.selected_song_in_playlist == si {
+                let is_cursor = is_focused && state.selected_playlist == line_idx;
+                lines.push((
+                    "  (empty)".to_string(),
+                    if is_cursor {
                         Style::default().fg(Color::White).bg(Color::Cyan)
                     } else {
                         Style::default().fg(Color::DarkGray)
-                    };
-                    lines.push(Line::from(Span::styled(
+                    },
+                ));
+                line_idx += 1;
+            } else {
+                for song in &pl.songs {
+                    let is_cursor = is_focused && state.selected_playlist == line_idx;
+                    let name = song.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+                    lines.push((
                         format!("    {}", name),
-                        song_style,
-                    )));
+                        if is_cursor {
+                            Style::default().fg(Color::White).bg(Color::Cyan)
+                        } else {
+                            Style::default().fg(Color::DarkGray)
+                        },
+                    ));
+                    line_idx += 1;
                 }
             }
         }
     }
 
-    let para = Paragraph::new(lines).block(
+    // Apply scroll
+    let vis_h = area.height.saturating_sub(2) as usize;
+    let scroll = state.scroll_playlists.min(lines.len().saturating_sub(1));
+    let end = (scroll + vis_h).min(lines.len());
+    let visible: Vec<Line> = lines[scroll..end]
+        .iter()
+        .map(|(t, s)| Line::from(Span::styled(t.clone(), *s)))
+        .collect();
+
+    let para = Paragraph::new(visible).block(
         Block::default()
             .borders(Borders::ALL)
             .title(" Playlists ")
