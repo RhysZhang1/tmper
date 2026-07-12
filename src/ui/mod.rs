@@ -1,8 +1,12 @@
+pub mod views;
+pub mod widgets;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, Paragraph};
 use ratatui::Frame;
+
+use crate::lyrics::types::LyricTrack;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -20,6 +24,13 @@ impl RepeatMode {
             Self::Playlist => "🔁",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum ViewMode {
+    Player,
+    Lyrics,
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +54,10 @@ pub struct UiState {
     pub repeat_mode: RepeatMode,
     pub shuffle: bool,
     pub search_query: String,
+    pub lyric_track: Option<LyricTrack>,
+    pub current_lyric_index: usize,
+    pub lyrics_offset_ms: i64,
+    pub active_view: ViewMode,
     pub playlist_name: String,
     pub tracks: Vec<TrackDisplay>,
     pub selected_index: usize,
@@ -62,6 +77,10 @@ impl Default for UiState {
             repeat_mode: RepeatMode::Off,
             shuffle: false,
             search_query: String::new(),
+            lyric_track: None,
+            current_lyric_index: 0,
+            lyrics_offset_ms: 0,
+            active_view: ViewMode::Player,
             playlist_name: "Default".into(),
             tracks: Vec::new(),
             selected_index: 0,
@@ -73,23 +92,60 @@ impl Default for UiState {
 
 #[allow(dead_code)]
 pub fn render(f: &mut Frame, state: &UiState) {
+    if state.active_view == ViewMode::Lyrics {
+        if let Some(ref track) = state.lyric_track {
+            crate::ui::views::lyrics_view::render_lyrics_view(
+                f,
+                f.area(),
+                track,
+                state.current_lyric_index,
+                state.lyrics_offset_ms,
+            );
+            return;
+        }
+    }
+
     let area = f.area();
 
-    // Split: title bar + progress bar + playlist + status bar
+    let has_lyrics = state.lyric_track.is_some();
+
+    // Layout: title + progress + [lyrics] + playlist + status
+    let mut constraints = vec![
+        Constraint::Length(1), // title bar
+        Constraint::Length(1), // progress bar
+    ];
+    if has_lyrics {
+        constraints.push(Constraint::Length(6)); // lyrics panel
+    }
+    constraints.push(Constraint::Min(3)); // playlist
+    constraints.push(Constraint::Length(1)); // status bar
+
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // title bar
-            Constraint::Length(1), // progress bar
-            Constraint::Min(3),    // playlist area
-            Constraint::Length(1), // status bar
-        ])
+        .constraints(constraints)
         .split(area);
 
-    render_title_bar(f, main_layout[0], state);
-    render_progress_bar(f, main_layout[1], state);
-    render_playlist(f, main_layout[2], state);
-    render_status_bar(f, main_layout[3], state);
+    let mut idx = 0;
+    render_title_bar(f, main_layout[idx], state);
+    idx += 1;
+    render_progress_bar(f, main_layout[idx], state);
+    idx += 1;
+
+    if has_lyrics {
+        if let Some(ref track) = state.lyric_track {
+            crate::ui::widgets::lyrics_panel::render_lyrics(
+                f,
+                main_layout[idx],
+                track,
+                state.current_lyric_index,
+            );
+        }
+        idx += 1;
+    }
+
+    render_playlist(f, main_layout[idx], state);
+    idx += 1;
+    render_status_bar(f, main_layout[idx], state);
 }
 
 fn render_title_bar(f: &mut Frame, area: Rect, state: &UiState) {
@@ -137,7 +193,6 @@ fn render_progress_bar(f: &mut Frame, area: Rect, state: &UiState) {
 }
 
 fn render_playlist(f: &mut Frame, area: Rect, state: &UiState) {
-    // Filter tracks by search query
     let filtered: Vec<(usize, &TrackDisplay)> = state
         .tracks
         .iter()
@@ -154,7 +209,6 @@ fn render_playlist(f: &mut Frame, area: Rect, state: &UiState) {
     let visible_height = area.height as usize;
     let total_tracks = filtered.len();
 
-    // Calculate visible range
     let start = state.scroll_offset;
     let end = (start + visible_height).min(total_tracks);
 
@@ -203,13 +257,19 @@ fn render_status_bar(f: &mut Frame, area: Rect, state: &UiState) {
     let shuffle = if state.shuffle { "🔀" } else { "" };
     let repeat = state.repeat_mode.icon();
 
+    let view_label = match state.active_view {
+        ViewMode::Player => "Player",
+        ViewMode::Lyrics => "Lyrics",
+    };
+
     let status = format!(
-        "Playlist: {} | {} tracks | {} | {} {}",
+        "Playlist: {} | {} tracks | {} | {} {}  [{}]",
         state.playlist_name,
         state.tracks.len(),
         dur_str,
         repeat,
         shuffle,
+        view_label,
     );
 
     let para = Paragraph::new(status).style(Style::default().fg(Color::DarkGray));

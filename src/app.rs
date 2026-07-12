@@ -15,8 +15,9 @@ use crate::cli::{Cli, Command};
 use crate::config::Config;
 use crate::event::AppEvent;
 use crate::input::handler::KeyHandler;
+use crate::lyrics::engine::LyricEngine;
 use crate::metadata::reader::read_metadata;
-use crate::ui::{self, RepeatMode, TrackDisplay, UiState};
+use crate::ui::{self, RepeatMode, TrackDisplay, UiState, ViewMode};
 
 pub struct App {
     ui_state: UiState,
@@ -122,17 +123,16 @@ impl App {
             AppEvent::RemoveSelected => {
                 let idx = self.ui_state.selected_index;
                 if idx < self.ui_state.tracks.len() {
-                    // If removing the playing track, stop it
                     if self.ui_state.playing_index == Some(idx) {
                         self.ui_state.is_playing = false;
                         self.engine.stop();
                         self.ui_state.playing_index = None;
+                        self.ui_state.lyric_track = None;
                     }
                     self.ui_state.tracks.remove(idx);
                     if self.ui_state.selected_index >= self.ui_state.tracks.len() {
                         self.ui_state.selected_index = self.ui_state.tracks.len().saturating_sub(1);
                     }
-                    // Adjust playing_index if needed
                     if let Some(pi) = self.ui_state.playing_index {
                         if pi > idx {
                             self.ui_state.playing_index = Some(pi - 1);
@@ -141,7 +141,7 @@ impl App {
                 }
             }
             AppEvent::Key(key) => {
-                let visible_h = 10u16; // approximate visible playlist lines
+                let visible_h = 10u16;
                 match key.code {
                     // ── Playback ──
                     KeyCode::Char(' ') => {
@@ -188,7 +188,7 @@ impl App {
                         self.move_scroll(half);
                     }
                     KeyCode::Char('g') | KeyCode::Char('d') => {
-                        // Handled by KeyHandler as double-key sequences
+                        // Handled by KeyHandler
                     }
 
                     // ── Track change ──
@@ -212,6 +212,9 @@ impl App {
                     }
 
                     // ── Mode ──
+                    KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.ui_state.lyrics_offset_ms = 0;
+                    }
                     KeyCode::Char('r') => {
                         self.ui_state.repeat_mode = match self.ui_state.repeat_mode {
                             RepeatMode::Off => RepeatMode::Track,
@@ -228,6 +231,28 @@ impl App {
                         self.play_selected();
                     }
 
+                    // ── View switching ──
+                    KeyCode::Char('3') => {
+                        self.ui_state.active_view = match self.ui_state.active_view {
+                            ViewMode::Lyrics => ViewMode::Player,
+                            _ => ViewMode::Lyrics,
+                        };
+                    }
+
+                    // ── Lyrics offset ──
+                    KeyCode::Char('[') => {
+                        self.ui_state.lyrics_offset_ms -= 500;
+                    }
+                    KeyCode::Char(']') => {
+                        self.ui_state.lyrics_offset_ms += 500;
+                    }
+                    KeyCode::Char('{') => {
+                        self.ui_state.lyrics_offset_ms -= 2000;
+                    }
+                    KeyCode::Char('}') => {
+                        self.ui_state.lyrics_offset_ms += 2000;
+                    }
+
                     // ── Search ──
                     KeyCode::Char('/') => {
                         self.search_mode = true;
@@ -239,7 +264,6 @@ impl App {
                     }
 
                     _ => {
-                        // Accumulate search characters
                         if self.search_mode {
                             if let KeyCode::Char(c) = key.code {
                                 if c != '/' {
@@ -260,6 +284,9 @@ impl App {
                     self.ui_state.duration = dur;
                 }
 
+                // Sync lyrics
+                self.sync_lyrics(pos);
+
                 if self.ui_state.is_playing
                     && self.ui_state.duration > 0.0
                     && pos >= self.ui_state.duration
@@ -274,12 +301,10 @@ impl App {
         if self.ui_state.tracks.is_empty() {
             return;
         }
-
         let len = self.ui_state.tracks.len() as i32;
         let new_idx = (self.ui_state.selected_index as i32 + delta).clamp(0, len - 1);
         self.ui_state.selected_index = new_idx as usize;
 
-        // Auto-scroll
         let scroll = self.ui_state.scroll_offset as i32;
         let vis = visible_h as i32;
         if new_idx < scroll {
@@ -335,6 +360,43 @@ impl App {
         self.engine.stop();
     }
 
+    fn load_lyrics_for_current(&mut self) {
+        if let Some(idx) = self.ui_state.playing_index {
+            if idx < self.ui_state.tracks.len() {
+                let path = &self.ui_state.tracks[idx].path.clone();
+                match LyricEngine::load(path) {
+                    Ok(Some(track)) => {
+                        tracing::info!("Lyrics loaded: {} lines", track.lines.len());
+                        self.ui_state.lyric_track = Some(track);
+                        self.ui_state.current_lyric_index = 0;
+                    }
+                    Ok(None) => {
+                        self.ui_state.lyric_track = None;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to load lyrics: {e}");
+                        self.ui_state.lyric_track = None;
+                    }
+                }
+            }
+        }
+    }
+
+    fn sync_lyrics(&mut self, position_secs: f64) {
+        if let Some(ref track) = self.ui_state.lyric_track {
+            if track.lines.is_empty() {
+                return;
+            }
+            let adjusted_pos = position_secs + self.ui_state.lyrics_offset_ms as f64 / 1000.0;
+            let idx = LyricEngine::sync(
+                track,
+                adjusted_pos.max(0.0),
+                self.ui_state.current_lyric_index,
+            );
+            self.ui_state.current_lyric_index = idx;
+        }
+    }
+
     fn load_and_play(&mut self, path: &PathBuf) {
         match read_metadata(path) {
             Ok(info) => {
@@ -373,6 +435,7 @@ impl App {
                         self.ui_state.duration = duration;
                         self.ui_state.is_playing = true;
                         self.engine.set_volume(self.ui_state.volume);
+                        self.load_lyrics_for_current();
                         tracing::info!("Now playing: {:?}", path);
                     }
                     Err(e) => {
