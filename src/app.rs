@@ -76,6 +76,7 @@ impl App {
             crate::error::AppError::Config(format!("Failed to create terminal: {e}"))
         })?;
 
+        self.load_library_paths();
         if let Some(Command::Play { file }) = cli.command {
             self.load_and_play(&file);
             self.start_fft();
@@ -167,19 +168,83 @@ impl App {
                 }
             }
             AppEvent::Key(key) => {
-                // Handle view-specific keys first
-                match self.ui_state.active_view {
-                    ViewMode::Playlists => {
-                        self.handle_playlist_key(&key);
-                        return;
+                // ── View switching: works in ALL views ──
+                match key.code {
+                    KeyCode::Char('1') => self.ui_state.active_view = ViewMode::Player,
+                    KeyCode::Char('2') => {
+                        self.ui_state.active_view =
+                            if self.ui_state.active_view == ViewMode::Library {
+                                ViewMode::Player
+                            } else {
+                                ViewMode::Library
+                            };
                     }
-                    ViewMode::Browser => {
-                        self.handle_file_browser_key(&key);
-                        return;
+                    KeyCode::Char('3') => {
+                        self.ui_state.active_view = if self.ui_state.active_view == ViewMode::Lyrics
+                        {
+                            ViewMode::Player
+                        } else {
+                            ViewMode::Lyrics
+                        };
                     }
-                    _ => {}
+                    KeyCode::Char('4') => {
+                        self.ui_state.active_view =
+                            if self.ui_state.active_view == ViewMode::Visualizer {
+                                ViewMode::Player
+                            } else {
+                                ViewMode::Visualizer
+                            };
+                    }
+                    KeyCode::Char('5') => {
+                        if self.ui_state.active_view != ViewMode::Playlists {
+                            self.enter_playlist_view();
+                        }
+                        self.ui_state.active_view =
+                            if self.ui_state.active_view == ViewMode::Playlists {
+                                ViewMode::Player
+                            } else {
+                                ViewMode::Playlists
+                            };
+                    }
+                    KeyCode::Char('6') => {
+                        if self.ui_state.active_view != ViewMode::Browser {
+                            self.enter_file_browser();
+                        }
+                        self.ui_state.active_view =
+                            if self.ui_state.active_view == ViewMode::Browser {
+                                ViewMode::Player
+                            } else {
+                                ViewMode::Browser
+                            };
+                    }
+                    KeyCode::Char('0') => {
+                        self.ui_state.show_help = !self.ui_state.show_help;
+                    }
+                    KeyCode::Esc => {
+                        if self.ui_state.show_help {
+                            self.ui_state.show_help = false;
+                        } else {
+                            self.search_mode = false;
+                            self.ui_state.search_query.clear();
+                        }
+                    }
+                    _ => {
+                        // View-specific interception for non-number keys
+                        match self.ui_state.active_view {
+                            ViewMode::Playlists => {
+                                self.handle_playlist_key(&key);
+                                return;
+                            }
+                            ViewMode::Browser => {
+                                self.handle_file_browser_key(&key);
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
                 }
 
+                // ── Normal keys (only when not in a view-specific mode) ──
                 let visible_h = 10u16;
                 match key.code {
                     // ── Playback ──
@@ -266,40 +331,6 @@ impl App {
                     // ── Play selected ──
                     KeyCode::Enter => {
                         self.play_selected();
-                    }
-
-                    // ── Help ──
-                    KeyCode::Char('0') => {
-                        self.ui_state.show_help = !self.ui_state.show_help;
-                    }
-
-                    // ── View switching ──
-                    KeyCode::Char('1') => {
-                        self.ui_state.active_view = ViewMode::Player;
-                    }
-                    KeyCode::Char('2') => {
-                        self.ui_state.active_view = match self.ui_state.active_view {
-                            ViewMode::Library => ViewMode::Player,
-                            _ => ViewMode::Library,
-                        };
-                    }
-                    KeyCode::Char('3') => {
-                        self.ui_state.active_view = match self.ui_state.active_view {
-                            ViewMode::Lyrics => ViewMode::Player,
-                            _ => ViewMode::Lyrics,
-                        };
-                    }
-                    KeyCode::Char('4') => {
-                        self.ui_state.active_view = match self.ui_state.active_view {
-                            ViewMode::Visualizer => ViewMode::Player,
-                            _ => ViewMode::Visualizer,
-                        };
-                    }
-                    KeyCode::Char('5') => {
-                        self.ui_state.active_view = match self.ui_state.active_view {
-                            ViewMode::Library => ViewMode::Player, // reuse library for now
-                            _ => ViewMode::Library,
-                        };
                     }
 
                     // ── Lyrics offset ──
@@ -536,6 +567,7 @@ impl App {
         }
     }
 
+    #[allow(dead_code)]
     fn enter_playlist_view(&mut self) {
         // Populate library paths from current tracks
         self.ui_state.playlist_state.library_paths = self
@@ -546,6 +578,7 @@ impl App {
             .collect();
     }
 
+    #[allow(dead_code)]
     fn enter_file_browser(&mut self) {
         let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
         self.ui_state.file_browser_state.current_dir = home;
@@ -757,10 +790,23 @@ impl App {
                     BrowserPanel::Library => {
                         let max = state.library_paths.len().saturating_sub(1);
                         state.selected_library_index = (state.selected_library_index + 1).min(max);
+                        let vis_h = 10u16;
+                        let sel = state.selected_library_index as i32;
+                        let scroll = state.scroll_library as i32;
+                        if sel >= scroll + vis_h as i32 {
+                            state.scroll_library = (sel - vis_h as i32 + 1).max(0) as usize;
+                        }
                     }
                     BrowserPanel::Filesystem => {
-                        let max = state.fs_items.len(); // +1 for ".."
+                        let max = state.fs_items.len(); // total items
                         state.selected_fs_index = (state.selected_fs_index + 1).min(max);
+                        // Auto scroll
+                        let vis_h = 10u16;
+                        let sel = state.selected_fs_index as i32;
+                        let scroll = state.scroll_fs as i32;
+                        if sel >= scroll + vis_h as i32 {
+                            state.scroll_fs = (sel - vis_h as i32 + 1).max(0) as usize;
+                        }
                     }
                 }
             }
@@ -782,6 +828,7 @@ impl App {
                             self.ui_state.tracks.retain(|t| t.path != path);
                             let new_len = state.library_paths.len();
                             state.selected_library_index = idx.min(new_len.saturating_sub(1));
+                            self.save_library_paths();
                         }
                     }
                     BrowserPanel::Filesystem => {
@@ -805,8 +852,8 @@ impl App {
                                         let path = state.audio_files[fs_idx].clone();
                                         if !state.library_paths.contains(&path) {
                                             state.library_paths.push(path.clone());
-                                            // Also add to tracks
                                             self.load_and_play_collect(&path);
+                                            self.save_library_paths();
                                         }
                                     }
                                 }
@@ -818,12 +865,43 @@ impl App {
             KeyCode::Backspace => {
                 if state.focused == BrowserPanel::Filesystem {
                     if let Some(parent) = state.current_dir.parent().map(|p| p.to_path_buf()) {
-                        state.current_dir = parent;
-                        self.refresh_file_browser();
+                        if parent.starts_with(&state.home_dir) || parent == state.home_dir {
+                            state.current_dir = parent;
+                            self.refresh_file_browser();
+                        }
                     }
                 }
             }
             _ => {}
+        }
+    }
+
+    fn save_library_paths(&self) {
+        let path = crate::paths::data_dir().join("library.json");
+        let paths: Vec<String> = self
+            .ui_state
+            .file_browser_state
+            .library_paths
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        if let Ok(json) = serde_json::to_string_pretty(&paths) {
+            let _ = std::fs::write(&path, json);
+        }
+    }
+
+    fn load_library_paths(&mut self) {
+        let path = crate::paths::data_dir().join("library.json");
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(paths) = serde_json::from_str::<Vec<String>>(&content) {
+                for p_str in paths {
+                    let pb = std::path::PathBuf::from(&p_str);
+                    if pb.exists() && !self.ui_state.file_browser_state.library_paths.contains(&pb)
+                    {
+                        self.load_and_play_collect(&pb);
+                    }
+                }
+            }
         }
     }
 

@@ -104,6 +104,12 @@ impl Default for UiState {
 
 #[allow(dead_code)]
 pub fn render(f: &mut Frame, state: &UiState) {
+    // Help overlay — highest priority, always on top
+    if state.show_help {
+        crate::ui::widgets::help_popup::render_help(f);
+        return;
+    }
+
     if state.active_view == ViewMode::Lyrics {
         if let Some(ref track) = state.lyric_track {
             crate::ui::views::lyrics_view::render_lyrics_view(
@@ -192,11 +198,6 @@ pub fn render(f: &mut Frame, state: &UiState) {
     render_playlist(f, main_layout[idx], state);
     idx += 1;
     render_status_bar(f, main_layout[idx], state);
-
-    // Help overlay always on top
-    if state.show_help {
-        crate::ui::widgets::help_popup::render_help(f);
-    }
 }
 
 fn render_title_bar(f: &mut Frame, area: Rect, state: &UiState) {

@@ -12,8 +12,12 @@ pub enum BrowserPanel {
     Filesystem,
 }
 
+#[allow(dead_code)]
 pub struct FileBrowserState {
     pub current_dir: PathBuf,
+    pub home_dir: PathBuf,
+    pub scroll_library: usize,
+    pub scroll_fs: usize,
     pub dirs: Vec<PathBuf>,
     pub audio_files: Vec<PathBuf>,
     pub selected_fs_index: usize,
@@ -31,8 +35,12 @@ pub enum FsItem {
 
 impl Default for FileBrowserState {
     fn default() -> Self {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         Self {
-            current_dir: dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
+            current_dir: home.clone(),
+            home_dir: home,
+            scroll_library: 0,
+            scroll_fs: 0,
             dirs: Vec::new(),
             audio_files: Vec::new(),
             selected_fs_index: 0,

@@ -10,6 +10,7 @@ use ratatui::Frame;
 pub struct PlaylistData {
     pub name: String,
     pub songs: Vec<PathBuf>,
+    #[allow(dead_code)]
     pub expanded: bool,
 }
 
