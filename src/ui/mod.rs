@@ -59,6 +59,7 @@ pub struct UiState {
     pub current_lyric_index: usize,
     pub lyrics_offset_ms: i64,
     pub visualizer_data: Vec<f32>,
+    pub show_help: bool,
     pub active_view: ViewMode,
     pub playlist_name: String,
     pub tracks: Vec<TrackDisplay>,
@@ -83,6 +84,7 @@ impl Default for UiState {
             current_lyric_index: 0,
             lyrics_offset_ms: 0,
             visualizer_data: Vec::new(),
+            show_help: false,
             active_view: ViewMode::Player,
             playlist_name: "Default".into(),
             tracks: Vec::new(),
@@ -157,6 +159,10 @@ pub fn render(f: &mut Frame, state: &UiState) {
     render_playlist(f, main_layout[idx], state);
     idx += 1;
     render_status_bar(f, main_layout[idx], state);
+
+    if state.show_help {
+        crate::ui::widgets::help_popup::render_help(f);
+    }
 }
 
 fn render_title_bar(f: &mut Frame, area: Rect, state: &UiState) {

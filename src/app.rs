@@ -253,6 +253,11 @@ impl App {
                         self.play_selected();
                     }
 
+                    // ── Help ──
+                    KeyCode::Char('0') => {
+                        self.ui_state.show_help = !self.ui_state.show_help;
+                    }
+
                     // ── View switching ──
                     KeyCode::Char('4') => {
                         self.ui_state.active_view = match self.ui_state.active_view {
