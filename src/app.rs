@@ -21,6 +21,7 @@ use crate::metadata::reader::read_metadata;
 use crate::ui::{self, RepeatMode, TrackDisplay, UiState, ViewMode};
 use crate::visualizer::fft::FftAnalyzer;
 use crate::visualizer::processor::SpectrumProcessor;
+use serde::{Deserialize, Serialize};
 
 pub struct App {
     ui_state: UiState,
@@ -30,6 +31,15 @@ pub struct App {
     key_handler: KeyHandler,
     fft_running: Arc<Mutex<bool>>,
     fft_data: Arc<Mutex<Vec<f32>>>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedState {
+    volume: f32,
+    repeat_mode: String,
+    shuffle: bool,
+    lyrics_offset_ms: i64,
+    last_track_path: Option<String>,
 }
 
 impl App {
@@ -108,7 +118,7 @@ impl App {
         }
 
         // Stop FFT
-        *self.fft_running.lock().unwrap() = false;
+        *self.fft_running.lock().expect("fft_running mutex poisoned") = false;
         disable_raw_mode().ok();
         execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
 
@@ -118,6 +128,7 @@ impl App {
     fn handle_event(&mut self, event: AppEvent) {
         match event {
             AppEvent::Quit => {
+                self.save_state();
                 self.should_quit = true;
             }
             AppEvent::JumpTop => {
@@ -386,7 +397,7 @@ impl App {
     }
 
     fn start_fft(&mut self) {
-        *self.fft_running.lock().unwrap() = true;
+        *self.fft_running.lock().expect("fft_running mutex poisoned") = true;
         let pcm_buf = self.engine.pcm_buffer.clone();
         let running = self.fft_running.clone();
         let fft_data = self.fft_data.clone();
@@ -423,7 +434,6 @@ impl App {
             }
         });
     }
-
     fn load_lyrics_for_current(&mut self) {
         if let Some(idx) = self.ui_state.playing_index {
             if idx < self.ui_state.tracks.len() {
@@ -458,6 +468,35 @@ impl App {
                 self.ui_state.current_lyric_index,
             );
             self.ui_state.current_lyric_index = idx;
+        }
+    }
+
+    fn save_state(&self) {
+        let state_path = dirs::data_local_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("termusic")
+            .join("state.json");
+
+        if let Some(parent) = state_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        let saved = SavedState {
+            volume: self.ui_state.volume,
+            repeat_mode: format!("{:?}", self.ui_state.repeat_mode),
+            shuffle: self.ui_state.shuffle,
+            lyrics_offset_ms: self.ui_state.lyrics_offset_ms,
+            last_track_path: self
+                .ui_state
+                .playing_index
+                .and_then(|i| self.ui_state.tracks.get(i))
+                .map(|t| t.path.to_string_lossy().to_string()),
+        };
+
+        if let Ok(json) = serde_json::to_string_pretty(&saved) {
+            if let Err(e) = std::fs::write(&state_path, json) {
+                tracing::warn!("Failed to save state: {e}");
+            }
         }
     }
 
