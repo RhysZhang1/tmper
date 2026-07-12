@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crossterm::event::{Event as CrosstermEvent, EventStream, KeyCode};
+use crossterm::event::{Event as CrosstermEvent, EventStream, KeyCode, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -14,13 +14,16 @@ use crate::audio::engine::AudioEngine;
 use crate::cli::{Cli, Command};
 use crate::config::Config;
 use crate::event::AppEvent;
-use crate::input::handler::handle_key;
-use crate::ui::{self, UiState};
+use crate::input::handler::KeyHandler;
+use crate::metadata::reader::read_metadata;
+use crate::ui::{self, RepeatMode, TrackDisplay, UiState};
 
 pub struct App {
     ui_state: UiState,
     engine: AudioEngine,
     should_quit: bool,
+    search_mode: bool,
+    key_handler: KeyHandler,
 }
 
 impl App {
@@ -28,16 +31,17 @@ impl App {
         let engine = AudioEngine::new()?;
         Ok(Self {
             ui_state: UiState {
-                volume: config.default_volume,
+                volume: config.playback.default_volume,
                 ..Default::default()
             },
             engine,
             should_quit: false,
+            search_mode: false,
+            key_handler: KeyHandler::new(200),
         })
     }
 
     pub async fn run(&mut self, cli: Cli) -> crate::error::AppResult<()> {
-        // Set up terminal
         enable_raw_mode().map_err(|e| {
             crate::error::AppError::Config(format!("Failed to enable raw mode: {e}"))
         })?;
@@ -52,12 +56,10 @@ impl App {
             crate::error::AppError::Config(format!("Failed to create terminal: {e}"))
         })?;
 
-        // Handle CLI command (play a file)
         if let Some(Command::Play { file }) = cli.command {
-            self.play_file(&file);
+            self.load_and_play(&file);
         }
 
-        // Event loop
         let mut reader = EventStream::new();
         let mut tick_interval = tokio::time::interval(Duration::from_millis(100));
 
@@ -68,23 +70,18 @@ impl App {
                         Some(Ok(event)) => {
                             match event {
                                 CrosstermEvent::Key(key) => {
-                                    if let Some(app_event) = handle_key(key) {
+                                    if let Some(app_event) = self.key_handler.process(key) {
                                         self.handle_event(app_event);
                                     }
                                 }
-                                CrosstermEvent::Resize(_, _) => {
-                                    // Terminal resize — ratatui handles layout on next draw
-                                }
+                                CrosstermEvent::Resize(_, _) => {}
                                 _ => {}
                             }
                         }
                         Some(Err(e)) => {
                             tracing::error!("Crossterm event error: {e}");
                         }
-                        None => {
-                            // Event stream ended
-                            break;
-                        }
+                        None => break,
                     }
                 }
                 _ = tick_interval.tick() => {
@@ -96,13 +93,11 @@ impl App {
                 break;
             }
 
-            // Render
             if let Err(e) = terminal.draw(|f| ui::render(f, &self.ui_state)) {
                 tracing::error!("Render error: {e}");
             }
         }
 
-        // Restore terminal
         disable_raw_mode().ok();
         execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
 
@@ -114,30 +109,150 @@ impl App {
             AppEvent::Quit => {
                 self.should_quit = true;
             }
-            AppEvent::Key(key) => match key.code {
-                KeyCode::Char(' ') => {
-                    if self.engine.is_playing() || self.ui_state.is_playing {
-                        self.engine.pause();
+            AppEvent::JumpTop => {
+                self.ui_state.selected_index = 0;
+                self.ui_state.scroll_offset = 0;
+            }
+            AppEvent::JumpBottom => {
+                let len = self.ui_state.tracks.len();
+                if len > 0 {
+                    self.ui_state.selected_index = len.saturating_sub(1);
+                }
+            }
+            AppEvent::RemoveSelected => {
+                let idx = self.ui_state.selected_index;
+                if idx < self.ui_state.tracks.len() {
+                    // If removing the playing track, stop it
+                    if self.ui_state.playing_index == Some(idx) {
                         self.ui_state.is_playing = false;
-                    } else {
-                        self.engine.resume();
-                        self.ui_state.is_playing = true;
+                        self.engine.stop();
+                        self.ui_state.playing_index = None;
+                    }
+                    self.ui_state.tracks.remove(idx);
+                    if self.ui_state.selected_index >= self.ui_state.tracks.len() {
+                        self.ui_state.selected_index = self.ui_state.tracks.len().saturating_sub(1);
+                    }
+                    // Adjust playing_index if needed
+                    if let Some(pi) = self.ui_state.playing_index {
+                        if pi > idx {
+                            self.ui_state.playing_index = Some(pi - 1);
+                        }
                     }
                 }
-                KeyCode::Char('-') => {
-                    let new_vol = (self.ui_state.volume - 0.05).max(0.0);
-                    self.ui_state.volume = new_vol;
-                    self.engine.set_volume(new_vol);
+            }
+            AppEvent::Key(key) => {
+                let visible_h = 10u16; // approximate visible playlist lines
+                match key.code {
+                    // ── Playback ──
+                    KeyCode::Char(' ') => {
+                        if self.engine.is_playing() || self.ui_state.is_playing {
+                            self.engine.pause();
+                            self.ui_state.is_playing = false;
+                        } else {
+                            self.engine.resume();
+                            self.ui_state.is_playing = true;
+                        }
+                    }
+                    KeyCode::Char('-') => {
+                        let new_vol = (self.ui_state.volume - 0.05).max(0.0);
+                        self.ui_state.volume = new_vol;
+                        self.engine.set_volume(new_vol);
+                    }
+                    KeyCode::Char('=') => {
+                        let new_vol = (self.ui_state.volume + 0.05).min(1.0);
+                        self.ui_state.volume = new_vol;
+                        self.engine.set_volume(new_vol);
+                    }
+
+                    // ── Navigation ──
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        self.move_selection(1, visible_h);
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        self.move_selection(-1, visible_h);
+                    }
+                    KeyCode::Char('G') => {
+                        let len = self.ui_state.tracks.len();
+                        if len > 0 {
+                            self.ui_state.selected_index = len.saturating_sub(1);
+                        }
+                    }
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        let half = (visible_h / 2).max(1) as i32;
+                        self.move_selection(-half, visible_h);
+                        self.move_scroll(-half);
+                    }
+                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        let half = (visible_h / 2).max(1) as i32;
+                        self.move_selection(half, visible_h);
+                        self.move_scroll(half);
+                    }
+                    KeyCode::Char('g') | KeyCode::Char('d') => {
+                        // Handled by KeyHandler as double-key sequences
+                    }
+
+                    // ── Track change ──
+                    KeyCode::Char('n') => {
+                        if let Some(idx) = self.ui_state.playing_index {
+                            if idx + 1 < self.ui_state.tracks.len() {
+                                self.ui_state.selected_index = idx + 1;
+                                let path = self.ui_state.tracks[idx + 1].path.clone();
+                                self.load_and_play(&path);
+                            }
+                        }
+                    }
+                    KeyCode::Char('p') => {
+                        if let Some(idx) = self.ui_state.playing_index {
+                            if idx > 0 {
+                                self.ui_state.selected_index = idx - 1;
+                                let path = self.ui_state.tracks[idx - 1].path.clone();
+                                self.load_and_play(&path);
+                            }
+                        }
+                    }
+
+                    // ── Mode ──
+                    KeyCode::Char('r') => {
+                        self.ui_state.repeat_mode = match self.ui_state.repeat_mode {
+                            RepeatMode::Off => RepeatMode::Track,
+                            RepeatMode::Track => RepeatMode::Playlist,
+                            RepeatMode::Playlist => RepeatMode::Off,
+                        };
+                    }
+                    KeyCode::Char('R') => {
+                        self.ui_state.shuffle = !self.ui_state.shuffle;
+                    }
+
+                    // ── Play selected ──
+                    KeyCode::Enter => {
+                        self.play_selected();
+                    }
+
+                    // ── Search ──
+                    KeyCode::Char('/') => {
+                        self.search_mode = true;
+                        self.ui_state.search_query.clear();
+                    }
+                    KeyCode::Esc => {
+                        self.search_mode = false;
+                        self.ui_state.search_query.clear();
+                    }
+
+                    _ => {
+                        // Accumulate search characters
+                        if self.search_mode {
+                            if let KeyCode::Char(c) = key.code {
+                                if c != '/' {
+                                    self.ui_state.search_query.push(c);
+                                }
+                            } else if key.code == KeyCode::Backspace {
+                                self.ui_state.search_query.pop();
+                            }
+                        }
+                    }
                 }
-                KeyCode::Char('=') => {
-                    let new_vol = (self.ui_state.volume + 0.05).min(1.0);
-                    self.ui_state.volume = new_vol;
-                    self.engine.set_volume(new_vol);
-                }
-                _ => {}
-            },
+            }
             AppEvent::Tick => {
-                // Update position from engine
                 let pos = self.engine.position_secs();
                 self.ui_state.position = pos;
 
@@ -145,41 +260,130 @@ impl App {
                     self.ui_state.duration = dur;
                 }
 
-                // Check if track ended
                 if self.ui_state.is_playing
                     && self.ui_state.duration > 0.0
                     && pos >= self.ui_state.duration
                 {
-                    self.ui_state.is_playing = false;
-                    self.engine.stop();
+                    self.on_track_ended();
                 }
             }
         }
     }
 
-    fn play_file(&mut self, path: &PathBuf) {
-        match self.engine.play_file(path) {
-            Ok(()) => {
-                // Extract title from filename
-                let title = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("Unknown")
-                    .to_string();
+    fn move_selection(&mut self, delta: i32, visible_h: u16) {
+        if self.ui_state.tracks.is_empty() {
+            return;
+        }
 
-                self.ui_state.title = title;
-                self.ui_state.artist = "—".to_string();
-                self.ui_state.position = 0.0;
-                self.ui_state.duration = self.engine.duration_secs().unwrap_or(0.0);
-                self.ui_state.is_playing = true;
-                self.engine.set_volume(self.ui_state.volume);
+        let len = self.ui_state.tracks.len() as i32;
+        let new_idx = (self.ui_state.selected_index as i32 + delta).clamp(0, len - 1);
+        self.ui_state.selected_index = new_idx as usize;
 
-                tracing::info!("Now playing: {:?}", path);
+        // Auto-scroll
+        let scroll = self.ui_state.scroll_offset as i32;
+        let vis = visible_h as i32;
+        if new_idx < scroll {
+            self.ui_state.scroll_offset = new_idx.max(0) as usize;
+        } else if new_idx >= scroll + vis {
+            self.ui_state.scroll_offset = (new_idx - vis + 1).max(0) as usize;
+        }
+    }
+
+    fn move_scroll(&mut self, delta: i32) {
+        let new_scroll = (self.ui_state.scroll_offset as i32 + delta).max(0);
+        self.ui_state.scroll_offset = new_scroll as usize;
+    }
+
+    fn play_selected(&mut self) {
+        if self.ui_state.selected_index < self.ui_state.tracks.len() {
+            let path = self.ui_state.tracks[self.ui_state.selected_index]
+                .path
+                .clone();
+            self.load_and_play(&path);
+        }
+    }
+
+    fn on_track_ended(&mut self) {
+        if let Some(idx) = self.ui_state.playing_index {
+            match self.ui_state.repeat_mode {
+                RepeatMode::Track => {
+                    if idx < self.ui_state.tracks.len() {
+                        let path = self.ui_state.tracks[idx].path.clone();
+                        self.load_and_play(&path);
+                        return;
+                    }
+                }
+                RepeatMode::Playlist => {
+                    let next = (idx + 1) % self.ui_state.tracks.len();
+                    self.ui_state.selected_index = next;
+                    let path = self.ui_state.tracks[next].path.clone();
+                    self.load_and_play(&path);
+                    return;
+                }
+                RepeatMode::Off => {
+                    if idx + 1 < self.ui_state.tracks.len() {
+                        self.ui_state.selected_index = idx + 1;
+                        let path = self.ui_state.tracks[idx + 1].path.clone();
+                        self.load_and_play(&path);
+                        return;
+                    }
+                }
+            }
+        }
+
+        self.ui_state.is_playing = false;
+        self.engine.stop();
+    }
+
+    fn load_and_play(&mut self, path: &PathBuf) {
+        match read_metadata(path) {
+            Ok(info) => {
+                let title = info.title.clone();
+                let artist = info
+                    .artist
+                    .clone()
+                    .unwrap_or_else(|| "Unknown Artist".into());
+                let duration = info.duration.as_secs_f64();
+
+                if !self.ui_state.tracks.iter().any(|t| t.path == info.path) {
+                    self.ui_state.tracks.push(TrackDisplay {
+                        path: info.path.clone(),
+                        title: title.clone(),
+                        artist: artist.clone(),
+                        duration_secs: duration,
+                        is_playing: false,
+                    });
+                }
+
+                if let Some(idx) = self
+                    .ui_state
+                    .tracks
+                    .iter()
+                    .position(|t| t.path == info.path)
+                {
+                    self.ui_state.playing_index = Some(idx);
+                    self.ui_state.selected_index = idx;
+                }
+
+                match self.engine.play_file(path) {
+                    Ok(()) => {
+                        self.ui_state.title = title;
+                        self.ui_state.artist = artist;
+                        self.ui_state.position = 0.0;
+                        self.ui_state.duration = duration;
+                        self.ui_state.is_playing = true;
+                        self.engine.set_volume(self.ui_state.volume);
+                        tracing::info!("Now playing: {:?}", path);
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to play file: {e}");
+                        self.ui_state.title = format!("Error: {e}");
+                        self.ui_state.is_playing = false;
+                    }
+                }
             }
             Err(e) => {
-                tracing::error!("Failed to play file: {e}");
-                self.ui_state.title = format!("Error: {e}");
-                self.ui_state.is_playing = false;
+                tracing::error!("Failed to read metadata: {e}");
             }
         }
     }

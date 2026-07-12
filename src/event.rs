@@ -6,4 +6,7 @@ pub enum AppEvent {
     Key(KeyEvent),
     Tick,
     Quit,
+    JumpTop,
+    JumpBottom,
+    RemoveSelected,
 }
