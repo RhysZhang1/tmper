@@ -477,10 +477,7 @@ impl App {
     }
 
     fn save_state(&self) {
-        let state_path = dirs::data_local_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("termusic")
-            .join("state.json");
+        let state_path = crate::paths::data_dir().join("state.json");
 
         if let Some(parent) = state_path.parent() {
             let _ = std::fs::create_dir_all(parent);

@@ -18,7 +18,7 @@ impl LyricEngine {
 
         // 2. Check for embedded lyrics (handled later via lofty in load())
         // 3. Check unified lyrics directory
-        if let Some(lyrics_dir) = dirs::audio_dir() {
+        if let Some(lyrics_dir) = Some(crate::paths::data_dir()) {
             let name = audio_path.file_stem()?;
             let mut lrc_in_dir = lyrics_dir.join("Lyrics");
             lrc_in_dir.push(name);

@@ -75,10 +75,7 @@ impl Default for KeyBindings {
 #[allow(dead_code)]
 impl KeyBindings {
     pub fn load() -> Self {
-        let path = dirs::config_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("termusic")
-            .join("keybindings.toml");
+        let path = crate::paths::config_dir().join("keybindings.toml");
         if path.exists() {
             if let Ok(content) = std::fs::read_to_string(&path) {
                 if let Ok(bindings) = toml::from_str(&content) {
