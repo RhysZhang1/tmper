@@ -33,6 +33,8 @@ pub enum ViewMode {
     Library,
     Lyrics,
     Visualizer,
+    Playlists,
+    Browser,
 }
 
 #[derive(Debug, Clone)]
@@ -62,6 +64,8 @@ pub struct UiState {
     pub visualizer_data: Vec<f32>,
     pub show_help: bool,
     pub active_view: ViewMode,
+    pub playlist_state: crate::ui::views::playlist_view::PlaylistManagerState,
+    pub file_browser_state: crate::ui::views::file_browser_view::FileBrowserState,
     pub playlist_name: String,
     pub tracks: Vec<TrackDisplay>,
     pub selected_index: usize,
@@ -87,6 +91,8 @@ impl Default for UiState {
             visualizer_data: Vec::new(),
             show_help: false,
             active_view: ViewMode::Player,
+            playlist_state: crate::ui::views::playlist_view::PlaylistManagerState::default(),
+            file_browser_state: crate::ui::views::file_browser_view::FileBrowserState::default(),
             playlist_name: "Default".into(),
             tracks: Vec::new(),
             selected_index: 0,
@@ -115,6 +121,18 @@ pub fn render(f: &mut Frame, state: &UiState) {
             f,
             f.area(),
             &state.visualizer_data,
+        );
+        return;
+    }
+    if state.active_view == ViewMode::Playlists {
+        crate::ui::views::playlist_view::render_playlist_view(f, f.area(), &state.playlist_state);
+        return;
+    }
+    if state.active_view == ViewMode::Browser {
+        crate::ui::views::file_browser_view::render_file_browser(
+            f,
+            f.area(),
+            &state.file_browser_state,
         );
         return;
     }
@@ -175,6 +193,7 @@ pub fn render(f: &mut Frame, state: &UiState) {
     idx += 1;
     render_status_bar(f, main_layout[idx], state);
 
+    // Help overlay always on top
     if state.show_help {
         crate::ui::widgets::help_popup::render_help(f);
     }
@@ -294,6 +313,8 @@ fn render_status_bar(f: &mut Frame, area: Rect, state: &UiState) {
         ViewMode::Lyrics => "Lyrics",
         ViewMode::Library => "Library",
         ViewMode::Visualizer => "Visualizer",
+        ViewMode::Playlists => "Playlists",
+        ViewMode::Browser => "Browser",
     };
 
     let status = format!(

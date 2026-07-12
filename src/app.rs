@@ -18,6 +18,8 @@ use crate::event::AppEvent;
 use crate::input::handler::KeyHandler;
 use crate::lyrics::engine::LyricEngine;
 use crate::metadata::reader::read_metadata;
+use crate::ui::views::file_browser_view::{BrowserPanel, FsItem};
+use crate::ui::views::playlist_view::{InsertMode, PlaylistPanel};
 use crate::ui::{self, RepeatMode, TrackDisplay, UiState, ViewMode};
 use crate::visualizer::fft::FftAnalyzer;
 use crate::visualizer::processor::SpectrumProcessor;
@@ -165,6 +167,19 @@ impl App {
                 }
             }
             AppEvent::Key(key) => {
+                // Handle view-specific keys first
+                match self.ui_state.active_view {
+                    ViewMode::Playlists => {
+                        self.handle_playlist_key(&key);
+                        return;
+                    }
+                    ViewMode::Browser => {
+                        self.handle_file_browser_key(&key);
+                        return;
+                    }
+                    _ => {}
+                }
+
                 let visible_h = 10u16;
                 match key.code {
                     // ── Playback ──
@@ -517,6 +532,317 @@ impl App {
         if let Ok(json) = serde_json::to_string_pretty(&saved) {
             if let Err(e) = std::fs::write(&state_path, json) {
                 tracing::warn!("Failed to save state: {e}");
+            }
+        }
+    }
+
+    fn enter_playlist_view(&mut self) {
+        // Populate library paths from current tracks
+        self.ui_state.playlist_state.library_paths = self
+            .ui_state
+            .tracks
+            .iter()
+            .map(|t| t.path.clone())
+            .collect();
+    }
+
+    fn enter_file_browser(&mut self) {
+        let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
+        self.ui_state.file_browser_state.current_dir = home;
+        self.refresh_file_browser();
+        self.ui_state.file_browser_state.library_paths = self
+            .ui_state
+            .tracks
+            .iter()
+            .map(|t| t.path.clone())
+            .collect();
+    }
+
+    fn refresh_file_browser(&mut self) {
+        let dir = self.ui_state.file_browser_state.current_dir.clone();
+        let mut dirs = Vec::new();
+        let mut audios = Vec::new();
+        let mut items = Vec::new();
+
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let mut all: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+            all.sort_by_key(|e| e.file_name());
+            for entry in all {
+                let path = entry.path();
+                if path.is_dir() {
+                    let name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("?")
+                        .to_string();
+                    dirs.push(path.clone());
+                    items.push(FsItem::Dir(name));
+                } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    let ext_lower = ext.to_lowercase();
+                    if [
+                        "mp3", "flac", "ogg", "opus", "wav", "aac", "m4a", "ape", "wv", "aiff",
+                        "wma",
+                    ]
+                    .contains(&ext_lower.as_str())
+                    {
+                        let name = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("?")
+                            .to_string();
+                        audios.push(path.clone());
+                        items.push(FsItem::Audio(name));
+                    }
+                }
+            }
+        }
+        self.ui_state.file_browser_state.dirs = dirs;
+        self.ui_state.file_browser_state.audio_files = audios;
+        self.ui_state.file_browser_state.fs_items = items;
+        self.ui_state.file_browser_state.selected_fs_index = 0;
+    }
+
+    fn handle_playlist_key(&mut self, key: &crossterm::event::KeyEvent) {
+        let state = &mut self.ui_state.playlist_state;
+
+        // Handle insert mode
+        if let InsertMode::Typing(ref s) = state.insert_mode {
+            match key.code {
+                KeyCode::Enter => {
+                    let name = s.clone();
+                    if !name.is_empty() {
+                        state
+                            .playlists
+                            .push(crate::ui::views::playlist_view::PlaylistData {
+                                name,
+                                songs: Vec::new(),
+                                expanded: false,
+                            });
+                    }
+                    state.insert_mode = InsertMode::Off;
+                }
+                KeyCode::Esc => {
+                    state.insert_mode = InsertMode::Off;
+                }
+                KeyCode::Backspace => {
+                    let mut new_s = s.clone();
+                    new_s.pop();
+                    state.insert_mode = InsertMode::Typing(new_s);
+                }
+                KeyCode::Char(c) => {
+                    let mut new_s = s.clone();
+                    new_s.push(c);
+                    state.insert_mode = InsertMode::Typing(new_s);
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // Dismiss notification
+        state.notification = None;
+
+        match key.code {
+            KeyCode::Tab | KeyCode::Char('l') => {
+                state.focused = match state.focused {
+                    PlaylistPanel::Library => PlaylistPanel::Playlists,
+                    PlaylistPanel::Playlists => PlaylistPanel::Library,
+                };
+            }
+            KeyCode::Char('h') => {
+                state.focused = PlaylistPanel::Library;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                match state.focused {
+                    PlaylistPanel::Library => {
+                        let max = state.library_paths.len().saturating_sub(1);
+                        state.selected_library_song = (state.selected_library_song + 1).min(max);
+                    }
+                    PlaylistPanel::Playlists => {
+                        let max = state.playlists.len(); // 0 for "..."
+                        let sel = state.selected_playlist;
+                        // Check if we're inside an expanded playlist's songs
+                        if let Some(ep) = state.expanded_playlist {
+                            if sel > ep + 1 && sel <= ep + 1 + state.playlists[ep].songs.len() {
+                                let song_max = state.playlists[ep].songs.len().saturating_sub(1);
+                                state.selected_song_in_playlist =
+                                    (state.selected_song_in_playlist + 1).min(song_max);
+                                return;
+                            }
+                        }
+                        state.selected_playlist = (sel + 1).min(max);
+                        state.selected_song_in_playlist = 0;
+                    }
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => match state.focused {
+                PlaylistPanel::Library => {
+                    state.selected_library_song = state.selected_library_song.saturating_sub(1);
+                }
+                PlaylistPanel::Playlists => {
+                    if let Some(ep) = state.expanded_playlist {
+                        let sel = state.selected_playlist;
+                        if sel > ep + 1 && sel <= ep + 1 + state.playlists[ep].songs.len() {
+                            state.selected_song_in_playlist =
+                                state.selected_song_in_playlist.saturating_sub(1);
+                            return;
+                        }
+                    }
+                    state.selected_playlist = state.selected_playlist.saturating_sub(1);
+                    state.selected_song_in_playlist = 0;
+                }
+            },
+            KeyCode::Enter => {
+                match state.focused {
+                    PlaylistPanel::Library => {
+                        // Add song to expanded playlist
+                        if let Some(ep) = state.expanded_playlist {
+                            let lib_idx = state.selected_library_song;
+                            if lib_idx < state.library_paths.len() {
+                                let path = state.library_paths[lib_idx].clone();
+                                if !state.playlists[ep].songs.contains(&path) {
+                                    state.playlists[ep].songs.push(path);
+                                }
+                            }
+                        } else {
+                            state.notification =
+                                Some(("请先展开一个歌单".to_string(), std::time::Instant::now()));
+                        }
+                    }
+                    PlaylistPanel::Playlists => {
+                        if state.selected_playlist == 0 {
+                            // "..." — create new playlist
+                            state.insert_mode = InsertMode::Typing(String::new());
+                        } else {
+                            let pl_idx = state.selected_playlist.saturating_sub(1);
+                            if pl_idx < state.playlists.len() {
+                                // Check if selecting a song inside expanded playlist
+                                if let Some(ep) = state.expanded_playlist {
+                                    if ep == pl_idx && state.selected_playlist > ep + 1 {
+                                        let song_idx = state.selected_song_in_playlist;
+                                        if song_idx < state.playlists[ep].songs.len() {
+                                            state.playlists[ep].songs.remove(song_idx);
+                                            return;
+                                        }
+                                    }
+                                }
+                                // Toggle expand/collapse
+                                if state.expanded_playlist == Some(pl_idx) {
+                                    state.expanded_playlist = None;
+                                } else {
+                                    state.expanded_playlist = Some(pl_idx);
+                                }
+                                state.selected_song_in_playlist = 0;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_file_browser_key(&mut self, key: &crossterm::event::KeyEvent) {
+        let state = &mut self.ui_state.file_browser_state;
+        match key.code {
+            KeyCode::Tab | KeyCode::Char('l') => {
+                state.focused = match state.focused {
+                    BrowserPanel::Library => BrowserPanel::Filesystem,
+                    BrowserPanel::Filesystem => BrowserPanel::Library,
+                };
+            }
+            KeyCode::Char('h') => state.focused = BrowserPanel::Library,
+            KeyCode::Char('j') | KeyCode::Down => {
+                match state.focused {
+                    BrowserPanel::Library => {
+                        let max = state.library_paths.len().saturating_sub(1);
+                        state.selected_library_index = (state.selected_library_index + 1).min(max);
+                    }
+                    BrowserPanel::Filesystem => {
+                        let max = state.fs_items.len(); // +1 for ".."
+                        state.selected_fs_index = (state.selected_fs_index + 1).min(max);
+                    }
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => match state.focused {
+                BrowserPanel::Library => {
+                    state.selected_library_index = state.selected_library_index.saturating_sub(1);
+                }
+                BrowserPanel::Filesystem => {
+                    state.selected_fs_index = state.selected_fs_index.saturating_sub(1);
+                }
+            },
+            KeyCode::Enter => {
+                match state.focused {
+                    BrowserPanel::Library => {
+                        let idx = state.selected_library_index;
+                        let lib_len = state.library_paths.len();
+                        if idx < lib_len {
+                            let path = state.library_paths.remove(idx);
+                            self.ui_state.tracks.retain(|t| t.path != path);
+                            let new_len = state.library_paths.len();
+                            state.selected_library_index = idx.min(new_len.saturating_sub(1));
+                        }
+                    }
+                    BrowserPanel::Filesystem => {
+                        if state.selected_fs_index == 0 {
+                            // ".." — go up
+                            if let Some(parent) =
+                                state.current_dir.parent().map(|p| p.to_path_buf())
+                            {
+                                state.current_dir = parent;
+                                self.refresh_file_browser();
+                            }
+                        } else {
+                            let fs_idx = state.selected_fs_index.saturating_sub(1);
+                            if fs_idx < state.fs_items.len() {
+                                match &state.fs_items[fs_idx] {
+                                    FsItem::Dir(_) => {
+                                        state.current_dir = state.dirs[fs_idx].clone();
+                                        self.refresh_file_browser();
+                                    }
+                                    FsItem::Audio(_) => {
+                                        let path = state.audio_files[fs_idx].clone();
+                                        if !state.library_paths.contains(&path) {
+                                            state.library_paths.push(path.clone());
+                                            // Also add to tracks
+                                            self.load_and_play_collect(&path);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                if state.focused == BrowserPanel::Filesystem {
+                    if let Some(parent) = state.current_dir.parent().map(|p| p.to_path_buf()) {
+                        state.current_dir = parent;
+                        self.refresh_file_browser();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn load_and_play_collect(&mut self, path: &std::path::PathBuf) {
+        if let Ok(info) = read_metadata(path) {
+            let title = info.title.clone();
+            let artist = info
+                .artist
+                .clone()
+                .unwrap_or_else(|| "Unknown Artist".into());
+            let duration = info.duration.as_secs_f64();
+            if !self.ui_state.tracks.iter().any(|t| t.path == info.path) {
+                self.ui_state.tracks.push(TrackDisplay {
+                    path: info.path.clone(),
+                    title,
+                    artist,
+                    duration_secs: duration,
+                    is_playing: false,
+                });
             }
         }
     }
