@@ -1,0 +1,35 @@
+[library]
+music_dirs = ["~/Music"]
+extensions = ["mp3", "flac", "ogg", "opus", "wav", "aac", "m4a", "ape", "wv", "aiff", "wma"]
+scan_on_startup = false
+follow_symlinks = true
+
+[playback]
+default_volume = 0.8
+gapless = true
+crossfade_seconds = 2
+resume_on_startup = true
+seek_step_small_secs = 5
+seek_step_large_secs = 30
+
+[visualizer]
+enabled = true
+num_bars = 32
+frame_rate = 30
+smoothing = 0.35
+char_set = "blocks"
+color_scheme = "gradient"
+show_on_idle = true
+
+[lyrics]
+auto_load = true
+encoding_fallbacks = ["utf-8", "gbk", "shift-jis"]
+display_lines_before = 4
+lrc_search_embedded = true
+
+[ui]
+theme = "tokyo-night"
+show_progress_bar = true
+show_cover_art = true
+cover_art_max_width = 25
+default_view = "player"
