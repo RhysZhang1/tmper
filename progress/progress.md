@@ -19,21 +19,17 @@
 
 **总进度：11 / 35 Sessions (31%)**
 
+---
+
 ## 详细记录
 
-| Session | 文件 | 状态 |
-|---------|------|------|
-| [S0.1](s0.1-scaffold.md) | 项目脚手架 | ✅ |
-| [S1.1](s1.1-decoder.md) | Symphonia 解码器 | ✅ |
-| [S1.2](s1.2-output.md) | Rodio 音频输出 | ✅ |
-| [S1.3](s1.3-engine.md) | AudioEngine | ✅ |
-| [S1.4](s1.4-tui-mvp.md) | TUI + 事件循环 | ✅ |
-| [S2.1](s2.1-metadata-reader.md) | 元数据读取 | ✅ |
-| [S2.2](s2.2-playlist.md) | 播放列表结构 | ✅ |
-| [S2.3](s2.3-scanner.md) | 目录扫描器 | ✅ |
-| [S2.4](s2.4-player-view.md) | Player View UI | ✅ |
-| [S2.5](s2.5-vim-keys.md) | Vim 键盘导航 | ✅ |
-| [S2.6](s2.6-search-config-modes.md) | 搜索 + 配置 + 模式 | ✅ |
+| 文件 | Phase | 日期 |
+|------|-------|------|
+| [phase0-2026-07-12.md](phase0-2026-07-12.md) | P0 项目脚手架 | 2026-07-12 |
+| [phase1-2026-07-12.md](phase1-2026-07-12.md) | P1 核心播放 MVP | 2026-07-12 |
+| [phase2-2026-07-12.md](phase2-2026-07-12.md) | P2 播放列表 + 元数据 | 2026-07-12 |
+
+---
 
 ## 当前项目状态
 
