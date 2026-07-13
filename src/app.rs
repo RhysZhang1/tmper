@@ -879,6 +879,8 @@ impl App {
                                     } else {
                                         state.expanded_playlist = Some(i);
                                     }
+                                    // Move cursor to this playlist's line
+                                    state.selected_playlist = line;
                                     found = true;
                                     break;
                                 }
@@ -958,6 +960,9 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => match state.focused {
                 BrowserPanel::Library => {
                     state.selected_library_index = state.selected_library_index.saturating_sub(1);
+                    if state.selected_library_index < state.scroll_library {
+                        state.scroll_library = state.selected_library_index;
+                    }
                 }
                 BrowserPanel::Filesystem => {
                     state.selected_fs_index = state.selected_fs_index.saturating_sub(1);
