@@ -411,6 +411,9 @@ impl App {
         {
             self.on_track_ended();
         }
+
+        // Sync config flag to UI state (user may have toggled in settings)
+        self.ui_state.show_cover_art = self.config.ui.show_cover_art;
     }
 
     // ── Helpers ──

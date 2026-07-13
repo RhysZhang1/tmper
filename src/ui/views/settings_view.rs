@@ -63,8 +63,12 @@ pub fn rebuild_settings(state: &mut SettingsState, config: &Config) {
             },
         },
         SettingItem {
-            name: "键位文件".into(),
-            value: "config/keybindings.toml".into(),
+            name: "显示封面图".into(),
+            value: if config.ui.show_cover_art {
+                "是".into()
+            } else {
+                "否".into()
+            },
         },
         SettingItem {
             name: "── 确认并返回 ──".into(),

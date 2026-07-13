@@ -51,6 +51,7 @@ impl App {
             config: config.clone(),
             ui_state: UiState {
                 volume: config.playback.default_volume,
+                show_cover_art: config.ui.show_cover_art,
                 ..Default::default()
             },
             engine,

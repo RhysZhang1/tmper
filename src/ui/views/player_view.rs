@@ -154,48 +154,51 @@ fn render_cover_art(f: &mut Frame, area: Rect, state: &UiState) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Try to render cover art as colored blocks
-    if let Some(ref cover) = state.cover_art {
-        if let Some(lines) = cover_as_colored_lines(inner, cover) {
-            let para = Paragraph::new(lines);
-            f.render_widget(para, inner);
-            return;
+    if state.show_cover_art {
+        // Try to render cover art as colored blocks
+        if let Some(ref cover) = state.cover_art {
+            if let Some(lines) = cover_as_colored_lines(inner, cover) {
+                let para = Paragraph::new(lines);
+                f.render_widget(para, inner);
+                return;
+            }
         }
     }
 
-    // Fallback: text placeholder with track info
+    // Fallback / no-image mode: show detailed song info
     let h = inner.height.max(3);
     let play_icon = if state.is_playing { "▶" } else { "⏸" };
     let pos_str = format_duration(state.position);
     let dur_str = format_duration(state.duration);
 
     let mut lines: Vec<Line> = Vec::new();
+    let w = inner.width as usize;
 
-    let top_spacer = (h.saturating_sub(5)) / 2;
+    // Vertical centering
+    let content_lines = if state.album.is_empty() && state.genre.is_empty() {
+        4
+    } else {
+        6
+    };
+    let top_spacer = (h.saturating_sub(content_lines)) / 2;
     for _ in 0..top_spacer {
         lines.push(Line::from(""));
     }
 
-    let music_icon = "♫";
-    lines.push(Line::from(vec![Span::styled(
-        format!("{:^width$}", music_icon, width = inner.width as usize),
-        Style::default()
-            .fg(Color::Magenta)
-            .add_modifier(Modifier::BOLD),
-    )]));
-
-    let title = if state.title.is_empty() {
+    // Track title
+    let title = if state.title.is_empty() || state.title == "No track" {
         "No track"
     } else {
         state.title.as_str()
     };
     lines.push(Line::from(vec![Span::styled(
-        format!("{:^width$}", title, width = inner.width as usize),
+        format!("{:^w$}", title, w = w),
         Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
     )]));
 
+    // Artist
     let artist = if state.artist.is_empty() || state.artist == "—" {
         ""
     } else {
@@ -203,17 +206,58 @@ fn render_cover_art(f: &mut Frame, area: Rect, state: &UiState) {
     };
     if !artist.is_empty() {
         lines.push(Line::from(vec![Span::styled(
-            format!("{:^width$}", artist, width = inner.width as usize),
+            format!("{:^w$}", artist, w = w),
             Style::default().fg(Color::Gray),
         )]));
     }
 
+    // Playback time
     if state.duration > 0.0 {
         let time_str = format!("{} {} / {}", play_icon, pos_str, dur_str);
         lines.push(Line::from(vec![Span::styled(
-            format!("{:^width$}", time_str, width = inner.width as usize),
+            format!("{:^w$}", time_str, w = w),
             Style::default().fg(Color::Green),
         )]));
+    }
+
+    // Spacer before metadata
+    if !state.album.is_empty() || !state.genre.is_empty() {
+        lines.push(Line::from(""));
+    }
+
+    // Album
+    if !state.album.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled(" 专辑: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                state.album.as_str(),
+                Style::default().fg(Color::Rgb(180, 180, 200)),
+            ),
+        ]));
+    }
+
+    // Genre + Year + Codec
+    let mut meta_parts = Vec::new();
+    if !state.genre.is_empty() {
+        meta_parts.push(Span::styled(
+            format!("{} ", state.genre),
+            Style::default().fg(Color::Rgb(160, 200, 160)),
+        ));
+    }
+    if !state.year.is_empty() {
+        meta_parts.push(Span::styled(
+            format!("{} ", state.year),
+            Style::default().fg(Color::Rgb(200, 180, 140)),
+        ));
+    }
+    if !state.codec.is_empty() {
+        meta_parts.push(Span::styled(
+            state.codec.to_uppercase(),
+            Style::default().fg(Color::Rgb(140, 140, 180)),
+        ));
+    }
+    if !meta_parts.is_empty() {
+        lines.push(Line::from(meta_parts));
     }
 
     let para = Paragraph::new(lines);

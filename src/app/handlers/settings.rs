@@ -123,6 +123,10 @@ impl App {
                 // Gapless
                 config.playback.gapless = !config.playback.gapless;
             }
+            8 => {
+                // Show cover art
+                config.ui.show_cover_art = !config.ui.show_cover_art;
+            }
             _ => {}
         }
 
