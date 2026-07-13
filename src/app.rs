@@ -866,28 +866,48 @@ impl App {
                     }
                     PlaylistPanel::Playlists => {
                         if state.selected_playlist == 0 {
-                            // "..." — create new playlist
                             state.insert_mode = InsertMode::Typing(String::new());
                         } else {
-                            let pl_idx = state.selected_playlist.saturating_sub(1);
-                            if pl_idx < state.playlists.len() {
-                                // Check if selecting a song inside expanded playlist
-                                if let Some(ep) = state.expanded_playlist {
-                                    if ep == pl_idx && state.selected_playlist > ep + 1 {
-                                        let song_idx = state.selected_song_in_playlist;
-                                        if song_idx < state.playlists[ep].songs.len() {
-                                            state.playlists[ep].songs.remove(song_idx);
-                                            return;
-                                        }
+                            // Map flat cursor to playlist/song by counting lines
+                            let mut line = 1usize;
+                            let mut found = false;
+                            for i in 0..state.playlists.len() {
+                                if state.selected_playlist == line {
+                                    // Cursor on playlist name → toggle expand
+                                    if state.expanded_playlist == Some(i) {
+                                        state.expanded_playlist = None;
+                                    } else {
+                                        state.expanded_playlist = Some(i);
                                     }
+                                    found = true;
+                                    break;
                                 }
-                                // Toggle expand/collapse
-                                if state.expanded_playlist == Some(pl_idx) {
+                                line += 1;
+                                // Skip song lines if expanded
+                                if Some(i) == state.expanded_playlist {
+                                    let song_lines = state.playlists[i].songs.len().max(1);
+                                    if state.selected_playlist >= line
+                                        && state.selected_playlist < line + song_lines
+                                    {
+                                        // Cursor on a song → delete it
+                                        let song_idx = state.selected_playlist - line;
+                                        if song_idx < state.playlists[i].songs.len() {
+                                            state.playlists[i].songs.remove(song_idx);
+                                        }
+                                        found = true;
+                                        break;
+                                    }
+                                    line += song_lines;
+                                }
+                            }
+                            if !found {
+                                // Fallback: toggle last
+                                let last = state.playlists.len().saturating_sub(1);
+                                if state.expanded_playlist == Some(last) {
                                     state.expanded_playlist = None;
                                 } else {
-                                    state.expanded_playlist = Some(pl_idx);
+                                    state.expanded_playlist = Some(last);
                                 }
-                                state.selected_song_in_playlist = 0;
                             }
                         }
                     }
@@ -895,6 +915,9 @@ impl App {
             }
             _ => {}
         }
+
+        // Auto-save playlists after modifications
+        self.save_playlists();
     }
 
     fn handle_file_browser_key(&mut self, key: &crossterm::event::KeyEvent) {
