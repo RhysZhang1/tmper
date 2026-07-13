@@ -192,6 +192,15 @@ impl App {
                 }
             }
             AppEvent::Key(key) => {
+                // Insert mode: ALL keys pass through
+                if matches!(
+                    self.ui_state.playlist_state.insert_mode,
+                    InsertMode::Typing(_)
+                ) {
+                    self.handle_playlist_key(&key);
+                    return;
+                }
+
                 // ── View switching: works in ALL views ──
                 match key.code {
                     KeyCode::Char('1') => self.ui_state.active_view = ViewMode::Player,
@@ -749,6 +758,7 @@ impl App {
                 KeyCode::Enter => {
                     let name = s.clone();
                     if !name.is_empty() {
+                        let new_idx = state.playlists.len();
                         state
                             .playlists
                             .push(crate::ui::views::playlist_view::PlaylistData {
@@ -756,8 +766,12 @@ impl App {
                                 songs: Vec::new(),
                                 expanded: false,
                             });
+                        state.expanded_playlist = Some(new_idx);
+                        state.selected_playlist = 0;
+                        state.scroll_playlists = 0;
                     }
                     state.insert_mode = InsertMode::Off;
+                    self.save_playlists();
                 }
                 KeyCode::Esc => {
                     state.insert_mode = InsertMode::Off;

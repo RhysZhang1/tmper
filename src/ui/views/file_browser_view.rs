@@ -65,7 +65,7 @@ pub fn render_file_browser(f: &mut Frame, area: Rect, state: &FileBrowserState) 
 fn render_library_panel(f: &mut Frame, area: Rect, state: &FileBrowserState) {
     let vis_h = area.height.saturating_sub(2) as usize;
     let start = state.scroll_library;
-    let _end = (start + vis_h).min(state.library_paths.len());
+
     let is_focused = state.focused == BrowserPanel::Library;
     let border_style = if is_focused {
         Style::default().fg(Color::Cyan)
@@ -73,13 +73,12 @@ fn render_library_panel(f: &mut Frame, area: Rect, state: &FileBrowserState) {
         Style::default().fg(Color::DarkGray)
     };
 
-    let items: Vec<ListItem> = state
-        .library_paths
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
+    let end = (start + vis_h).min(state.library_paths.len());
+    let items: Vec<ListItem> = (start..end)
+        .map(|i| {
+            let p = &state.library_paths[i];
             let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
-            let style = if (start + i) == state.selected_library_index && is_focused {
+            let style = if i == state.selected_library_index && is_focused {
                 Style::default()
                     .fg(Color::White)
                     .bg(Color::DarkGray)
