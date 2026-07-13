@@ -149,6 +149,29 @@ impl App {
                 self.ui_state.visualizer_data = bars;
             }
             AppEvent::RemoveSelected => {
+                // If in playlist view, delete focused playlist
+                if self.ui_state.active_view == ViewMode::Playlists {
+                    let state = &mut self.ui_state.playlist_state;
+                    if state.selected_playlist > 0 {
+                        // Find which playlist the cursor is on by counting lines
+                        let mut line = 1usize;
+                        for i in 0..state.playlists.len() {
+                            if state.selected_playlist == line {
+                                state.playlists.remove(i);
+                                state.selected_playlist =
+                                    state.selected_playlist.min(state.playlists.len());
+                                state.expanded_playlist = None;
+                                self.save_playlists();
+                                return;
+                            }
+                            line += 1;
+                            if Some(i) == state.expanded_playlist {
+                                line += state.playlists[i].songs.len().max(1);
+                            }
+                        }
+                    }
+                    return;
+                }
                 let idx = self.ui_state.selected_index;
                 if idx < self.ui_state.tracks.len() {
                     if self.ui_state.playing_index == Some(idx) {
@@ -777,44 +800,36 @@ impl App {
             KeyCode::Char('h') | KeyCode::Left => {
                 state.focused = PlaylistPanel::Library;
             }
-            KeyCode::Char('j') | KeyCode::Down => {
-                match state.focused {
-                    PlaylistPanel::Library => {
-                        let max = state.library_paths.len().saturating_sub(1);
-                        state.selected_library_song = (state.selected_library_song + 1).min(max);
+            KeyCode::Char('j') | KeyCode::Down => match state.focused {
+                PlaylistPanel::Library => {
+                    let max = state.library_paths.len().saturating_sub(1);
+                    state.selected_library_song = (state.selected_library_song + 1).min(max);
+                }
+                PlaylistPanel::Playlists => {
+                    let max_vis = Self::playlist_visible_lines(state).saturating_sub(1);
+                    if state.selected_playlist < max_vis {
+                        state.selected_playlist += 1;
                     }
-                    PlaylistPanel::Playlists => {
-                        let max = state.playlists.len(); // 0 for "..."
-                        let sel = state.selected_playlist;
-                        // Check if we're inside an expanded playlist's songs
-                        if let Some(ep) = state.expanded_playlist {
-                            if sel > ep + 1 && sel <= ep + 1 + state.playlists[ep].songs.len() {
-                                let song_max = state.playlists[ep].songs.len().saturating_sub(1);
-                                state.selected_song_in_playlist =
-                                    (state.selected_song_in_playlist + 1).min(song_max);
-                                return;
-                            }
-                        }
-                        state.selected_playlist = (sel + 1).min(max);
-                        state.selected_song_in_playlist = 0;
+                    let vis = 10usize;
+                    if state.selected_playlist >= state.scroll_playlists + vis {
+                        state.scroll_playlists = state.selected_playlist.saturating_sub(vis) + 1;
                     }
                 }
-            }
+            },
             KeyCode::Char('k') | KeyCode::Up => match state.focused {
                 PlaylistPanel::Library => {
                     state.selected_library_song = state.selected_library_song.saturating_sub(1);
+                    if state.selected_library_song < state.scroll_library {
+                        state.scroll_library = state.selected_library_song;
+                    }
                 }
                 PlaylistPanel::Playlists => {
-                    if let Some(ep) = state.expanded_playlist {
-                        let sel = state.selected_playlist;
-                        if sel > ep + 1 && sel <= ep + 1 + state.playlists[ep].songs.len() {
-                            state.selected_song_in_playlist =
-                                state.selected_song_in_playlist.saturating_sub(1);
-                            return;
-                        }
+                    if state.selected_playlist > 0 {
+                        state.selected_playlist -= 1;
                     }
-                    state.selected_playlist = state.selected_playlist.saturating_sub(1);
-                    state.selected_song_in_playlist = 0;
+                    if state.selected_playlist < state.scroll_playlists {
+                        state.scroll_playlists = state.selected_playlist;
+                    }
                 }
             },
             KeyCode::Enter => {
@@ -914,50 +929,38 @@ impl App {
                     }
                 }
             },
-            KeyCode::Enter => {
-                match state.focused {
-                    BrowserPanel::Library => {
-                        let idx = state.selected_library_index;
-                        let lib_len = state.library_paths.len();
-                        if idx < lib_len {
-                            let path = state.library_paths.remove(idx);
-                            self.ui_state.tracks.retain(|t| t.path != path);
-                            let new_len = state.library_paths.len();
-                            state.selected_library_index = idx.min(new_len.saturating_sub(1));
-                            self.save_library_paths();
-                        }
+            KeyCode::Enter => match state.focused {
+                BrowserPanel::Library => {
+                    let idx = state.selected_library_index;
+                    let lib_len = state.library_paths.len();
+                    if idx < lib_len {
+                        let path = state.library_paths.remove(idx);
+                        self.ui_state.tracks.retain(|t| t.path != path);
+                        let new_len = state.library_paths.len();
+                        state.selected_library_index = idx.min(new_len.saturating_sub(1));
+                        self.save_library_paths();
                     }
-                    BrowserPanel::Filesystem => {
-                        if state.selected_fs_index == 0 {
-                            // ".." — go up
-                            if let Some(parent) =
-                                state.current_dir.parent().map(|p| p.to_path_buf())
-                            {
-                                state.current_dir = parent;
+                }
+                BrowserPanel::Filesystem => {
+                    let fs_idx = state.selected_fs_index;
+                    if fs_idx < state.fs_items.len() {
+                        match &state.fs_items[fs_idx] {
+                            FsItem::Dir(_) => {
+                                state.current_dir = state.dirs[fs_idx].clone();
                                 self.refresh_file_browser();
                             }
-                        } else {
-                            let fs_idx = state.selected_fs_index;
-                            if fs_idx < state.fs_items.len() {
-                                match &state.fs_items[fs_idx] {
-                                    FsItem::Dir(_) => {
-                                        state.current_dir = state.dirs[fs_idx].clone();
-                                        self.refresh_file_browser();
-                                    }
-                                    FsItem::Audio(_) => {
-                                        let path = state.audio_files[fs_idx].clone();
-                                        if !state.library_paths.contains(&path) {
-                                            state.library_paths.push(path.clone());
-                                            self.load_and_play_collect(&path);
-                                            self.save_library_paths();
-                                        }
-                                    }
+                            FsItem::Audio(_) => {
+                                let path = state.audio_files[fs_idx].clone();
+                                if !state.library_paths.contains(&path) {
+                                    state.library_paths.push(path.clone());
+                                    self.load_and_play_collect(&path);
+                                    self.save_library_paths();
                                 }
                             }
                         }
                     }
                 }
-            }
+            },
             KeyCode::Backspace if state.focused == BrowserPanel::Filesystem => {
                 if let Some(parent) = state.current_dir.parent().map(|p| p.to_path_buf()) {
                     if parent.starts_with(&state.home_dir) || parent == state.home_dir {

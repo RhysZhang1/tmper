@@ -112,36 +112,18 @@ fn render_filesystem_panel(f: &mut Frame, area: Rect, state: &FileBrowserState) 
     let vis_h = area.height.saturating_sub(2) as usize;
     let mut items: Vec<ListItem> = Vec::new();
 
-    let total_items = state.fs_items.len() + 1; // +1 for ".."
+    let total_items = state.fs_items.len();
     let scroll = state.scroll_fs.min(total_items.saturating_sub(1));
     let end = (scroll + vis_h).min(total_items);
 
-    // Add ".." for parent directory if visible
-    if scroll == 0 {
-        items.push(ListItem::new(Line::from(Span::styled(
-            "📁 ..",
-            Style::default().fg(Color::Yellow),
-        ))));
-    }
-
-    // Dirs first, then audio files
-    let start_item = scroll.saturating_sub(1);
-    let count = end
-        .saturating_sub(if scroll == 0 {
-            1
-        } else {
-            scroll.saturating_sub(1)
-        })
-        .min(vis_h);
     for (i, item) in state
         .fs_items
         .iter()
         .enumerate()
-        .skip(start_item)
-        .take(count)
+        .skip(scroll)
+        .take(end - scroll)
     {
-        let actual_idx = i + 1; // +1 for ".."
-        let style = if is_focused && state.selected_fs_index == actual_idx {
+        let style = if is_focused && state.selected_fs_index == i {
             Style::default()
                 .fg(Color::White)
                 .bg(Color::DarkGray)
