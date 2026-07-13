@@ -1,10 +1,11 @@
+#![allow(dead_code)] // WIP: public API not yet wired to UI
+#[allow(dead_code)]
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::error::{AppError, AppResult};
 use crate::playlist::{Playlist, TrackEntry};
 
-#[allow(dead_code)]
 pub fn import_m3u(path: &Path) -> AppResult<Playlist> {
     let content = fs::read_to_string(path)
         .map_err(|e| AppError::Config(format!("Failed to read M3U file: {e}")))?;
@@ -59,7 +60,6 @@ pub fn import_m3u(path: &Path) -> AppResult<Playlist> {
     Ok(playlist)
 }
 
-#[allow(dead_code)]
 pub fn export_m3u(playlist: &Playlist, path: &Path) -> AppResult<()> {
     let mut content = String::from("#EXTM3U\n");
 

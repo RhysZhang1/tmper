@@ -6,7 +6,6 @@ use ratatui::Frame;
 
 use crate::visualizer::render::{self, CharSet};
 
-#[allow(dead_code)]
 pub fn render_visualizer(f: &mut Frame, area: Rect, bars: &[f32]) {
     if bars.is_empty() {
         return;
@@ -15,6 +14,8 @@ pub fn render_visualizer(f: &mut Frame, area: Rect, bars: &[f32]) {
     let char_set = CharSet::Blocks;
     let lines = render::render_bars(bars, area.width, area.height, &char_set);
 
+    let bw = render::bar_width(bars, area.width);
+    let num_bars = bars.len();
     let rat_lines: Vec<Line> = lines
         .iter()
         .map(|text| {
@@ -22,7 +23,8 @@ pub fn render_visualizer(f: &mut Frame, area: Rect, bars: &[f32]) {
                 .chars()
                 .enumerate()
                 .map(|(j, c)| {
-                    let color = render::bar_color(j, text.len());
+                    let bar_idx = j / bw;
+                    let color = render::bar_color(bar_idx, num_bars);
                     Span::styled(c.to_string(), Style::default().fg(color))
                 })
                 .collect();

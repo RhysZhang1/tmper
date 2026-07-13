@@ -1,14 +1,13 @@
-use rodio::{OutputStream, Sink};
+use rodio::{OutputStream, OutputStreamHandle, Sink};
 
 use crate::error::AppResult;
 
-#[allow(dead_code)]
 pub struct AudioOutput {
     sink: Sink,
+    stream_handle: OutputStreamHandle,
     _stream: OutputStream,
 }
 
-#[allow(dead_code)]
 impl AudioOutput {
     pub fn new() -> AppResult<Self> {
         let (stream, stream_handle) = OutputStream::try_default().map_err(|e| {
@@ -21,16 +20,12 @@ impl AudioOutput {
 
         Ok(Self {
             sink,
+            stream_handle,
             _stream: stream,
         })
     }
 
-    pub fn play_raw(&self, samples: Vec<f32>, sample_rate: u32, channels: u8) {
-        let source = rodio::buffer::SamplesBuffer::new(channels as u16, sample_rate, samples);
-        self.sink.append(source);
-    }
-
-    pub fn append_source(&self, source: rodio::buffer::SamplesBuffer<f32>) {
+    pub fn append_source(&self, source: impl rodio::Source<Item = f32> + Send + 'static) {
         self.sink.append(source);
     }
 
@@ -42,9 +37,15 @@ impl AudioOutput {
         self.sink.play();
     }
 
-    pub fn stop(&self) {
+    /// Stop current playback and create a brand-new sink.
+    /// This avoids rodio's permanent-detach-on-stop() issue.
+    pub fn stop_and_replace(&mut self) {
         self.sink.stop();
-        self.sink.clear();
+        self.sink = Sink::try_new(&self.stream_handle).unwrap_or_else(|_| {
+            // If creation fails, return a detached sink (best-effort)
+            let (_, handle) = rodio::OutputStream::try_default().expect("audio device");
+            Sink::try_new(&handle).expect("new sink")
+        });
     }
 
     pub fn set_volume(&self, vol: f32) {
@@ -59,6 +60,7 @@ impl AudioOutput {
         self.sink.empty()
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.sink.len()
     }

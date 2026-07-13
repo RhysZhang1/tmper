@@ -4,13 +4,11 @@ use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::event::AppEvent;
 
-#[allow(dead_code)]
 pub struct KeyHandler {
     last_key: Option<(KeyEvent, Instant)>,
     timeout_ms: u64,
 }
 
-#[allow(dead_code)]
 impl KeyHandler {
     pub fn new(timeout_ms: u64) -> Self {
         Self {

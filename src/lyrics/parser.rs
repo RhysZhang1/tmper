@@ -5,15 +5,26 @@ use regex::Regex;
 use crate::error::{AppError, AppResult};
 use crate::lyrics::types::{LyricLine, LyricMetadata, LyricTrack};
 
-#[allow(dead_code)]
 fn decode_with_fallback(bytes: &[u8], fallbacks: &[&str]) -> AppResult<String> {
     if let Some((encoding, _)) = encoding_rs::Encoding::for_bom(bytes) {
-        return Ok(encoding.decode(bytes).0.into_owned());
+        let (decoded, _, had_errors) = encoding.decode(bytes);
+        if !had_errors {
+            return Ok(decoded.into_owned());
+        }
     }
     if let Ok(s) = std::str::from_utf8(bytes) {
         return Ok(s.to_string());
     }
     for label in fallbacks {
+        if let Some(encoding) = encoding_rs::Encoding::for_label(label.as_bytes()) {
+            let (decoded, _, had_errors) = encoding.decode(bytes);
+            if !had_errors {
+                return Ok(decoded.into_owned());
+            }
+        }
+    }
+    // Last resort: try first fallback even with errors
+    if let Some(label) = fallbacks.first() {
         if let Some(encoding) = encoding_rs::Encoding::for_label(label.as_bytes()) {
             let (decoded, _, _) = encoding.decode(bytes);
             return Ok(decoded.into_owned());
@@ -157,7 +168,6 @@ fn parse_length(value: &str) -> Option<Duration> {
         None
     }
 }
-#[allow(dead_code)]
 pub fn load_lrc_file(path: &std::path::Path, fallbacks: &[&str]) -> AppResult<LyricTrack> {
     let bytes = std::fs::read(path)
         .map_err(|e| AppError::Lyrics(format!("Failed to read LRC file: {e}")))?;

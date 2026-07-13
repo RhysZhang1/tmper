@@ -1,3 +1,5 @@
+#![allow(dead_code)] // WIP: public API not yet wired to UI
+#[allow(dead_code)]
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -5,7 +7,6 @@ use crate::error::AppResult;
 use crate::library::database::LibraryDb;
 use crate::metadata::reader::read_metadata;
 
-#[allow(dead_code)]
 pub enum ScanEvent {
     Progress {
         found: usize,
@@ -22,7 +23,6 @@ pub enum ScanEvent {
     },
 }
 
-#[allow(dead_code)]
 pub async fn scan_library(
     music_dirs: &[PathBuf],
     extensions: &[String],
@@ -163,7 +163,6 @@ mod tests {
     }
 }
 
-#[allow(dead_code)]
 pub fn scan_directory(dir: &std::path::Path, extensions: &[String]) -> Vec<PathBuf> {
     walkdir::WalkDir::new(dir)
         .follow_links(true)

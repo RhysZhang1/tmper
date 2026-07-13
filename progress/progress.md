@@ -31,6 +31,7 @@
 | [phase3-2026-07-12.md](phase3-2026-07-12.md) | P3 歌词系统 | 2026-07-12 |
 | [phase4-2026-07-12.md](phase4-2026-07-12.md) | P4 频谱可视化 | 2026-07-12 |
 | [phase5-2026-07-12.md](phase5-2026-07-12.md) | P5 曲库 + 高级 UI | 2026-07-12 |
+| [2026-07-13-rewrite-and-fixes.md](2026-07-13-rewrite-and-fixes.md) | P1–P5 全面修复+重构+UI重写 | 2026-07-13 |
 
 ---
 
@@ -39,9 +40,21 @@
 | 检查 | 结果 |
 |------|------|
 | cargo build | ✅ 零 warning |
-| cargo test | ✅ 25/25 通过 |
+| cargo test | ✅ 41/41 通过 |
 | cargo clippy | ✅ 零 warning |
+| 代码量 | ~5165 行 Rust |
 
 ## 下一步
 
-**Phase 4: 频谱可视化 (4 Sessions)** — 可与 Phase 5 并行
+### P6 扩展功能 (待实现)
+
+| 功能 | 优先级 | 说明 |
+|------|--------|------|
+| **Command Mode** | 高 | `:` 命令模式已解析但未接入 UI |
+| **Library View** | 中 | View 2 目前是 placeholder |
+| **M3U 导入导出** | 中 | 代码已实现但未接入 UI |
+| **Seek 改进** | 低 | 当前为重新解码，可改为 symphonia 原生 seek |
+| **封面图增强** | 低 | 接入 viuer Kitty 协议真正像素渲染 |
+| **MPRIS2 集成** | 低 | KDE 媒体键控制 |
+| **桌面通知** | 低 | 切歌时 D-Bus 通知 |
+| **在线歌词** | 低 | 网易云/QQ 音乐 API 搜索 |

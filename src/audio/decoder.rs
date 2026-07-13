@@ -11,7 +11,6 @@ use symphonia::core::probe::Hint;
 
 use crate::error::{AppError, AppResult};
 
-#[allow(dead_code)]
 pub struct AudioDecoder {
     format: Box<dyn FormatReader>,
     decoder: Box<dyn Decoder>,
@@ -21,7 +20,6 @@ pub struct AudioDecoder {
     pub total_frames: u64,
 }
 
-#[allow(dead_code)]
 impl AudioDecoder {
     pub fn open(path: &Path) -> AppResult<Self> {
         let file =
@@ -115,6 +113,23 @@ impl AudioDecoder {
         } else {
             0.0
         }
+    }
+
+    /// Fast-forward: decode and discard packets until `target_secs` is reached.
+    /// Returns the total number of frames skipped, or an error.
+    pub fn skip_to_secs(&mut self, target_secs: f64) -> AppResult<u64> {
+        let target_frames = (target_secs * self.sample_rate as f64) as u64;
+        let mut skipped = 0u64;
+        while skipped < target_frames {
+            match self.read_packet()? {
+                Some(samples) => {
+                    let frame_count = samples.len() as u64 / self.channels as u64;
+                    skipped += frame_count;
+                }
+                None => break,
+            }
+        }
+        Ok(skipped)
     }
 }
 

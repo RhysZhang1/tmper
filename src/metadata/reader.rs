@@ -6,7 +6,6 @@ use lofty::probe::Probe;
 
 use crate::error::AppResult;
 
-#[allow(dead_code)]
 pub struct TrackInfo {
     pub path: std::path::PathBuf,
     pub title: String,
@@ -14,6 +13,7 @@ pub struct TrackInfo {
     pub album: Option<String>,
     pub album_artist: Option<String>,
     pub track_number: Option<u32>,
+    #[allow(dead_code)]
     pub track_total: Option<u32>,
     pub disc_number: Option<u32>,
     pub genre: Option<String>,
@@ -23,6 +23,7 @@ pub struct TrackInfo {
     pub sample_rate: u32,
     pub channels: u8,
     pub codec: String,
+    pub cover_art: Option<Vec<u8>>,
 }
 
 #[allow(dead_code)]
@@ -77,6 +78,8 @@ pub fn read_metadata(path: &Path) -> AppResult<TrackInfo> {
         .unwrap_or("unknown")
         .to_uppercase();
 
+    let cover_art = tag.and_then(|t| t.pictures().first().map(|p| p.data().to_vec()));
+
     let title = title.unwrap_or_else(|| {
         path.file_stem()
             .and_then(|s| s.to_str())
@@ -100,6 +103,7 @@ pub fn read_metadata(path: &Path) -> AppResult<TrackInfo> {
         sample_rate,
         channels,
         codec,
+        cover_art,
     })
 }
 

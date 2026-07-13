@@ -12,7 +12,6 @@ pub enum BrowserPanel {
     Filesystem,
 }
 
-#[allow(dead_code)]
 pub struct FileBrowserState {
     pub current_dir: PathBuf,
     pub home_dir: PathBuf,

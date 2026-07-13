@@ -6,7 +6,6 @@ use ratatui::Frame;
 
 use crate::lyrics::types::LyricTrack;
 
-#[allow(dead_code)]
 pub fn render_lyrics(f: &mut Frame, area: Rect, track: &LyricTrack, current_line_index: usize) {
     let visible_lines = area.height as usize;
     if visible_lines < 2 {

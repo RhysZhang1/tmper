@@ -1,7 +1,6 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LibraryConfig {
     #[serde(default = "default_music_dirs")]
     pub music_dirs: Vec<String>,
@@ -13,8 +12,7 @@ pub struct LibraryConfig {
     pub follow_symlinks: bool,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PlaybackConfig {
     #[serde(default = "default_volume")]
     pub default_volume: f32,
@@ -30,8 +28,7 @@ pub struct PlaybackConfig {
     pub seek_step_large_secs: u32,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct VisualizerConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -49,8 +46,7 @@ pub struct VisualizerConfig {
     pub show_on_idle: bool,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LyricsConfig {
     #[serde(default = "default_true")]
     pub auto_load: bool,
@@ -62,8 +58,7 @@ pub struct LyricsConfig {
     pub lrc_search_embedded: bool,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UiConfig {
     #[serde(default = "default_theme")]
     pub theme: String,
@@ -77,8 +72,7 @@ pub struct UiConfig {
     pub default_view: String,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct Config {
     #[serde(default)]
     pub library: LibraryConfig,

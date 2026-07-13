@@ -1,13 +1,14 @@
 use crossterm::event::KeyEvent;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum AppEvent {
     Key(KeyEvent),
     Tick,
     Quit,
     JumpTop,
+    #[allow(dead_code)]
     JumpBottom,
     RemoveSelected,
+    #[allow(dead_code)]
     VisualizerData(Vec<f32>),
 }

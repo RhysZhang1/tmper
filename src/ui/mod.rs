@@ -3,31 +3,30 @@ pub mod widgets;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph};
 use ratatui::Frame;
+use serde::{Deserialize, Serialize};
 
 use crate::lyrics::types::LyricTrack;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepeatMode {
-    Off,
-    Track,
-    Playlist,
+    Sequential,
+    Shuffle,
+    SingleTrack,
 }
 
 impl RepeatMode {
-    pub fn icon(&self) -> &'static str {
+    pub fn label(&self) -> &'static str {
         match self {
-            Self::Off => "🔁",
-            Self::Track => "🔂",
-            Self::Playlist => "🔁",
+            Self::Sequential => "⟳ 顺序循环",
+            Self::Shuffle => "🔀 随机播放",
+            Self::SingleTrack => "🔂 单曲循环",
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum ViewMode {
     Player,
     Library,
@@ -35,19 +34,17 @@ pub enum ViewMode {
     Visualizer,
     Playlists,
     Browser,
+    Settings,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct TrackDisplay {
     pub path: std::path::PathBuf,
     pub title: String,
     pub artist: String,
     pub duration_secs: f64,
-    pub is_playing: bool,
 }
 
-#[allow(dead_code)]
 pub struct UiState {
     pub title: String,
     pub artist: String,
@@ -55,8 +52,12 @@ pub struct UiState {
     pub duration: f64,
     pub volume: f32,
     pub is_playing: bool,
+    pub album: String,
+    pub genre: String,
+    pub year: String,
+    pub codec: String,
     pub repeat_mode: RepeatMode,
-    pub shuffle: bool,
+    pub notification: Option<(String, std::time::Instant)>,
     pub search_query: String,
     pub lyric_track: Option<LyricTrack>,
     pub current_lyric_index: usize,
@@ -66,8 +67,13 @@ pub struct UiState {
     pub active_view: ViewMode,
     pub playlist_state: crate::ui::views::playlist_view::PlaylistManagerState,
     pub file_browser_state: crate::ui::views::file_browser_view::FileBrowserState,
+    pub library_state: crate::ui::views::library_view::LibraryState,
+    pub settings_state: crate::ui::views::settings_view::SettingsState,
     pub playlist_name: String,
+    pub active_playlist: Option<usize>,
+    pub active_playlist_song: Option<usize>,
     pub tracks: Vec<TrackDisplay>,
+    pub cover_art: Option<Vec<u8>>,
     pub selected_index: usize,
     pub playing_index: Option<usize>,
     pub scroll_offset: usize,
@@ -82,8 +88,12 @@ impl Default for UiState {
             duration: 0.0,
             volume: 0.8,
             is_playing: false,
-            repeat_mode: RepeatMode::Off,
-            shuffle: false,
+            album: String::new(),
+            genre: String::new(),
+            year: String::new(),
+            codec: String::new(),
+            repeat_mode: RepeatMode::Sequential,
+            notification: None,
             search_query: String::new(),
             lyric_track: None,
             current_lyric_index: 0,
@@ -93,8 +103,13 @@ impl Default for UiState {
             active_view: ViewMode::Player,
             playlist_state: crate::ui::views::playlist_view::PlaylistManagerState::default(),
             file_browser_state: crate::ui::views::file_browser_view::FileBrowserState::default(),
+            library_state: crate::ui::views::library_view::LibraryState::default(),
+            settings_state: crate::ui::views::settings_view::SettingsState::default(),
             playlist_name: "Default".into(),
+            active_playlist: None,
+            active_playlist_song: None,
             tracks: Vec::new(),
+            cover_art: None,
             selected_index: 0,
             playing_index: None,
             scroll_offset: 0,
@@ -102,7 +117,6 @@ impl Default for UiState {
     }
 }
 
-#[allow(dead_code)]
 pub fn render(f: &mut Frame, state: &UiState) {
     // Help overlay — highest priority, always on top
     if state.show_help {
@@ -110,6 +124,36 @@ pub fn render(f: &mut Frame, state: &UiState) {
         return;
     }
 
+    // Floating notification for mode changes (shown before everything else)
+    let should_notify = if let Some((_, t)) = &state.notification {
+        t.elapsed().as_secs_f64() < 0.5
+    } else {
+        false
+    };
+    if should_notify {
+        if let Some((ref msg, _)) = &state.notification {
+            let area = f.area();
+            let popup_w = (msg.len() as u16 + 4).min(area.width - 4);
+            let popup_h = 3u16;
+            let x = (area.width.saturating_sub(popup_w)) / 2;
+            let y = (area.height.saturating_sub(popup_h)) / 2;
+            let popup = Rect::new(x, y, popup_w, popup_h);
+            f.render_widget(Clear, popup);
+            let para = Paragraph::new(msg.as_str())
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .style(Style::default().fg(Color::Green)),
+                )
+                .alignment(ratatui::layout::Alignment::Center);
+            f.render_widget(para, popup);
+        }
+    }
+
+    if state.active_view == ViewMode::Player {
+        crate::ui::views::player_view::render_player_view(f, f.area(), state);
+        return;
+    }
     if state.active_view == ViewMode::Lyrics {
         if let Some(ref track) = state.lyric_track {
             crate::ui::views::lyrics_view::render_lyrics_view(
@@ -142,18 +186,16 @@ pub fn render(f: &mut Frame, state: &UiState) {
         );
         return;
     }
+    if state.active_view == ViewMode::Settings {
+        crate::ui::views::settings_view::render_settings_view(
+            f,
+            f.area(),
+            &state.settings_state,
+        );
+        return;
+    }
     if state.active_view == ViewMode::Library {
-        // Show a simple library placeholder for now
-        let para = ratatui::widgets::Paragraph::new(
-            "Library browser — coming soon\n\nUse config/config.toml to set music_dirs",
-        )
-        .block(
-            ratatui::widgets::Block::default()
-                .borders(ratatui::widgets::Borders::ALL)
-                .title(" Library "),
-        )
-        .alignment(ratatui::layout::Alignment::Center);
-        f.render_widget(para, f.area());
+        crate::ui::views::library_view::render_library_view(f, f.area(), &state.library_state);
         return;
     }
 
@@ -231,9 +273,8 @@ fn render_progress_bar(f: &mut Frame, area: Rect, state: &UiState) {
     };
 
     let vol_pct = (state.volume * 100.0) as u32;
-    let shuffle_icon = if state.shuffle { "🔀" } else { "" };
-    let repeat_icon = state.repeat_mode.icon();
-    let label = format!("Vol: {}%  {} {}", vol_pct, repeat_icon, shuffle_icon);
+    let mode_label = state.repeat_mode.label();
+    let label = format!("Vol: {}%  {}", vol_pct, mode_label);
 
     let gauge = Gauge::default()
         .block(Block::default().borders(Borders::NONE))
@@ -306,8 +347,7 @@ fn render_status_bar(f: &mut Frame, area: Rect, state: &UiState) {
     let total_duration: f64 = state.tracks.iter().map(|t| t.duration_secs).sum();
     let dur_str = format_duration(total_duration);
 
-    let shuffle = if state.shuffle { "🔀" } else { "" };
-    let repeat = state.repeat_mode.icon();
+    let mode = state.repeat_mode.label();
 
     let view_label = match state.active_view {
         ViewMode::Player => "Player",
@@ -316,15 +356,22 @@ fn render_status_bar(f: &mut Frame, area: Rect, state: &UiState) {
         ViewMode::Visualizer => "Visualizer",
         ViewMode::Playlists => "Playlists",
         ViewMode::Browser => "Browser",
+        ViewMode::Settings => "Settings",
     };
 
+    let playlist_label = if let Some(idx) = state.active_playlist {
+        state.playlist_state.playlists.get(idx)
+            .map(|p| p.name.as_str())
+            .unwrap_or(&state.playlist_name)
+    } else {
+        &state.playlist_name
+    };
     let status = format!(
-        "Playlist: {} | {} tracks | {} | {} {}  [{}]",
-        state.playlist_name,
+        " {} | {} tracks | {} | {}  [{}]",
+        playlist_label,
         state.tracks.len(),
         dur_str,
-        repeat,
-        shuffle,
+        mode,
         view_label,
     );
 

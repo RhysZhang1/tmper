@@ -2,20 +2,25 @@ use std::collections::VecDeque;
 
 pub struct SpectrumProcessor {
     num_bars: usize,
+    alpha: f32,
+    /// Smoothed bar heights.
     smoothing: Vec<f32>,
     peak_window: VecDeque<f32>,
-    alpha: f32,
     peak_alpha: f32,
+    start_freq: f32,
+    end_freq: f32,
 }
 
 impl SpectrumProcessor {
     pub fn new(num_bars: usize, alpha: f32) -> Self {
         Self {
             num_bars,
+            alpha,
             smoothing: vec![0.0; num_bars],
             peak_window: VecDeque::with_capacity(64),
-            alpha,
             peak_alpha: 0.1,
+            start_freq: 60.0,
+            end_freq: 8000.0,
         }
     }
 
@@ -23,8 +28,8 @@ impl SpectrumProcessor {
         let nyquist = sample_rate as f32 / 2.0;
         let bin_width = nyquist / magnitudes.len() as f32;
 
-        let start_freq = 20.0f32;
-        let end_freq = 16000.0f32;
+        let start_freq = self.start_freq;
+        let end_freq = self.end_freq;
 
         // Log-scale bucketing
         let mut bars = vec![0.0f32; self.num_bars];
@@ -46,18 +51,19 @@ impl SpectrumProcessor {
             }
         }
 
-        // EMA smoothing
-        #[allow(clippy::needless_range_loop)]
+        // Smooth in both directions — slow rise AND slow fall.
+        // Lower alpha = smoother / lazier movement.
         #[allow(clippy::needless_range_loop)]
         for i in 0..self.num_bars {
-            self.smoothing[i] = self.alpha * bars[i] + (1.0 - self.alpha) * self.smoothing[i];
+            let raw = bars[i];
+            let prev = self.smoothing[i];
+            self.smoothing[i] = self.alpha * raw + (1.0 - self.alpha) * prev;
             bars[i] = self.smoothing[i];
         }
 
         // Dynamic range normalization
         let max_val = bars.iter().cloned().fold(0.0f32, f32::max);
         if max_val > 0.0 {
-            // Update peak EMA
             let old_peak = self.peak_window.back().copied().unwrap_or(max_val);
             let new_peak = self.peak_alpha * max_val + (1.0 - self.peak_alpha) * old_peak;
             self.peak_window.push_back(new_peak);

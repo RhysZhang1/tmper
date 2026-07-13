@@ -1,7 +1,6 @@
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-#[allow(dead_code)]
 pub enum AppError {
     #[error("Audio error: {0}")]
     Audio(String),
@@ -19,5 +18,4 @@ pub enum AppError {
     Lyrics(String),
 }
 
-#[allow(dead_code)]
 pub type AppResult<T> = anyhow::Result<T>;

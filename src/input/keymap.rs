@@ -1,6 +1,7 @@
+#![allow(dead_code)] // WIP: public API not yet wired to UI
+#[allow(dead_code)]
 use serde::Deserialize;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct KeyBindings {
     #[serde(default = "default_key")]
@@ -23,35 +24,27 @@ pub struct KeyBindings {
     pub down: String,
 }
 
-#[allow(dead_code)]
 fn default_key() -> String {
     " ".into()
 }
-#[allow(dead_code)]
 fn default_next() -> String {
     "n".into()
 }
-#[allow(dead_code)]
 fn default_prev() -> String {
     "p".into()
 }
-#[allow(dead_code)]
 fn default_vol_down() -> String {
     "-".into()
 }
-#[allow(dead_code)]
 fn default_vol_up() -> String {
     "=".into()
 }
-#[allow(dead_code)]
 fn default_quit() -> String {
     "q".into()
 }
-#[allow(dead_code)]
 fn default_up() -> String {
     "k".into()
 }
-#[allow(dead_code)]
 fn default_down() -> String {
     "j".into()
 }
@@ -72,7 +65,6 @@ impl Default for KeyBindings {
     }
 }
 
-#[allow(dead_code)]
 impl KeyBindings {
     pub fn load() -> Self {
         let path = crate::paths::config_dir().join("keybindings.toml");

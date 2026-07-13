@@ -6,7 +6,6 @@ use ratatui::Frame;
 
 use crate::lyrics::types::LyricTrack;
 
-#[allow(dead_code)]
 pub fn render_lyrics_view(
     f: &mut Frame,
     area: Rect,

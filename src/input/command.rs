@@ -1,5 +1,5 @@
+#![allow(dead_code)] // WIP: public API not yet wired to UI
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum Command {
     Quit,
     Help,
@@ -13,7 +13,6 @@ pub enum Command {
     Unknown(String),
 }
 
-#[allow(dead_code)]
 pub fn parse_command(input: &str) -> Command {
     let input = input.trim().trim_start_matches(':');
     let parts: Vec<&str> = input.splitn(2, ' ').collect();

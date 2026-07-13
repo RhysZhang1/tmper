@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -27,12 +28,10 @@ pub struct TrackRow {
     pub added_at: i64,
 }
 
-#[allow(dead_code)]
 pub struct LibraryDb {
     conn: Connection,
 }
 
-#[allow(dead_code)]
 impl LibraryDb {
     pub fn open(path: &Path) -> AppResult<Self> {
         let conn = Connection::open(path)
@@ -187,6 +186,7 @@ impl LibraryDb {
         Ok(row)
     }
 
+    #[allow(dead_code)]
     pub fn query_all(&self) -> AppResult<Vec<TrackRow>> {
         let mut stmt = self
             .conn
@@ -278,6 +278,7 @@ impl LibraryDb {
         Ok(result)
     }
 
+    #[allow(dead_code)]
     pub fn get_paths_in_dir(&self, dir_prefix: &str) -> AppResult<Vec<String>> {
         let pattern = format!("{dir_prefix}%");
         let mut stmt = self
@@ -296,6 +297,7 @@ impl LibraryDb {
         Ok(result)
     }
 
+    #[allow(dead_code)]
     pub fn delete_by_path(&self, path: &str) -> AppResult<()> {
         self.conn
             .execute("DELETE FROM tracks WHERE path = ?1", params![path])
@@ -303,6 +305,7 @@ impl LibraryDb {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn count(&self) -> AppResult<usize> {
         let count: usize = self
             .conn
@@ -312,7 +315,6 @@ impl LibraryDb {
     }
 }
 
-#[allow(dead_code)]
 fn row_from_db(row: &rusqlite::Row) -> rusqlite::Result<TrackRow> {
     Ok(TrackRow {
         id: row.get(0)?,

@@ -1,6 +1,7 @@
+#![allow(dead_code)] // WIP: public API not yet wired to UI
+#[allow(dead_code)]
 use std::path::PathBuf;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct TrackEntry {
     pub path: PathBuf,
@@ -9,7 +10,6 @@ pub struct TrackEntry {
     pub duration_secs: f64,
 }
 
-#[allow(dead_code)]
 impl TrackEntry {
     pub fn new(path: PathBuf, title: String, artist: String, duration_secs: f64) -> Self {
         Self {
@@ -21,7 +21,6 @@ impl TrackEntry {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum SortKey {
     Title,
@@ -30,7 +29,6 @@ pub enum SortKey {
     Duration,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Playlist {
     pub name: String,
@@ -38,7 +36,6 @@ pub struct Playlist {
     pub current_index: Option<usize>,
 }
 
-#[allow(dead_code)]
 impl Playlist {
     pub fn new(name: &str) -> Self {
         Self {
