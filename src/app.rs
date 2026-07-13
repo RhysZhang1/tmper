@@ -883,15 +883,25 @@ impl App {
                                     } else {
                                         state.expanded_playlist = Some(i);
                                     }
-                                    // Move cursor to this playlist's line
-                                    state.selected_playlist = line;
-                                    // Ensure playlist name is scrolled into view
+                                    // Recalculate exact line from scratch
+                                    let exact_line = {
+                                        let mut l = 1usize;
+                                        for j in 0..i {
+                                            l += 1;
+                                            if Some(j) == state.expanded_playlist {
+                                                l += state.playlists[j].songs.len().max(1);
+                                            }
+                                        }
+                                        l
+                                    };
+                                    state.selected_playlist = exact_line;
+                                    // Scroll to this line
                                     let vis = 10usize;
-                                    if state.selected_playlist < state.scroll_playlists {
-                                        state.scroll_playlists = state.selected_playlist;
+                                    if exact_line < state.scroll_playlists {
+                                        state.scroll_playlists = exact_line;
                                     }
-                                    if state.selected_playlist >= state.scroll_playlists + vis {
-                                        state.scroll_playlists = state.selected_playlist.saturating_sub(vis) + 1;
+                                    if exact_line >= state.scroll_playlists + vis {
+                                        state.scroll_playlists = exact_line.saturating_sub(vis) + 1;
                                     }
                                     found = true;
                                     break;
