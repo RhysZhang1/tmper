@@ -93,7 +93,11 @@ impl App {
                         Some(Ok(event)) => {
                             match event {
                                 CrosstermEvent::Key(key) => {
-                                    if let Some(app_event) = self.key_handler.process(key) {
+                                    // Bypass KeyHandler delay in insert/typing modes
+                                    let needs_bypass = matches!(self.ui_state.playlist_state.insert_mode, crate::ui::views::playlist_view::InsertMode::Typing(_));
+                                    if needs_bypass {
+                                        self.handle_event(crate::event::AppEvent::Key(key));
+                                    } else if let Some(app_event) = self.key_handler.process(key) {
                                         self.handle_event(app_event);
                                     }
                                 }
@@ -897,6 +901,12 @@ impl App {
                                             state.playlists[i].songs.remove(song_idx);
                                         }
                                         found = true;
+                                        // Recalculate max lines and clamp cursor
+                                        let total = Self::playlist_visible_lines(state);
+                                        if total > 0 {
+                                            state.selected_playlist =
+                                                state.selected_playlist.min(total - 1);
+                                        }
                                         break;
                                     }
                                     line += song_lines;
