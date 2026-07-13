@@ -885,6 +885,14 @@ impl App {
                                     }
                                     // Move cursor to this playlist's line
                                     state.selected_playlist = line;
+                                    // Ensure playlist name is scrolled into view
+                                    let vis = 10usize;
+                                    if state.selected_playlist < state.scroll_playlists {
+                                        state.scroll_playlists = state.selected_playlist;
+                                    }
+                                    if state.selected_playlist >= state.scroll_playlists + vis {
+                                        state.scroll_playlists = state.selected_playlist.saturating_sub(vis) + 1;
+                                    }
                                     found = true;
                                     break;
                                 }
