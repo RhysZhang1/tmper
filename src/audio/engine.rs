@@ -123,16 +123,9 @@ impl AudioEngine {
         let pcm_buf = self.pcm_buffer.clone();
 
         while let Some(samples) = decoder.read_packet()? {
-            let source = rodio::buffer::SamplesBuffer::new(
-                channels as u16,
-                sample_rate,
-                samples,
-            );
-            self.output.append_source(InstrumentedSource::new(
-                source,
-                pcm_buf.clone(),
-                8192,
-            ));
+            let source = rodio::buffer::SamplesBuffer::new(channels as u16, sample_rate, samples);
+            self.output
+                .append_source(InstrumentedSource::new(source, pcm_buf.clone(), 8192));
         }
 
         self.decoder = Some(decoder);
@@ -207,16 +200,9 @@ impl AudioEngine {
         let pcm_buf = self.pcm_buffer.clone();
 
         while let Some(samples) = decoder.read_packet()? {
-            let source = rodio::buffer::SamplesBuffer::new(
-                channels as u16,
-                sample_rate,
-                samples,
-            );
-            self.output.append_source(InstrumentedSource::new(
-                source,
-                pcm_buf.clone(),
-                8192,
-            ));
+            let source = rodio::buffer::SamplesBuffer::new(channels as u16, sample_rate, samples);
+            self.output
+                .append_source(InstrumentedSource::new(source, pcm_buf.clone(), 8192));
         }
 
         // Position tracking from the new offset

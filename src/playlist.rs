@@ -1,5 +1,3 @@
-#![allow(dead_code)] // WIP: public API not yet wired to UI
-#[allow(dead_code)]
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -22,20 +20,14 @@ impl TrackEntry {
 }
 
 #[derive(Debug, Clone)]
-pub enum SortKey {
-    Title,
-    Artist,
-    Album,
-    Duration,
-}
-
-#[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Playlist {
     pub name: String,
     pub tracks: Vec<TrackEntry>,
     pub current_index: Option<usize>,
 }
 
+#[allow(dead_code)]
 impl Playlist {
     pub fn new(name: &str) -> Self {
         Self {
@@ -57,21 +49,6 @@ impl Playlist {
         self.tracks.push(entry);
         if self.current_index.is_none() && !self.tracks.is_empty() {
             self.current_index = Some(0);
-        }
-    }
-
-    pub fn insert_after_current(&mut self, entry: TrackEntry) {
-        match self.current_index {
-            Some(idx) if idx < self.tracks.len() => {
-                let insert_pos = idx + 1;
-                self.tracks.insert(insert_pos, entry);
-            }
-            _ => {
-                self.tracks.push(entry);
-                if self.current_index.is_none() {
-                    self.current_index = Some(0);
-                }
-            }
         }
     }
 
@@ -107,7 +84,11 @@ impl Playlist {
             _ => None,
         }
     }
+}
 
+#[cfg(test)]
+#[allow(dead_code)]
+impl Playlist {
     pub fn prev(&mut self) -> Option<usize> {
         match self.current_index {
             Some(idx) if idx > 0 => {
@@ -138,28 +119,23 @@ impl Playlist {
         }
     }
 
-    pub fn titles(&self) -> Vec<&str> {
-        self.tracks.iter().map(|t| t.title.as_str()).collect()
-    }
-
-    pub fn sort_by(&mut self, key: SortKey) {
-        match key {
-            SortKey::Title => {
-                self.tracks.sort_by(|a, b| a.title.cmp(&b.title));
+    pub fn insert_after_current(&mut self, entry: TrackEntry) {
+        match self.current_index {
+            Some(idx) if idx < self.tracks.len() => {
+                let insert_pos = idx + 1;
+                self.tracks.insert(insert_pos, entry);
             }
-            SortKey::Artist => {
-                self.tracks.sort_by(|a, b| a.artist.cmp(&b.artist));
-            }
-            SortKey::Duration => {
-                self.tracks
-                    .sort_by(|a, b| a.duration_secs.total_cmp(&b.duration_secs));
-            }
-            SortKey::Album => {
-                // Album not in TrackEntry, fall back to title
-                self.tracks.sort_by(|a, b| a.title.cmp(&b.title));
+            _ => {
+                self.tracks.push(entry);
+                if self.current_index.is_none() {
+                    self.current_index = Some(0);
+                }
             }
         }
-        self.current_index = None;
+    }
+
+    pub fn titles(&self) -> Vec<&str> {
+        self.tracks.iter().map(|t| t.title.as_str()).collect()
     }
 }
 

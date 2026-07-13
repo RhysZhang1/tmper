@@ -11,11 +11,11 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use crate::audio::engine::AudioEngine;
-use crate::library::database::LibraryDb;
 use crate::cli::{Cli, Command};
 use crate::config::Config;
 use crate::event::AppEvent;
 use crate::input::handler::KeyHandler;
+use crate::library::database::LibraryDb;
 use crate::ui::{self, UiState};
 use serde::{Deserialize, Serialize};
 
@@ -86,7 +86,9 @@ impl App {
         }
 
         let mut reader = EventStream::new();
-        let mut tick_interval = tokio::time::interval(Duration::from_millis((1000 / self.config.visualizer.frame_rate.max(1)) as u64));
+        let mut tick_interval = tokio::time::interval(Duration::from_millis(
+            (1000 / self.config.visualizer.frame_rate.max(1)) as u64,
+        ));
 
         loop {
             tokio::select! {

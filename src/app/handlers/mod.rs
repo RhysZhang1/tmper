@@ -1,6 +1,6 @@
-mod playlist;
-mod library;
 mod browser;
+mod library;
+mod playlist;
 mod settings;
 
 use std::time::Duration;
@@ -25,15 +25,6 @@ impl App {
             AppEvent::JumpTop => {
                 self.ui_state.selected_index = 0;
                 self.ui_state.scroll_offset = 0;
-            }
-            AppEvent::JumpBottom => {
-                let len = self.ui_state.tracks.len();
-                if len > 0 {
-                    self.ui_state.selected_index = len.saturating_sub(1);
-                }
-            }
-            AppEvent::VisualizerData(bars) => {
-                self.ui_state.visualizer_data = bars;
             }
             AppEvent::RemoveSelected => self.handle_remove_selected(),
             AppEvent::Key(key) => self.handle_key_event(key),
@@ -189,13 +180,15 @@ impl App {
                 let ps = &self.ui_state.playlist_state;
                 let model = PlaylistFlatModel::new(&ps.playlists, ps.expanded_playlist);
                 match model.resolve(ps.selected_playlist) {
-                    LineTarget::Song { playlist, song_index } => {
+                    LineTarget::Song {
+                        playlist,
+                        song_index,
+                    } => {
                         let pl_idx = ps.expanded_playlist.unwrap_or(playlist);
                         if pl_idx < ps.playlists.len()
                             && song_index < ps.playlists[pl_idx].songs.len()
                         {
-                            let path =
-                                ps.playlists[pl_idx].songs[song_index].clone();
+                            let path = ps.playlists[pl_idx].songs[song_index].clone();
                             // Set this as the active playlist for scoped playback
                             self.ui_state.active_playlist = Some(pl_idx);
                             self.ui_state.active_playlist_song = Some(song_index);
@@ -258,12 +251,18 @@ impl App {
             }
             // Seeking
             KeyCode::Left => {
-                if let Err(e) = self.engine.seek_relative(-(self.config.playback.seek_step_small_secs as f64)) {
+                if let Err(e) = self
+                    .engine
+                    .seek_relative(-(self.config.playback.seek_step_small_secs as f64))
+                {
                     tracing::error!("Seek error: {e}");
                 }
             }
             KeyCode::Right => {
-                if let Err(e) = self.engine.seek_relative(self.config.playback.seek_step_small_secs as f64) {
+                if let Err(e) = self
+                    .engine
+                    .seek_relative(self.config.playback.seek_step_small_secs as f64)
+                {
                     tracing::error!("Seek error: {e}");
                 }
             }
@@ -408,9 +407,7 @@ impl App {
 
         self.sync_lyrics(pos);
 
-        if self.ui_state.is_playing
-            && self.ui_state.duration > 0.0
-            && pos >= self.ui_state.duration
+        if self.ui_state.is_playing && self.ui_state.duration > 0.0 && pos >= self.ui_state.duration
         {
             self.on_track_ended();
         }
@@ -442,7 +439,9 @@ impl App {
 
     fn play_selected(&mut self) {
         if self.ui_state.selected_index < self.ui_state.tracks.len() {
-            let path = self.ui_state.tracks[self.ui_state.selected_index].path.clone();
+            let path = self.ui_state.tracks[self.ui_state.selected_index]
+                .path
+                .clone();
             self.load_and_play(&path);
         }
     }
@@ -452,7 +451,9 @@ impl App {
             let pls = &self.ui_state.playlist_state.playlists;
             if pl_idx < pls.len() {
                 let songs = &pls[pl_idx].songs;
-                if songs.is_empty() { return; }
+                if songs.is_empty() {
+                    return;
+                }
                 let cur_song = self.ui_state.active_playlist_song.unwrap_or(0);
                 let next_song = (cur_song + 1) % songs.len();
                 self.ui_state.active_playlist_song = Some(next_song);
@@ -476,9 +477,15 @@ impl App {
             let pls = &self.ui_state.playlist_state.playlists;
             if pl_idx < pls.len() {
                 let songs = &pls[pl_idx].songs;
-                if songs.is_empty() { return; }
+                if songs.is_empty() {
+                    return;
+                }
                 let cur_song = self.ui_state.active_playlist_song.unwrap_or(0);
-                let prev_song = if cur_song == 0 { songs.len().saturating_sub(1) } else { cur_song - 1 };
+                let prev_song = if cur_song == 0 {
+                    songs.len().saturating_sub(1)
+                } else {
+                    cur_song - 1
+                };
                 self.ui_state.active_playlist_song = Some(prev_song);
                 let path = songs[prev_song].clone();
                 self.load_and_play(&path);
@@ -509,7 +516,11 @@ impl App {
             if !songs.is_empty() {
                 match self.ui_state.repeat_mode {
                     RepeatMode::SingleTrack => {
-                        let cur = self.ui_state.active_playlist_song.unwrap_or(0).min(songs.len() - 1);
+                        let cur = self
+                            .ui_state
+                            .active_playlist_song
+                            .unwrap_or(0)
+                            .min(songs.len() - 1);
                         let path = songs[cur].clone();
                         self.load_and_play(&path);
                         return;
@@ -645,7 +656,11 @@ impl App {
                 return;
             }
             let adjusted_pos = position_secs + self.ui_state.lyrics_offset_ms as f64 / 1000.0;
-            let idx = LyricEngine::sync(track, adjusted_pos.max(0.0), self.ui_state.current_lyric_index);
+            let idx = LyricEngine::sync(
+                track,
+                adjusted_pos.max(0.0),
+                self.ui_state.current_lyric_index,
+            );
             self.ui_state.current_lyric_index = idx;
         }
     }

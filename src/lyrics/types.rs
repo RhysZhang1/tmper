@@ -19,8 +19,5 @@ pub struct LyricTrack {
 pub struct LyricMetadata {
     pub title: Option<String>,
     pub artist: Option<String>,
-    pub album: Option<String>,
-    pub author: Option<String>,
     pub global_offset_ms: i64,
-    pub length: Option<Duration>,
 }

@@ -59,7 +59,13 @@ impl App {
         match idx {
             0 => {
                 // Theme
-                let themes = ["tokyo-night", "dracula", "nord", "solarized-dark", "catppuccin-mocha"];
+                let themes = [
+                    "tokyo-night",
+                    "dracula",
+                    "nord",
+                    "solarized-dark",
+                    "catppuccin-mocha",
+                ];
                 let cur = &config.ui.theme;
                 let pos = themes.iter().position(|t| *t == cur.as_str()).unwrap_or(0);
                 let next = (pos + 1) % themes.len();
@@ -77,7 +83,10 @@ impl App {
                 // Smoothing
                 let smooths: [f32; 3] = [0.15, 0.35, 0.55];
                 let cur = config.visualizer.smoothing;
-                let pos = smooths.iter().position(|&s| (s - cur).abs() < 0.01).unwrap_or(1);
+                let pos = smooths
+                    .iter()
+                    .position(|&s| (s - cur).abs() < 0.01)
+                    .unwrap_or(1);
                 let next = (pos + 1) % smooths.len();
                 config.visualizer.smoothing = smooths[next];
             }
@@ -92,7 +101,11 @@ impl App {
             4 => {
                 // Default volume
                 let new_vol = ((config.playback.default_volume + 0.05) * 100.0).round() / 100.0;
-                config.playback.default_volume = if new_vol > 1.05 { 0.0 } else { new_vol.min(1.0) };
+                config.playback.default_volume = if new_vol > 1.05 {
+                    0.0
+                } else {
+                    new_vol.min(1.0)
+                };
             }
             5 => {
                 // Seek step
@@ -129,7 +142,13 @@ impl App {
 
         match idx {
             0 => {
-                let themes = ["tokyo-night", "dracula", "nord", "solarized-dark", "catppuccin-mocha"];
+                let themes = [
+                    "tokyo-night",
+                    "dracula",
+                    "nord",
+                    "solarized-dark",
+                    "catppuccin-mocha",
+                ];
                 let cur = &config.ui.theme;
                 let pos = themes.iter().position(|t| *t == cur.as_str()).unwrap_or(0);
                 let prev = if pos == 0 { themes.len() - 1 } else { pos - 1 };
@@ -145,7 +164,10 @@ impl App {
             2 => {
                 let smooths: [f32; 3] = [0.15, 0.35, 0.55];
                 let cur = config.visualizer.smoothing;
-                let pos = smooths.iter().position(|&s| (s - cur).abs() < 0.01).unwrap_or(1);
+                let pos = smooths
+                    .iter()
+                    .position(|&s| (s - cur).abs() < 0.01)
+                    .unwrap_or(1);
                 let prev = if pos == 0 { smooths.len() - 1 } else { pos - 1 };
                 config.visualizer.smoothing = smooths[prev];
             }

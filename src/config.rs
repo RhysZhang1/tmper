@@ -153,16 +153,34 @@ fn default_cover_art_width() -> u32 {
 impl Config {
     pub fn load_or_default() -> Self {
         let config_path = crate::paths::config_dir().join("config.toml");
-        if config_path.exists() {
+        let mut config = if config_path.exists() {
             if let Ok(content) = std::fs::read_to_string(&config_path) {
-                if let Ok(config) = toml::from_str(&content) {
+                if let Ok(cfg) = toml::from_str(&content) {
                     tracing::info!("Loaded config from {:?}", config_path);
-                    return config;
+                    cfg
+                } else {
+                    tracing::warn!("Invalid config file at {:?}, using defaults", config_path);
+                    Self::default()
                 }
+            } else {
+                tracing::info!("No config file at {:?}, using defaults", config_path);
+                Self::default()
             }
-        }
-        tracing::info!("No config file at {:?}, using defaults", config_path);
-        Self::default()
+        } else {
+            tracing::info!("No config file at {:?}, using defaults", config_path);
+            Self::default()
+        };
+        config.clamp();
+        config
+    }
+
+    /// Clamp critical fields to safe ranges to prevent runtime panics
+    /// (e.g. divide-by-zero on frame_rate=0).
+    fn clamp(&mut self) {
+        self.playback.default_volume = self.playback.default_volume.clamp(0.0, 1.0);
+        self.visualizer.frame_rate = self.visualizer.frame_rate.clamp(1, 120);
+        self.visualizer.num_bars = self.visualizer.num_bars.clamp(1, 256);
+        self.visualizer.smoothing = self.visualizer.smoothing.clamp(0.0, 1.0);
     }
 }
 

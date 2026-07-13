@@ -26,7 +26,6 @@ pub struct TrackInfo {
     pub cover_art: Option<Vec<u8>>,
 }
 
-#[allow(dead_code)]
 pub fn read_metadata(path: &Path) -> AppResult<TrackInfo> {
     let tagged_file = Probe::open(path)
         .map_err(|e| crate::error::AppError::Metadata(format!("Failed to open file: {e}")))?

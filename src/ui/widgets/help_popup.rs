@@ -191,7 +191,10 @@ fn key(k: &str, desc: &str) -> Line<'static> {
 }
 
 fn txt(text: &str) -> Line<'_> {
-    Line::from(Span::styled(format!("  {}", text), Style::default().fg(Color::Gray)))
+    Line::from(Span::styled(
+        format!("  {}", text),
+        Style::default().fg(Color::Gray),
+    ))
 }
 
 fn gap() -> Line<'static> {

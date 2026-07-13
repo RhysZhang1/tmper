@@ -18,10 +18,13 @@ impl App {
                         if let Ok(results) = self.library_db.search(&query) {
                             // Show results in track panel, switch focus to tracks
                             s.track_paths = results.iter().map(|t| t.path.clone()).collect();
-                            s.track_titles = results.iter().map(|t| {
-                                let artist = t.artist.as_deref().unwrap_or("?");
-                                format!("{}  -  {}", t.title, artist)
-                            }).collect();
+                            s.track_titles = results
+                                .iter()
+                                .map(|t| {
+                                    let artist = t.artist.as_deref().unwrap_or("?");
+                                    format!("{}  -  {}", t.title, artist)
+                                })
+                                .collect();
                             s.track_index = 0;
                             s.scroll_tracks = 0;
                             s.focused = LibraryPanel::Tracks;
@@ -87,7 +90,11 @@ impl App {
                             } else {
                                 need_albums = false;
                             }
-                            Self::clamp_scroll(s.artist_index, s.artists.len(), &mut s.scroll_artists);
+                            Self::clamp_scroll(
+                                s.artist_index,
+                                s.artists.len(),
+                                &mut s.scroll_artists,
+                            );
                         }
                         LibraryPanel::Albums => {
                             if s.album_index + 1 < s.albums.len() {
@@ -102,7 +109,11 @@ impl App {
                             if s.track_index + 1 < s.track_paths.len() {
                                 s.track_index += 1;
                             }
-                            Self::clamp_scroll(s.track_index, s.track_paths.len(), &mut s.scroll_tracks);
+                            Self::clamp_scroll(
+                                s.track_index,
+                                s.track_paths.len(),
+                                &mut s.scroll_tracks,
+                            );
                         }
                     }
                 }
@@ -150,9 +161,7 @@ impl App {
             }
             KeyCode::Enter => {
                 let s = &self.ui_state.library_state;
-                if s.focused == LibraryPanel::Tracks
-                    && s.track_index < s.track_paths.len()
-                {
+                if s.focused == LibraryPanel::Tracks && s.track_index < s.track_paths.len() {
                     let path = std::path::PathBuf::from(&s.track_paths[s.track_index]);
                     let _ = s;
                     self.load_and_play(&path);
@@ -191,7 +200,13 @@ impl App {
         }
         for path in &paths {
             let path_str = path.to_string_lossy().to_string();
-            if self.library_db.get_by_path(&path_str).ok().flatten().is_some() {
+            if self
+                .library_db
+                .get_by_path(&path_str)
+                .ok()
+                .flatten()
+                .is_some()
+            {
                 continue;
             }
             if let Ok(info) = crate::metadata::reader::read_metadata(path) {

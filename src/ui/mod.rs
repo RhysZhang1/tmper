@@ -187,11 +187,7 @@ pub fn render(f: &mut Frame, state: &UiState) {
         return;
     }
     if state.active_view == ViewMode::Settings {
-        crate::ui::views::settings_view::render_settings_view(
-            f,
-            f.area(),
-            &state.settings_state,
-        );
+        crate::ui::views::settings_view::render_settings_view(f, f.area(), &state.settings_state);
         return;
     }
     if state.active_view == ViewMode::Library {
@@ -360,7 +356,10 @@ fn render_status_bar(f: &mut Frame, area: Rect, state: &UiState) {
     };
 
     let playlist_label = if let Some(idx) = state.active_playlist {
-        state.playlist_state.playlists.get(idx)
+        state
+            .playlist_state
+            .playlists
+            .get(idx)
             .map(|p| p.name.as_str())
             .unwrap_or(&state.playlist_name)
     } else {

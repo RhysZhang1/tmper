@@ -65,11 +65,3 @@ impl KeyHandler {
         }
     }
 }
-
-#[allow(dead_code)]
-pub fn handle_key(event: KeyEvent) -> Option<AppEvent> {
-    match event.code {
-        KeyCode::Char('q') => Some(AppEvent::Quit),
-        _ => Some(AppEvent::Key(event)),
-    }
-}

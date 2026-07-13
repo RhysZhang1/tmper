@@ -3,18 +3,13 @@ use ratatui::style::Color;
 const BLOCKS: &[char] = &[' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum CharSet {
     Blocks,
-    Braille,
-    Ascii,
 }
 
 pub fn render_bars(bars: &[f32], width: u16, height: u16, char_set: &CharSet) -> Vec<String> {
     let chars = match char_set {
         CharSet::Blocks => BLOCKS,
-        CharSet::Braille => &[' ', '⣀', '⣤', '⣶', '⣿'],
-        CharSet::Ascii => &[' ', '.', '-', '~', '*', '#', '@'],
     };
     let levels = chars.len() - 1;
 

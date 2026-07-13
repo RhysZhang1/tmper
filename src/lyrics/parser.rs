@@ -56,13 +56,8 @@ pub fn parse_lrc(content: &str) -> AppResult<LyricTrack> {
             match key {
                 "ti" => metadata.title = Some(value.to_string()),
                 "ar" => metadata.artist = Some(value.to_string()),
-                "al" => metadata.album = Some(value.to_string()),
-                "by" => metadata.author = Some(value.to_string()),
                 "offset" => {
                     metadata.global_offset_ms = value.parse::<i64>().unwrap_or(0);
-                }
-                "length" => {
-                    metadata.length = parse_length(value);
                 }
                 _ => {}
             }
@@ -158,16 +153,6 @@ pub fn parse_lrc(content: &str) -> AppResult<LyricTrack> {
     Ok(LyricTrack { metadata, lines })
 }
 
-fn parse_length(value: &str) -> Option<Duration> {
-    let parts: Vec<&str> = value.split(':').collect();
-    if parts.len() == 2 {
-        let min: u64 = parts[0].parse().ok()?;
-        let sec: u64 = parts[1].parse().ok()?;
-        Some(Duration::from_secs(min * 60 + sec))
-    } else {
-        None
-    }
-}
 pub fn load_lrc_file(path: &std::path::Path, fallbacks: &[&str]) -> AppResult<LyricTrack> {
     let bytes = std::fs::read(path)
         .map_err(|e| AppError::Lyrics(format!("Failed to read LRC file: {e}")))?;

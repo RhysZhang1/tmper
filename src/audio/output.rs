@@ -41,11 +41,14 @@ impl AudioOutput {
     /// This avoids rodio's permanent-detach-on-stop() issue.
     pub fn stop_and_replace(&mut self) {
         self.sink.stop();
-        self.sink = Sink::try_new(&self.stream_handle).unwrap_or_else(|_| {
-            // If creation fails, return a detached sink (best-effort)
-            let (_, handle) = rodio::OutputStream::try_default().expect("audio device");
-            Sink::try_new(&handle).expect("new sink")
-        });
+        match Sink::try_new(&self.stream_handle) {
+            Ok(new_sink) => self.sink = new_sink,
+            Err(e) => {
+                tracing::error!("Failed to create new sink (audio may be unavailable): {e}");
+                // Keep the old (stopped) sink — won't produce audio in this state
+                // but avoids a dangling handle. User will see the error in logs.
+            }
+        }
     }
 
     pub fn set_volume(&self, vol: f32) {
@@ -58,10 +61,5 @@ impl AudioOutput {
 
     pub fn empty(&self) -> bool {
         self.sink.empty()
-    }
-
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
-        self.sink.len()
     }
 }

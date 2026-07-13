@@ -60,7 +60,8 @@ impl LibraryDb {
             );
             CREATE INDEX IF NOT EXISTS idx_artist ON tracks(artist);
             CREATE INDEX IF NOT EXISTS idx_album  ON tracks(album);
-            CREATE INDEX IF NOT EXISTS idx_genre  ON tracks(genre);",
+            CREATE INDEX IF NOT EXISTS idx_genre  ON tracks(genre);
+            CREATE INDEX IF NOT EXISTS idx_search ON tracks(title, artist, album);",
         )
         .map_err(|e| AppError::Config(format!("Failed to create schema: {e}")))?;
 
@@ -91,7 +92,8 @@ impl LibraryDb {
                 file_size   INTEGER,
                 file_mtime  INTEGER,
                 added_at    INTEGER
-            );",
+            );
+            CREATE INDEX IF NOT EXISTS idx_search ON tracks(title, artist, album);",
         )
         .map_err(|e| AppError::Config(format!("Failed to create schema: {e}")))?;
 

@@ -1,9 +1,9 @@
+use image::GenericImageView;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
-use image::GenericImageView;
 
 use crate::ui::format_duration;
 use crate::ui::UiState;
@@ -98,8 +98,16 @@ fn cover_as_colored_lines(inner: Rect, bytes: &[u8]) -> Option<Vec<Line<'static>
             } else {
                 '▄'
             };
-            let fg = if a2 >= 128 { Color::Rgb(qr, qg, qb) } else { Color::Rgb(pr, pg, pb) };
-            let bg = if a1 >= 128 { Color::Rgb(pr, pg, pb) } else { Color::Rgb(qr, qg, qb) };
+            let fg = if a2 >= 128 {
+                Color::Rgb(qr, qg, qb)
+            } else {
+                Color::Rgb(pr, pg, pb)
+            };
+            let bg = if a1 >= 128 {
+                Color::Rgb(pr, pg, pb)
+            } else {
+                Color::Rgb(qr, qg, qb)
+            };
             spans.push(Span::styled(ch.to_string(), Style::default().fg(fg).bg(bg)));
         }
         // Swap error buffers for next row
@@ -169,41 +177,43 @@ fn render_cover_art(f: &mut Frame, area: Rect, state: &UiState) {
     }
 
     let music_icon = "♫";
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!("{:^width$}", music_icon, width = inner.width as usize),
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
+    lines.push(Line::from(vec![Span::styled(
+        format!("{:^width$}", music_icon, width = inner.width as usize),
+        Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+    )]));
 
-    let title = if state.title.is_empty() { "No track" } else { state.title.as_str() };
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!("{:^width$}", title, width = inner.width as usize),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-        ),
-    ]));
+    let title = if state.title.is_empty() {
+        "No track"
+    } else {
+        state.title.as_str()
+    };
+    lines.push(Line::from(vec![Span::styled(
+        format!("{:^width$}", title, width = inner.width as usize),
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )]));
 
-    let artist = if state.artist.is_empty() || state.artist == "—" { "" } else { state.artist.as_str() };
+    let artist = if state.artist.is_empty() || state.artist == "—" {
+        ""
+    } else {
+        state.artist.as_str()
+    };
     if !artist.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{:^width$}", artist, width = inner.width as usize),
-                Style::default().fg(Color::Gray),
-            ),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            format!("{:^width$}", artist, width = inner.width as usize),
+            Style::default().fg(Color::Gray),
+        )]));
     }
 
     if state.duration > 0.0 {
         let time_str = format!("{} {} / {}", play_icon, pos_str, dur_str);
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{:^width$}", time_str, width = inner.width as usize),
-                Style::default().fg(Color::Green),
-            ),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            format!("{:^width$}", time_str, width = inner.width as usize),
+            Style::default().fg(Color::Green),
+        )]));
     }
 
     let para = Paragraph::new(lines);
@@ -220,8 +230,7 @@ fn render_mini_playlist(f: &mut Frame, area: Rect, state: &UiState) {
 
     let ps = &state.playlist_state;
     if ps.playlists.is_empty() {
-        let para =
-            Paragraph::new("(no playlists)").style(Style::default().fg(Color::DarkGray));
+        let para = Paragraph::new("(no playlists)").style(Style::default().fg(Color::DarkGray));
         f.render_widget(para, inner);
         return;
     }
@@ -229,17 +238,13 @@ fn render_mini_playlist(f: &mut Frame, area: Rect, state: &UiState) {
     use crate::ui::views::playlist_view::{InsertMode, PlaylistFlatModel};
 
     let model = PlaylistFlatModel::new(&ps.playlists, ps.expanded_playlist);
-    let all_lines = model.build_styled_lines(
-        true,
-        &InsertMode::Off,
-        ps.selected_playlist,
-        |song| {
+    let all_lines =
+        model.build_styled_lines(true, &InsertMode::Off, ps.selected_playlist, |song| {
             state
                 .playing_index
                 .and_then(|pi| state.tracks.get(pi).map(|t| t.path == *song))
                 .unwrap_or(false)
-        },
-    );
+        });
 
     // Skip the "..." row (index 0) for Player View sidebar
     let flat_lines: Vec<_> = all_lines.into_iter().skip(1).collect();
@@ -286,8 +291,8 @@ fn render_lyrics_section(f: &mut Frame, area: Rect, state: &UiState) {
 
     if let Some(ref track) = state.lyric_track {
         if track.lines.is_empty() {
-            let para = Paragraph::new("No lyrics found")
-                .style(Style::default().fg(Color::DarkGray));
+            let para =
+                Paragraph::new("No lyrics found").style(Style::default().fg(Color::DarkGray));
             f.render_widget(para, inner);
             return;
         }
@@ -333,8 +338,7 @@ fn render_lyrics_section(f: &mut Frame, area: Rect, state: &UiState) {
         let para = Paragraph::new(lines);
         f.render_widget(para, inner);
     } else {
-        let para = Paragraph::new("No lyrics loaded")
-            .style(Style::default().fg(Color::DarkGray));
+        let para = Paragraph::new("No lyrics loaded").style(Style::default().fg(Color::DarkGray));
         f.render_widget(para, inner);
     }
 }
@@ -348,8 +352,7 @@ fn render_spectrum_section(f: &mut Frame, area: Rect, state: &UiState) {
     f.render_widget(block, area);
 
     if state.visualizer_data.is_empty() {
-        let para = Paragraph::new("No audio data")
-            .style(Style::default().fg(Color::DarkGray));
+        let para = Paragraph::new("No audio data").style(Style::default().fg(Color::DarkGray));
         f.render_widget(para, inner);
         return;
     }
@@ -365,7 +368,9 @@ fn render_song_info(f: &mut Frame, area: Rect, state: &UiState) {
             let pl_name = &state.playlist_state.playlists[pl_idx].name;
             parts.push(Span::styled(
                 format!(" {} {} ", '🎵', pl_name),
-                Style::default().fg(Color::Rgb(255, 200, 100)).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Rgb(255, 200, 100))
+                    .add_modifier(Modifier::BOLD),
             ));
         }
     }

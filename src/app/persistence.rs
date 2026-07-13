@@ -150,7 +150,7 @@ impl App {
                         title: title.clone(),
                         artist: artist.clone(),
                         duration_secs: duration,
-                        });
+                    });
                 }
 
                 if let Some(idx) = self

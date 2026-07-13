@@ -11,8 +11,7 @@ impl App {
     pub(super) fn clamp_playlist_scroll(
         state: &mut crate::ui::views::playlist_view::PlaylistManagerState,
     ) {
-        let total =
-            PlaylistFlatModel::new(&state.playlists, state.expanded_playlist).total_lines();
+        let total = PlaylistFlatModel::new(&state.playlists, state.expanded_playlist).total_lines();
         if state.selected_playlist >= total {
             state.selected_playlist = total.saturating_sub(1);
         }
@@ -36,12 +35,12 @@ impl App {
                     let name = s.clone();
                     if !name.is_empty() {
                         let new_idx = state.playlists.len();
-                        state.playlists.push(
-                            crate::ui::views::playlist_view::PlaylistData {
+                        state
+                            .playlists
+                            .push(crate::ui::views::playlist_view::PlaylistData {
                                 name,
                                 songs: Vec::new(),
-                            },
-                        );
+                            });
                         state.expanded_playlist = Some(new_idx);
                         state.selected_playlist = 0;
                         state.scroll_playlists = 0;
@@ -85,8 +84,7 @@ impl App {
                     state.selected_library_song = (state.selected_library_song + 1).min(max);
                 }
                 PlaylistPanel::Playlists => {
-                    let model =
-                        PlaylistFlatModel::new(&state.playlists, state.expanded_playlist);
+                    let model = PlaylistFlatModel::new(&state.playlists, state.expanded_playlist);
                     let max_vis = model.total_lines().saturating_sub(1);
                     if state.selected_playlist < max_vis {
                         state.selected_playlist += 1;
@@ -122,15 +120,12 @@ impl App {
                             }
                         }
                     } else {
-                        state.notification = Some((
-                            "请先展开一个歌单".to_string(),
-                            std::time::Instant::now(),
-                        ));
+                        state.notification =
+                            Some(("请先展开一个歌单".to_string(), std::time::Instant::now()));
                     }
                 }
                 PlaylistPanel::Playlists => {
-                    let model =
-                        PlaylistFlatModel::new(&state.playlists, state.expanded_playlist);
+                    let model = PlaylistFlatModel::new(&state.playlists, state.expanded_playlist);
                     match model.resolve(state.selected_playlist) {
                         LineTarget::AddNew => {
                             state.insert_mode = InsertMode::Typing(String::new());
@@ -141,10 +136,8 @@ impl App {
                             } else {
                                 state.expanded_playlist = Some(i);
                             }
-                            let new_model = PlaylistFlatModel::new(
-                                &state.playlists,
-                                state.expanded_playlist,
-                            );
+                            let new_model =
+                                PlaylistFlatModel::new(&state.playlists, state.expanded_playlist);
                             if let Some(new_line) = new_model.line_of_playlist(i) {
                                 state.selected_playlist = new_line;
                             }

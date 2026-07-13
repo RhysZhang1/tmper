@@ -95,7 +95,9 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsState) {
                         .bg(Color::Green)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD)
                 };
                 ListItem::new(Line::from(Span::styled(
                     format!("  {:^50}", item.name),

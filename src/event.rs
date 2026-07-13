@@ -6,9 +6,5 @@ pub enum AppEvent {
     Tick,
     Quit,
     JumpTop,
-    #[allow(dead_code)]
-    JumpBottom,
     RemoveSelected,
-    #[allow(dead_code)]
-    VisualizerData(Vec<f32>),
 }

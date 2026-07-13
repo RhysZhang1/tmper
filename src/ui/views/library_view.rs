@@ -99,13 +99,26 @@ pub fn render_library_view(f: &mut Frame, area: Rect, state: &LibraryState) {
 
     // Search bar
     if let Some(sa) = search_area {
-        let cursor = if state.search_query.len().is_multiple_of(2) { "|" } else { "" };
-        let label = format!(" Search: {}{} (Enter to search, Backspace to exit) ", state.search_query, cursor);
+        let cursor = if state.search_query.len().is_multiple_of(2) {
+            "|"
+        } else {
+            ""
+        };
+        let label = format!(
+            " Search: {}{} (Enter to search, Backspace to exit) ",
+            state.search_query, cursor
+        );
         let para = Paragraph::new(Line::from(Span::styled(
             label,
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         )))
-        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow)));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow)),
+        );
         f.render_widget(para, sa);
     }
 }

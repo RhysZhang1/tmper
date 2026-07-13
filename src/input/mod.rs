@@ -1,3 +1,3 @@
-pub mod command;
 pub mod handler;
-pub mod keymap;
+// FUTURE: pub mod command;  — :command parser (reserved)
+// FUTURE: pub mod keymap;   — custom keybinding config (reserved)

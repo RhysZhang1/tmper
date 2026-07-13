@@ -39,7 +39,10 @@ pub struct PlaylistFlatModel<'a> {
 
 impl<'a> PlaylistFlatModel<'a> {
     pub fn new(playlists: &'a [PlaylistData], expanded: Option<usize>) -> Self {
-        Self { playlists, expanded }
+        Self {
+            playlists,
+            expanded,
+        }
     }
 
     /// Total number of visible lines (including the "..." row).
@@ -307,7 +310,12 @@ fn render_playlists_panel(f: &mut Frame, area: Rect, state: &PlaylistManagerStat
     };
 
     let model = PlaylistFlatModel::new(&state.playlists, state.expanded_playlist);
-    let lines = model.build_styled_lines(is_focused, &state.insert_mode, state.selected_playlist, |_| false);
+    let lines = model.build_styled_lines(
+        is_focused,
+        &state.insert_mode,
+        state.selected_playlist,
+        |_| false,
+    );
 
     let vis_h = area.height.saturating_sub(2) as usize;
     let scroll = state.scroll_playlists.min(lines.len().saturating_sub(1));
