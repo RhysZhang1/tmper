@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "termusic", about = "A terminal-native music player")]
+#[command(name = "tmper", about = "A terminal-native music player")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,

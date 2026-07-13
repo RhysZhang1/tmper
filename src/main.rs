@@ -23,7 +23,7 @@ use paths::data_dir;
 async fn main() -> error::AppResult<()> {
     let data = data_dir();
     let _ = std::fs::create_dir_all(&data);
-    let log_file = std::fs::File::create(data.join("termusic.log"))
+    let log_file = std::fs::File::create(data.join("tmper.log"))
         .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
 
     tracing_subscriber::fmt()
@@ -31,7 +31,7 @@ async fn main() -> error::AppResult<()> {
         .with_target(false)
         .init();
 
-    tracing::info!("termusic starting...");
+    tracing::info!("tmper starting...");
 
     let cli = Cli::parse();
     let config = Config::load_or_default();

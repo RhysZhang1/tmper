@@ -1807,36 +1807,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "termusic"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "crossterm",
- "dirs",
- "encoding_rs",
- "futures-util",
- "image",
- "lofty",
- "rand",
- "ratatui",
- "regex",
- "rodio",
- "rusqlite",
- "rustfft",
- "serde",
- "serde_json",
- "symphonia",
- "thiserror 2.0.18",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "unicode-width 0.2.0",
- "walkdir",
-]
-
-[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1899,6 +1869,36 @@ name = "tinyvec_macros"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
+
+[[package]]
+name = "tmper"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossterm",
+ "dirs",
+ "encoding_rs",
+ "futures-util",
+ "image",
+ "lofty",
+ "rand",
+ "ratatui",
+ "regex",
+ "rodio",
+ "rusqlite",
+ "rustfft",
+ "serde",
+ "serde_json",
+ "symphonia",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "unicode-width 0.2.0",
+ "walkdir",
+]
 
 [[package]]
 name = "tokio"

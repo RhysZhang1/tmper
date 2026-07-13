@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Terminal music player (codename: **termusic**) — a terminal-native music player for Arch Linux/KDE Plasma. Written in Rust with ratatui TUI framework. Supports multi-format audio decoding, metadata display, LRC lyrics syncing, spectrum visualizer, and Vim-style keyboard navigation.
+Terminal music player (codename: **tmper**) — a terminal-native music player for Arch Linux/KDE Plasma. Written in Rust with ratatui TUI framework. Supports multi-format audio decoding, metadata display, LRC lyrics syncing, spectrum visualizer, and Vim-style keyboard navigation.
 
 The project is currently at the **design phase** — only `DESIGN.md` exists, with no code written yet.
 
@@ -75,7 +75,7 @@ src/
 - **Channel-based communication**: Subsystems send results via `tokio::mpsc::unbounded_channel`
 - **Immutable updates**: `update(old, changes) → new` pattern, no mutation of fields
 - **Error handling**: `anyhow::Result<T>` for public APIs, `thiserror` for `AppError` enum in `src/error.rs`
-- **Config priority**: CLI args > env vars > user config file (~/.config/termusic/config.toml) > hardcoded defaults
+- **Config priority**: CLI args > env vars > user config file (~/.config/tmper/config.toml) > hardcoded defaults
 
 ## Dependencies (core)
 

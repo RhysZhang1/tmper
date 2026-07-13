@@ -82,7 +82,7 @@ mod tests {
 
     #[test]
     fn test_import_export_roundtrip() {
-        let tmp = std::env::temp_dir().join("termusic_test_m3u");
+        let tmp = std::env::temp_dir().join("tmper_test_m3u");
         let _ = fs::create_dir_all(&tmp);
 
         let m3u_path = tmp.join("test.m3u");
@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn test_import_relative_paths() {
-        let tmp = std::env::temp_dir().join("termusic_test_m3u_rel");
+        let tmp = std::env::temp_dir().join("tmper_test_m3u_rel");
         fs::create_dir_all(&tmp).unwrap();
         fs::create_dir_all(tmp.join("subdir")).unwrap();
 

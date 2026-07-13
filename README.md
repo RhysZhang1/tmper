@@ -1,4 +1,4 @@
-# termusic — 终端音乐播放器
+# tmper — 终端音乐播放器
 
 一个运行在终端里的音乐播放器，使用 Rust 编写，ratatui TUI 框架。
 
@@ -75,7 +75,7 @@ cd ~/Desktop/Terminal_music_player
 cargo build --release
 ```
 
-编译产物在 `target/release/termusic`，约 7MB 的单文件二进制。
+编译产物在 `target/release/tmper`，约 7MB 的单文件二进制。
 
 ### 第三步：加入 PATH
 
@@ -90,8 +90,8 @@ export PATH="$HOME/Desktop/Terminal_music_player/target/release:$PATH"
 ### 第四步：运行
 
 ```bash
-termusic                  # 交互模式
-termusic play 歌曲.flac   # 播放指定文件
+tmper                  # 交互模式
+tmper play 歌曲.flac   # 播放指定文件
 ```
 
 提示：已经创建了 `tmper` 符号链接，也可以用 `tmper` 命令启动。
@@ -122,10 +122,10 @@ termusic play 歌曲.flac   # 播放指定文件
 
 ```bash
 # 播放单曲
-termusic play ~/Music/song.flac
+tmper play ~/Music/song.flac
 
 # 播放整个目录
-termusic play ~/Music/Queen/
+tmper play ~/Music/Queen/
 ```
 
 然后用 `j`/`k` 移动光标，`Enter` 播放选中的曲目，`Space` 暂停/恢复。
@@ -233,7 +233,7 @@ down = "j"
 
 ### Q: 启动后按键没反应？
 
-A: 检查日志文件 `data/termusic.log`。如果终端窗口太小（少于 10 行），界面无法正常渲染，请调大窗口。
+A: 检查日志文件 `data/tmper.log`。如果终端窗口太小（少于 10 行），界面无法正常渲染，请调大窗口。
 
 ### Q: 播放没有声音？
 
@@ -283,7 +283,7 @@ Terminal_music_player/
 │   └── keybindings.toml       # 自定义快捷键（可选）
 │
 ├── data/                      # 运行时数据（自动生成）
-│   ├── termusic.log           # 日志文件
+│   ├── tmper.log           # 日志文件
 │   ├── state.json             # 退出时保存的状态
 │   └── library.db             # 曲库索引数据库
 │

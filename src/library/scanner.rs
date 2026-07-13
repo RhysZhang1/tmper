@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn test_scan_filters_by_extension() {
-        let tmp = std::env::temp_dir().join("termusic_test_scan2");
+        let tmp = std::env::temp_dir().join("tmper_test_scan2");
         fs::create_dir_all(&tmp).unwrap();
         fs::write(tmp.join("song.mp3"), b"fake").unwrap();
         fs::write(tmp.join("readme.txt"), b"fake").unwrap();
