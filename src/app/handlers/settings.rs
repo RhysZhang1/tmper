@@ -25,8 +25,12 @@ impl App {
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 state.cursor = state.cursor.saturating_sub(1);
+                let vis = 10;
                 if state.cursor < state.scroll {
                     state.scroll = state.cursor;
+                }
+                if state.cursor >= state.scroll + vis {
+                    state.scroll = state.cursor.saturating_sub(vis) + 1;
                 }
             }
             KeyCode::Enter => {

@@ -127,6 +127,14 @@ impl App {
                 PlaylistPanel::Library => {
                     let max = state.library_paths.len().saturating_sub(1);
                     state.selected_library_song = (state.selected_library_song + 1).min(max);
+                    let sel = state.selected_library_song;
+                    let vis = VISIBLE_LINES;
+                    if sel < state.scroll_library {
+                        state.scroll_library = sel;
+                    }
+                    if sel >= state.scroll_library + vis {
+                        state.scroll_library = sel.saturating_sub(vis) + 1;
+                    }
                 }
                 PlaylistPanel::Playlists => {
                     let model = PlaylistFlatModel::new(&state.playlists, state.expanded_playlist);
@@ -140,8 +148,13 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => match state.focused {
                 PlaylistPanel::Library => {
                     state.selected_library_song = state.selected_library_song.saturating_sub(1);
-                    if state.selected_library_song < state.scroll_library {
-                        state.scroll_library = state.selected_library_song;
+                    let sel = state.selected_library_song;
+                    let vis = VISIBLE_LINES;
+                    if sel < state.scroll_library {
+                        state.scroll_library = sel;
+                    }
+                    if sel >= state.scroll_library + vis {
+                        state.scroll_library = sel.saturating_sub(vis) + 1;
                     }
                 }
                 PlaylistPanel::Playlists => {
@@ -150,6 +163,10 @@ impl App {
                     }
                     if state.selected_playlist < state.scroll_playlists {
                         state.scroll_playlists = state.selected_playlist;
+                    }
+                    if state.selected_playlist >= state.scroll_playlists + VISIBLE_LINES {
+                        state.scroll_playlists =
+                            state.selected_playlist.saturating_sub(VISIBLE_LINES) + 1;
                     }
                 }
             },

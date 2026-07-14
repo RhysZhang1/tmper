@@ -14,39 +14,57 @@ impl App {
                 };
             }
             KeyCode::Char('h') | KeyCode::Left => state.focused = BrowserPanel::Library,
-            KeyCode::Char('j') | KeyCode::Down => match state.focused {
-                BrowserPanel::Library => {
-                    let max = state.library_paths.len().saturating_sub(1);
-                    state.selected_library_index = (state.selected_library_index + 1).min(max);
-                    let vis_h = 10u16;
-                    let sel = state.selected_library_index as i32;
-                    let scroll = state.scroll_library as i32;
-                    if sel >= scroll + vis_h as i32 {
-                        state.scroll_library = (sel - vis_h as i32 + 1).max(0) as usize;
+            KeyCode::Char('j') | KeyCode::Down => {
+                let vis_h = 10usize;
+                match state.focused {
+                    BrowserPanel::Library => {
+                        let max = state.library_paths.len().saturating_sub(1);
+                        state.selected_library_index = (state.selected_library_index + 1).min(max);
+                        let sel = state.selected_library_index;
+                        if sel < state.scroll_library {
+                            state.scroll_library = sel;
+                        }
+                        if sel >= state.scroll_library + vis_h {
+                            state.scroll_library = sel.saturating_sub(vis_h) + 1;
+                        }
+                    }
+                    BrowserPanel::Filesystem => {
+                        let max = state.fs_items.len().saturating_sub(1);
+                        state.selected_fs_index = (state.selected_fs_index + 1).min(max);
+                        let sel = state.selected_fs_index;
+                        if sel < state.scroll_fs {
+                            state.scroll_fs = sel;
+                        }
+                        if sel >= state.scroll_fs + vis_h {
+                            state.scroll_fs = sel.saturating_sub(vis_h) + 1;
+                        }
                     }
                 }
-                BrowserPanel::Filesystem => {
-                    let max = state.fs_items.len().saturating_sub(1);
-                    state.selected_fs_index = (state.selected_fs_index + 1).min(max);
-                    let vis_h = 10u16;
-                    let sel = state.selected_fs_index as i32;
-                    let scroll = state.scroll_fs as i32;
-                    if sel >= scroll + vis_h as i32 {
-                        state.scroll_fs = (sel - vis_h as i32 + 1).max(0) as usize;
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                let vis_h = 10usize;
+                match state.focused {
+                    BrowserPanel::Library => {
+                        state.selected_library_index =
+                            state.selected_library_index.saturating_sub(1);
+                        let sel = state.selected_library_index;
+                        if sel < state.scroll_library {
+                            state.scroll_library = sel;
+                        }
+                        if sel >= state.scroll_library + vis_h {
+                            state.scroll_library = sel.saturating_sub(vis_h) + 1;
+                        }
                     }
-                }
-            },
-            KeyCode::Char('k') | KeyCode::Up => match state.focused {
-                BrowserPanel::Library => {
-                    state.selected_library_index = state.selected_library_index.saturating_sub(1);
-                    if state.selected_library_index < state.scroll_library {
-                        state.scroll_library = state.selected_library_index;
-                    }
-                }
-                BrowserPanel::Filesystem => {
-                    state.selected_fs_index = state.selected_fs_index.saturating_sub(1);
-                    if state.selected_fs_index < state.scroll_fs {
-                        state.scroll_fs = state.selected_fs_index;
+                    BrowserPanel::Filesystem => {
+                        state.selected_fs_index =
+                            state.selected_fs_index.saturating_sub(1);
+                        let sel = state.selected_fs_index;
+                        if sel < state.scroll_fs {
+                            state.scroll_fs = sel;
+                        }
+                        if sel >= state.scroll_fs + vis_h {
+                            state.scroll_fs = sel.saturating_sub(vis_h) + 1;
+                        }
                     }
                 }
             },
