@@ -87,6 +87,24 @@
 - `src/ui/views/settings_view.rs` — rebuild_settings 增加键位和 M3U 条目
 - `src/app/handlers/settings.rs` — handle_settings_key 增加 M3U 导出、cycle_setting 签名更新
 
+## 补充修改 (2026-07-14 v3)
+
+### 集成 viuer Kitty / iTerm2 封面图协议
+- 依赖：添加 `viuer = "0.11"`（支持 Kitty native protocol、iTerm2 inline images）
+- `UiState` 新增 `cover_art_area` 存储渲染时的封面区域位置
+- `UiState` 新增 `cover_art_version` 单调递增，封面变化时 bump
+
+渲染流程：
+1. `player_view.rs` 的 `render_cover_art()` 在 ratatui 帧内：渲染 border box + 块字符封面
+2. `app/mod.rs` 的 `render_cover_via_viuer()` 在 `terminal.draw()` 之后：
+   - 仅在 Kitty 或 iTerm2 终端激活
+   - 按比例缩放封面以适配字符单元格区域
+   - Kitty 图像覆盖在块字符之上，保持高清晰度
+   - 版本追踪避免每帧重复渲染
+   - 关闭封面显示时发送 Kitty 清除指令删除图像
+
+涉及文件：`Cargo.toml`, `src/app/mod.rs`, `src/app/persistence.rs`, `src/ui/mod.rs`, `src/ui/views/player_view.rs`
+
 ## 验证
 
 ```bash
