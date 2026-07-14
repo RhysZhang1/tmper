@@ -151,14 +151,15 @@ impl App {
         Ok(())
     }
 
-    /// Render cover art via viuer (Kitty/iTerm2 graphics protocol).
+    /// Render cover art via terminal graphics protocol (Kitty).
+    /// Uses env-var detection only — avoids stdin query that would conflict
+    /// with crossterm's raw-mode event reader.
     /// Only renders when cover art changes; Kitty images persist across frames.
     fn render_cover_via_viuer(&mut self) {
         if !self.ui_state.show_cover_art {
-            // Clear any previously rendered Kitty image
             if self.viuer_rendered {
                 use std::io::Write;
-                // Kitty graphics protocol: delete all placed images
+                // Kitty graphics: delete all placed images
                 let _ = write!(std::io::stdout(), "\x1b_Ga=d,d=I\x1b\\");
                 let _ = std::io::stdout().flush();
                 self.viuer_rendered = false;
@@ -183,60 +184,58 @@ impl App {
             return;
         }
 
-        // Detect terminal image protocol support (env vars only, no terminal query)
-        // Protocol detection — env vars only, no stdin query (avoids conflict
-        // with crossterm's event reader in raw mode).
-        let supports_kitty = viuer::get_kitty_support() != viuer::KittySupport::None;
-        let supports_iterm = viuer::is_iterm_supported();
-        // Sixel is supported by foot, WezTerm, Konsole, etc.
-        // Detection is TERM-based (no reliable env var, but viuer's sixel
-        // support is always-on when compiled with the feature).
-        let supports_sixel = std::env::var("TERM")
+        // Protocol detection via env vars only — no terminal queries,
+        // because viuer's query reads stdin, which conflicts with our
+        // raw-mode event reader.
+        let is_kitty = std::env::var("KITTY_WINDOW_ID").is_ok();
+        let is_iterm = std::env::var("TERM_PROGRAM")
+            .map(|v| v == "iTerm.app")
+            .unwrap_or(false);
+        let is_sixel = std::env::var("TERM")
             .map(|v| {
                 v.contains("foot")
                     || v.contains("wezterm")
                     || v.contains("contour")
                     || v.contains("yaft")
-                    || v.contains("mlterm")
             })
             .unwrap_or(false);
-        if !supports_kitty && !supports_iterm && !supports_sixel {
-            return; // No protocol support → rely on ratatui block chars
+        if !is_kitty && !is_iterm && !is_sixel {
+            return; // No image protocol → rely on block chars
         }
 
-        // Load image and calculate dimensions that preserve aspect ratio
+        // Load image, compute scaled pixel size, render via Kitty protocol
         match image::load_from_memory(&cover) {
             Ok(img) => {
                 let (img_w, img_h) = img.dimensions();
-                // Approximate pixel dimensions of the cell area
+                // Scale image to fit cell area (~10×20 px per cell)
                 let cell_px_w = w as u32 * 10;
                 let cell_px_h = h as u32 * 20;
-
-                // Scale to fit within cell area while maintaining aspect ratio
                 let scale = (cell_px_w as f64 / img_w as f64)
                     .min(cell_px_h as f64 / img_h as f64)
                     .min(1.0);
                 let out_w = (img_w as f64 * scale).round() as u32;
                 let out_h = (img_h as f64 * scale).round() as u32;
 
-                let mut config = viuer::Config {
-                    x,
-                    y: y as i16,
+                // Move cursor to cover area first, then render relative to it.
+                // This avoids coordinate confusion (Kitty interprets x,y as
+                // character cells, while Sixel treats them as pixels).
+                let _ = crossterm::execute!(
+                    std::io::stdout(),
+                    crossterm::cursor::MoveTo(x, y),
+                );
+                let config = viuer::Config {
+                    x: 0,
+                    y: 0,
                     width: Some(out_w),
                     height: Some(out_h),
-                    absolute_offset: true,
+                    absolute_offset: false,
                     restore_cursor: false,
-                    use_kitty: supports_kitty,
-                    use_iterm: supports_iterm,
-                    use_sixel: supports_sixel,
+                    use_kitty: is_kitty,
+                    use_iterm: is_iterm,
+                    use_sixel: is_sixel,
                     transparent: false,
                     ..Default::default()
                 };
-                // On non-Kitty/non-iTerm terminals, Sixel is our only hope
-                if !supports_kitty && !supports_iterm {
-                    config.use_kitty = false;
-                    config.use_iterm = false;
-                }
 
                 if viuer::print(&img, &config).is_ok() {
                     self.viuer_rendered = true;
