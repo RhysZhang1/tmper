@@ -183,16 +183,25 @@ impl App {
             return;
         }
 
-        // Only use viuer on Kitty/iTerm2 terminals
-        let supports_kitty = std::env::var("TERM")
-            .map(|v| v.contains("kitty"))
-            .unwrap_or(false)
-            || std::env::var("KITTY_WINDOW_ID").is_ok();
-        let supports_iterm = std::env::var("TERM_PROGRAM")
-            .map(|v| v == "iTerm.app")
+        // Detect terminal image protocol support (env vars only, no terminal query)
+        // Protocol detection — env vars only, no stdin query (avoids conflict
+        // with crossterm's event reader in raw mode).
+        let supports_kitty = viuer::get_kitty_support() != viuer::KittySupport::None;
+        let supports_iterm = viuer::is_iterm_supported();
+        // Sixel is supported by foot, WezTerm, Konsole, etc.
+        // Detection is TERM-based (no reliable env var, but viuer's sixel
+        // support is always-on when compiled with the feature).
+        let supports_sixel = std::env::var("TERM")
+            .map(|v| {
+                v.contains("foot")
+                    || v.contains("wezterm")
+                    || v.contains("contour")
+                    || v.contains("yaft")
+                    || v.contains("mlterm")
+            })
             .unwrap_or(false);
-        if !supports_kitty && !supports_iterm {
-            return;
+        if !supports_kitty && !supports_iterm && !supports_sixel {
+            return; // No protocol support → rely on ratatui block chars
         }
 
         // Load image and calculate dimensions that preserve aspect ratio
@@ -210,18 +219,24 @@ impl App {
                 let out_w = (img_w as f64 * scale).round() as u32;
                 let out_h = (img_h as f64 * scale).round() as u32;
 
-                let config = viuer::Config {
+                let mut config = viuer::Config {
                     x,
                     y: y as i16,
                     width: Some(out_w),
                     height: Some(out_h),
                     absolute_offset: true,
                     restore_cursor: false,
-                    use_kitty: true,
-                    use_iterm: true,
+                    use_kitty: supports_kitty,
+                    use_iterm: supports_iterm,
+                    use_sixel: supports_sixel,
                     transparent: false,
                     ..Default::default()
                 };
+                // On non-Kitty/non-iTerm terminals, Sixel is our only hope
+                if !supports_kitty && !supports_iterm {
+                    config.use_kitty = false;
+                    config.use_iterm = false;
+                }
 
                 if viuer::print(&img, &config).is_ok() {
                     self.viuer_rendered = true;
