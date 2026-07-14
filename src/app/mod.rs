@@ -172,8 +172,8 @@ impl App {
             return;
         }
 
-        // Only on Kitty terminal (detected via env var, no stdin query)
-        if !std::env::var("KITTY_WINDOW_ID").is_ok() {
+        // Only on terminals that support Kitty graphics protocol
+        if !is_kitty_graphics_compatible() {
             self.kitty_rendered = false;
             return;
         }
@@ -243,4 +243,22 @@ impl App {
             }
         }
     }
+}
+
+/// Returns true if the terminal supports the Kitty graphics protocol.
+/// Checks known env vars - no stdin query needed.
+fn is_kitty_graphics_compatible() -> bool {
+    // Native Kitty terminal
+    if std::env::var("KITTY_WINDOW_ID").is_ok() {
+        return true;
+    }
+    // WezTerm: sets TERM_PROGRAM=WezTerm, supports full Kitty protocol
+    if matches!(std::env::var("TERM_PROGRAM").as_deref(), Ok("WezTerm")) {
+        return true;
+    }
+    // Ghostty: supports Kitty protocol
+    if std::env::var("GHOSTTY_RESOURCES_DIR").is_ok() {
+        return true;
+    }
+    false
 }

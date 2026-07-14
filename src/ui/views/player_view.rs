@@ -98,17 +98,17 @@ fn cover_as_colored_lines(inner: Rect, bytes: &[u8]) -> Option<Vec<Line<'static>
             } else {
                 '▄'
             };
-            let fg = if a2 >= 128 {
-                Color::Rgb(qr, qg, qb)
-            } else {
-                Color::Rgb(pr, pg, pb)
+            let style = match (a1 >= 128, a2 >= 128) {
+                // Both visible: ▄ with fg = bottom half, bg = top half
+                (true, true) => Style::default().fg(Color::Rgb(qr, qg, qb)).bg(Color::Rgb(pr, pg, pb)),
+                // Only top visible: ▀ with fg = top half, bg transparent
+                (true, false) => Style::default().fg(Color::Rgb(pr, pg, pb)).bg(Color::Reset),
+                // Only bottom visible: ▄ with fg = bottom half, bg transparent
+                (false, true) => Style::default().fg(Color::Rgb(qr, qg, qb)).bg(Color::Reset),
+                // Both transparent: space, no color
+                (false, false) => Style::default(),
             };
-            let bg = if a1 >= 128 {
-                Color::Rgb(pr, pg, pb)
-            } else {
-                Color::Rgb(qr, qg, qb)
-            };
-            spans.push(Span::styled(ch.to_string(), Style::default().fg(fg).bg(bg)));
+            spans.push(Span::styled(ch.to_string(), style));
         }
         // Swap error buffers for next row
         std::mem::swap(&mut err_r, &mut next_err_r);
