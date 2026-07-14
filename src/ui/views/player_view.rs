@@ -154,6 +154,11 @@ fn render_cover_art(f: &mut Frame, area: Rect, state: &UiState) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    // Store position for Kitty protocol rendering (read-only, no state mut)
+    state
+        .cover_rect
+        .set((inner.x, inner.y, inner.width, inner.height));
+
     if state.show_cover_art {
         // Try to render cover art as colored blocks
         if let Some(ref cover) = state.cover_art {

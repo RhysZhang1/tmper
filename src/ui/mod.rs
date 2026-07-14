@@ -87,6 +87,10 @@ pub struct UiState {
     /// Actual visible rows computed from terminal size during render.
     /// Updated each frame; read by scroll handlers to avoid hardcoded limits.
     pub visible_rows: Cell<usize>,
+    /// Monotonic counter bumped each time cover art changes.
+    pub cover_gen: Cell<u64>,
+    /// Inner rect of cover art area (x, y, w, h in chars) — set during render.
+    pub cover_rect: Cell<(u16, u16, u16, u16)>,
 }
 
 impl Default for UiState {
@@ -128,6 +132,8 @@ impl Default for UiState {
             command_buffer: String::new(),
             help_scroll: 0,
             visible_rows: Cell::new(20),
+            cover_gen: Cell::new(0),
+            cover_rect: Cell::new((0, 0, 0, 0)),
         }
     }
 }
