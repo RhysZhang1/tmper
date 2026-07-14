@@ -15,7 +15,7 @@ impl App {
                 if state.cursor + 1 < state.items.len() {
                     state.cursor += 1;
                 }
-                let vis = 10;
+                let vis = self.ui_state.visible_rows.get();
                 if state.cursor < state.scroll {
                     state.scroll = state.cursor;
                 }
@@ -25,7 +25,7 @@ impl App {
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 state.cursor = state.cursor.saturating_sub(1);
-                let vis = 10;
+                let vis = self.ui_state.visible_rows.get();
                 if state.cursor < state.scroll {
                     state.scroll = state.cursor;
                 }

@@ -198,7 +198,7 @@ impl App {
             if ps.selected_playlist < max_idx {
                 ps.selected_playlist += 1;
             }
-            Self::clamp_playlist_scroll(ps);
+            Self::clamp_playlist_scroll(ps, self.ui_state.visible_rows.get());
             return true;
         }
         if up {
@@ -252,7 +252,7 @@ impl App {
                         if let Some(new_line) = new_model.line_of_playlist(i) {
                             ps.selected_playlist = new_line;
                         }
-                        Self::clamp_playlist_scroll(ps);
+                        Self::clamp_playlist_scroll(ps, self.ui_state.visible_rows.get());
                     }
                     _ => {}
                 }

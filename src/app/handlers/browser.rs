@@ -15,7 +15,7 @@ impl App {
             }
             KeyCode::Char('h') | KeyCode::Left => state.focused = BrowserPanel::Library,
             KeyCode::Char('j') | KeyCode::Down => {
-                let vis_h = 10usize;
+                let vis_h = self.ui_state.visible_rows.get();
                 match state.focused {
                     BrowserPanel::Library => {
                         let max = state.library_paths.len().saturating_sub(1);
@@ -42,7 +42,7 @@ impl App {
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                let vis_h = 10usize;
+                let vis_h = self.ui_state.visible_rows.get();
                 match state.focused {
                     BrowserPanel::Library => {
                         state.selected_library_index =

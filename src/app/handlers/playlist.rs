@@ -3,19 +3,16 @@ use crossterm::event::{KeyCode, KeyEvent};
 use crate::app::App;
 use crate::ui::views::playlist_view::{InsertMode, LineTarget, PlaylistFlatModel, PlaylistPanel};
 
-/// Number of visible playlist lines used for scroll-window calculations.
-pub const VISIBLE_LINES: usize = 10;
-
 impl App {
     /// Clamp scroll offset and cursor after a playlist structural change.
     pub(super) fn clamp_playlist_scroll(
         state: &mut crate::ui::views::playlist_view::PlaylistManagerState,
+        vis: usize,
     ) {
         let total = PlaylistFlatModel::new(&state.playlists, state.expanded_playlist).total_lines();
         if state.selected_playlist >= total {
             state.selected_playlist = total.saturating_sub(1);
         }
-        let vis = VISIBLE_LINES;
         if state.selected_playlist < state.scroll_playlists {
             state.scroll_playlists = state.selected_playlist;
         }
@@ -128,7 +125,7 @@ impl App {
                     let max = state.library_paths.len().saturating_sub(1);
                     state.selected_library_song = (state.selected_library_song + 1).min(max);
                     let sel = state.selected_library_song;
-                    let vis = VISIBLE_LINES;
+                    let vis = self.ui_state.visible_rows.get();
                     if sel < state.scroll_library {
                         state.scroll_library = sel;
                     }
@@ -142,14 +139,14 @@ impl App {
                     if state.selected_playlist < max_vis {
                         state.selected_playlist += 1;
                     }
-                    Self::clamp_playlist_scroll(state);
+                    Self::clamp_playlist_scroll(state, self.ui_state.visible_rows.get());
                 }
             },
             KeyCode::Char('k') | KeyCode::Up => match state.focused {
                 PlaylistPanel::Library => {
                     state.selected_library_song = state.selected_library_song.saturating_sub(1);
                     let sel = state.selected_library_song;
-                    let vis = VISIBLE_LINES;
+                    let vis = self.ui_state.visible_rows.get();
                     if sel < state.scroll_library {
                         state.scroll_library = sel;
                     }
@@ -164,9 +161,9 @@ impl App {
                     if state.selected_playlist < state.scroll_playlists {
                         state.scroll_playlists = state.selected_playlist;
                     }
-                    if state.selected_playlist >= state.scroll_playlists + VISIBLE_LINES {
+                    if state.selected_playlist >= state.scroll_playlists + self.ui_state.visible_rows.get() {
                         state.scroll_playlists =
-                            state.selected_playlist.saturating_sub(VISIBLE_LINES) + 1;
+                            state.selected_playlist.saturating_sub(self.ui_state.visible_rows.get()) + 1;
                     }
                 }
             },
@@ -203,7 +200,7 @@ impl App {
                             if let Some(new_line) = new_model.line_of_playlist(i) {
                                 state.selected_playlist = new_line;
                             }
-                            Self::clamp_playlist_scroll(state);
+                            Self::clamp_playlist_scroll(state, self.ui_state.visible_rows.get());
                         }
                         LineTarget::Song {
                             playlist,

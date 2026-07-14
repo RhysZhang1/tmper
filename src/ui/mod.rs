@@ -1,5 +1,7 @@
 pub mod views;
 pub mod widgets;
+use std::cell::Cell;
+
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -82,6 +84,9 @@ pub struct UiState {
     pub command_mode: bool,
     pub command_buffer: String,
     pub help_scroll: usize,
+    /// Actual visible rows computed from terminal size during render.
+    /// Updated each frame; read by scroll handlers to avoid hardcoded limits.
+    pub visible_rows: Cell<usize>,
 }
 
 impl Default for UiState {
@@ -122,11 +127,17 @@ impl Default for UiState {
             command_mode: false,
             command_buffer: String::new(),
             help_scroll: 0,
+            visible_rows: Cell::new(20),
         }
     }
 }
 
 pub fn render(f: &mut Frame, state: &UiState) {
+    // Update visible row count from actual terminal size
+    state
+        .visible_rows
+        .set(f.area().height.saturating_sub(2) as usize);
+
     // Help overlay — highest priority, always on top
     if state.show_help {
         crate::ui::widgets::help_popup::render_help(f, state.help_scroll);
