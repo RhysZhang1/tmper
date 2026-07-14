@@ -39,6 +39,8 @@ pub struct App {
     fft_data: Arc<Mutex<Vec<f32>>>,
     kitty_rendered: bool,
     last_cover_gen: u64,
+    chafa_available: bool,
+    last_cover_gen_chafa: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -73,6 +75,8 @@ impl App {
             fft_data: Arc::new(Mutex::new(Vec::new())),
             kitty_rendered: false,
             last_cover_gen: 0,
+            chafa_available: which_chafa(),
+            last_cover_gen_chafa: 0,
         })
     }
 
@@ -141,10 +145,10 @@ impl App {
                 tracing::error!("Render error: {e}");
             }
 
-            // Kitty graphics: place cover art at correct position via p=x,y.
-            // No cursor movement — the protocol handles pixel positioning.
-            // Image persists across ratatui diff frames.
+            // Kitty graphics: native pixel rendering (Kitty-compatible terminals)
             self.render_cover_via_kitty();
+            // SIXEL graphics via chafa subprocess (Konsole, etc.)
+            self.render_cover_via_chafa();
         }
 
         // Stop FFT
@@ -243,6 +247,141 @@ impl App {
             }
         }
     }
+
+    /// Render cover art via chafa subprocess using SIXEL graphics protocol.
+    /// Works on Konsole (KDE Plasma) and other terminals with SIXEL support.
+    fn render_cover_via_chafa(&mut self) {
+        use std::io::Write;
+
+        if !self.chafa_available {
+            return;
+        }
+        if !self.ui_state.show_cover_art {
+            if self.last_cover_gen_chafa != 0 {
+                // Cover hidden — clear SIXEL by redrawing area with spaces
+                let (x, y, w, h) = self.ui_state.cover_rect.get();
+                if w > 0 && h > 0 {
+                    let clear: String = std::iter::repeat_n(
+                        " ".repeat(w as usize),
+                        h as usize,
+                    )
+                    .collect::<Vec<_>>()
+                        .join("\r\n");
+                    let _ = write!(std::io::stdout(), "\x1b[{};{}H{}", y + 1, x + 1, clear);
+                    let _ = std::io::stdout().flush();
+                }
+                self.last_cover_gen_chafa = 0;
+            }
+            return;
+        }
+
+        let gen = self.ui_state.cover_gen.get();
+        if gen == self.last_cover_gen_chafa {
+            return; // Already rendered
+        }
+        self.last_cover_gen_chafa = gen;
+
+        let cover = match self.ui_state.cover_art {
+            Some(ref c) => c.clone(), // Arc clone — cheap
+            None => return,
+        };
+
+        let (x_char, y_char, _w_char, _h_char) = self.ui_state.cover_rect.get();
+        if _w_char == 0 || _h_char == 0 {
+            return;
+        }
+
+        // Spawn chafa with SIXEL output, capture the data
+        let output = match std::process::Command::new("chafa")
+            .arg("-f")
+            .arg("sixels")
+            .arg("-c")
+            .arg("full")
+            .arg("-w")
+            .arg(_w_char.to_string())
+            .arg("--no-cache")
+            .arg("/dev/stdin")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(mut child) => {
+                if let Some(ref mut stdin) = child.stdin {
+                    let _ = stdin.write_all(&cover);
+                }
+                drop(child.stdin.take());
+                match child.wait_with_output() {
+                    Ok(out) => out.stdout,
+                    Err(e) => {
+                        tracing::warn!("chafa wait failed: {e}");
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("chafa spawn failed: {e}");
+                self.chafa_available = false;
+                return;
+            }
+        };
+
+        if output.is_empty() {
+            return;
+        }
+
+        // Strip cursor-control sequences that chafa prepends/ appends:
+        //   \x1b[?25l (hide cursor), \x1b[?80l (no wrap), \x1b[?8452l (konsole-specific)
+        //   \x1b[?25h (show cursor)
+        let mut sixel_start = 0;
+        while sixel_start < output.len() && output[sixel_start] != 0x1b {
+            sixel_start += 1;
+        }
+        // Find the SIXEL DCS: ESC P
+        while sixel_start < output.len() - 1
+            && !(output[sixel_start] == 0x1b && output[sixel_start + 1] == b'P')
+        {
+            sixel_start += 1;
+        }
+        if sixel_start >= output.len() {
+            return;
+        }
+
+        // Find the ST (string terminator): ESC \
+        let mut sixel_end = output.len();
+        while sixel_end > sixel_start + 1
+            && !(output[sixel_end - 2] == 0x1b && output[sixel_end - 1] == b'\\')
+        {
+            sixel_end -= 1;
+        }
+        if sixel_end <= sixel_start {
+            return;
+        }
+
+        let sixel_data = &output[sixel_start..sixel_end];
+
+        let _ = write!(
+            std::io::stdout(),
+            "\x1b[{};{}H",
+            y_char + 1,
+            x_char + 1
+        );
+        let _ = std::io::stdout().write_all(sixel_data);
+        let _ = std::io::stdout().flush();
+    }
+}
+
+/// Check if the `chafa` binary is available on PATH.
+fn which_chafa() -> bool {
+    std::env::var_os("PATH")
+        .and_then(|paths| {
+            std::env::split_paths(&paths).any(|dir| {
+                let candidate = dir.join("chafa");
+                // On Unix, check if it's executable (not a directory)
+                candidate.is_file()
+            }).then_some(())
+        })
+        .is_some()
 }
 
 /// Returns true if the terminal supports the Kitty graphics protocol.
