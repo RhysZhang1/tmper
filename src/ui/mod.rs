@@ -96,6 +96,9 @@ pub struct UiState {
     /// (Kitty/SIXEL). The half-block character renderer should skip,
     /// showing the song info text instead to avoid flickering.
     pub native_cover_active: bool,
+    /// Pre-rendered cover art lines from chafa (ANSI-colored half-blocks).
+    /// When set, player_view renders these instead of the built-in renderer.
+    pub cover_chafa_lines: Option<Vec<Line<'static>>>,
 }
 
 impl Default for UiState {
@@ -140,6 +143,7 @@ impl Default for UiState {
             cover_gen: Cell::new(0),
             cover_rect: Cell::new((0, 0, 0, 0)),
             native_cover_active: false,
+            cover_chafa_lines: None,
         }
     }
 }

@@ -159,9 +159,15 @@ fn render_cover_art(f: &mut Frame, area: Rect, state: &UiState) {
         .cover_rect
         .set((inner.x, inner.y, inner.width, inner.height));
 
-    if state.show_cover_art && !state.native_cover_active {
-        // Try to render cover art as colored blocks
-        // (skipped when Kitty/SIXEL native graphics is rendering the image)
+    if state.show_cover_art {
+        // Prefer chafa-rendered lines (better color/dithering)
+        if let Some(ref chafa_lines) = state.cover_chafa_lines {
+            let para = Paragraph::new(chafa_lines.clone());
+            f.render_widget(para, inner);
+            return;
+        }
+
+        // Fall back to built-in half-block renderer
         if let Some(ref cover) = state.cover_art {
             if let Some(lines) = cover_as_colored_lines(inner, cover) {
                 let para = Paragraph::new(lines);
