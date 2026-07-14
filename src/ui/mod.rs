@@ -92,6 +92,10 @@ pub struct UiState {
     pub cover_gen: Cell<u64>,
     /// Inner rect of cover art area (x, y, w, h in chars) — set during render.
     pub cover_rect: Cell<(u16, u16, u16, u16)>,
+    /// When true, cover art is handled by a native graphics protocol
+    /// (Kitty/SIXEL). The half-block character renderer should skip,
+    /// showing the song info text instead to avoid flickering.
+    pub native_cover_active: bool,
 }
 
 impl Default for UiState {
@@ -135,6 +139,7 @@ impl Default for UiState {
             visible_rows: Cell::new(20),
             cover_gen: Cell::new(0),
             cover_rect: Cell::new((0, 0, 0, 0)),
+            native_cover_active: false,
         }
     }
 }

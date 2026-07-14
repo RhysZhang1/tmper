@@ -143,6 +143,11 @@ impl App {
                 break;
             }
 
+            // When Kitty or SIXEL native graphics is active, tell the UI to
+            // skip half-block character rendering (prevent flicker/overwrite).
+            self.ui_state.native_cover_active = self.ui_state.show_cover_art
+                && (is_kitty_graphics_compatible() || self.chafa_available);
+
             if let Err(e) = terminal.draw(|f| ui::render(f, &self.ui_state)) {
                 tracing::error!("Render error: {e}");
             }

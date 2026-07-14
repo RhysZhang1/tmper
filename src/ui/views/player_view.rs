@@ -159,8 +159,9 @@ fn render_cover_art(f: &mut Frame, area: Rect, state: &UiState) {
         .cover_rect
         .set((inner.x, inner.y, inner.width, inner.height));
 
-    if state.show_cover_art {
+    if state.show_cover_art && !state.native_cover_active {
         // Try to render cover art as colored blocks
+        // (skipped when Kitty/SIXEL native graphics is rendering the image)
         if let Some(ref cover) = state.cover_art {
             if let Some(lines) = cover_as_colored_lines(inner, cover) {
                 let para = Paragraph::new(lines);
