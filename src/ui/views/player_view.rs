@@ -154,6 +154,11 @@ fn render_cover_art(f: &mut Frame, area: Rect, state: &UiState) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    // Store inner area position for viuer rendering (after terminal.draw())
+    state
+        .cover_art_area
+        .set((inner.x, inner.y, inner.width, inner.height));
+
     if state.show_cover_art {
         // Try to render cover art as colored blocks
         if let Some(ref cover) = state.cover_art {

@@ -175,6 +175,9 @@ impl App {
                         self.ui_state.duration = duration;
                         self.ui_state.is_playing = true;
                         self.ui_state.cover_art = info.cover_art.clone();
+                        self.ui_state.cover_art_version.set(
+                            self.ui_state.cover_art_version.get() + 1,
+                        );
                         self.engine.set_volume(self.ui_state.volume);
                         self.load_lyrics_for_current();
                         self.start_fft();

@@ -87,6 +87,11 @@ pub struct UiState {
     /// Actual visible rows computed from terminal size during render.
     /// Updated each frame; read by scroll handlers to avoid hardcoded limits.
     pub visible_rows: Cell<usize>,
+    /// Position of the cover art inner area (x, y, width, height in chars).
+    pub cover_art_area: Cell<(u16, u16, u16, u16)>,
+    /// Monotonic counter bumped each time cover art changes.
+    /// Used by viuer to detect when to re-render.
+    pub cover_art_version: Cell<u64>,
 }
 
 impl Default for UiState {
@@ -128,6 +133,8 @@ impl Default for UiState {
             command_buffer: String::new(),
             help_scroll: 0,
             visible_rows: Cell::new(20),
+            cover_art_area: Cell::new((0, 0, 0, 0)),
+            cover_art_version: Cell::new(0),
         }
     }
 }

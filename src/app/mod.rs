@@ -18,6 +18,7 @@ use crate::input::handler::KeyHandler;
 use crate::input::keymap::{self, KeyBindings};
 use crate::library::database::LibraryDb;
 use crate::ui::{self, UiState};
+use image::GenericImageView;
 use serde::{Deserialize, Serialize};
 
 pub(crate) mod handlers;
@@ -34,6 +35,8 @@ pub struct App {
     fft_cancel_tx: Option<tokio::sync::watch::Sender<()>>,
     library_db: LibraryDb,
     fft_data: Arc<Mutex<Vec<f32>>>,
+    last_cover_art_version: u64,
+    viuer_rendered: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -66,6 +69,8 @@ impl App {
             library_db,
             fft_cancel_tx: None,
             fft_data: Arc::new(Mutex::new(Vec::new())),
+            last_cover_art_version: 0,
+            viuer_rendered: false,
         })
     }
 
@@ -133,6 +138,9 @@ impl App {
             if let Err(e) = terminal.draw(|f| ui::render(f, &self.ui_state)) {
                 tracing::error!("Render error: {e}");
             }
+
+            // viuer: render cover art via Kitty terminal graphics protocol
+            self.render_cover_via_viuer();
         }
 
         // Stop FFT
@@ -141,5 +149,87 @@ impl App {
         execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
 
         Ok(())
+    }
+
+    /// Render cover art via viuer (Kitty/iTerm2 graphics protocol).
+    /// Only renders when cover art changes; Kitty images persist across frames.
+    fn render_cover_via_viuer(&mut self) {
+        if !self.ui_state.show_cover_art {
+            // Clear any previously rendered Kitty image
+            if self.viuer_rendered {
+                use std::io::Write;
+                // Kitty graphics protocol: delete all placed images
+                let _ = write!(std::io::stdout(), "\x1b_Ga=d,d=I\x1b\\");
+                let _ = std::io::stdout().flush();
+                self.viuer_rendered = false;
+            }
+            self.last_cover_art_version = self.ui_state.cover_art_version.get();
+            return;
+        }
+
+        let version = self.ui_state.cover_art_version.get();
+        if version == self.last_cover_art_version {
+            return;
+        }
+        self.last_cover_art_version = version;
+
+        let cover = match self.ui_state.cover_art {
+            Some(ref c) => c.clone(),
+            None => return,
+        };
+
+        let (x, y, w, h) = self.ui_state.cover_art_area.get();
+        if w == 0 || h == 0 {
+            return;
+        }
+
+        // Only use viuer on Kitty/iTerm2 terminals
+        let supports_kitty = std::env::var("TERM")
+            .map(|v| v.contains("kitty"))
+            .unwrap_or(false)
+            || std::env::var("KITTY_WINDOW_ID").is_ok();
+        let supports_iterm = std::env::var("TERM_PROGRAM")
+            .map(|v| v == "iTerm.app")
+            .unwrap_or(false);
+        if !supports_kitty && !supports_iterm {
+            return;
+        }
+
+        // Load image and calculate dimensions that preserve aspect ratio
+        match image::load_from_memory(&cover) {
+            Ok(img) => {
+                let (img_w, img_h) = img.dimensions();
+                // Approximate pixel dimensions of the cell area
+                let cell_px_w = w as u32 * 10;
+                let cell_px_h = h as u32 * 20;
+
+                // Scale to fit within cell area while maintaining aspect ratio
+                let scale = (cell_px_w as f64 / img_w as f64)
+                    .min(cell_px_h as f64 / img_h as f64)
+                    .min(1.0);
+                let out_w = (img_w as f64 * scale).round() as u32;
+                let out_h = (img_h as f64 * scale).round() as u32;
+
+                let config = viuer::Config {
+                    x,
+                    y: y as i16,
+                    width: Some(out_w),
+                    height: Some(out_h),
+                    absolute_offset: true,
+                    restore_cursor: false,
+                    use_kitty: true,
+                    use_iterm: true,
+                    transparent: false,
+                    ..Default::default()
+                };
+
+                if viuer::print(&img, &config).is_ok() {
+                    self.viuer_rendered = true;
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to decode cover art for viuer: {e}");
+            }
+        }
     }
 }
