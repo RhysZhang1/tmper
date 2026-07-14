@@ -193,7 +193,9 @@ impl App {
             if ps.selected_playlist < max_idx {
                 ps.selected_playlist += 1;
             }
-            Self::clamp_playlist_scroll(ps, self.ui_state.visible_rows.get());
+            // Mini playlist occupies bottom half of left panel
+            let vis = self.ui_state.visible_rows.get() / 2;
+            Self::clamp_playlist_scroll(ps, vis);
             return true;
         }
         if up {
@@ -247,7 +249,7 @@ impl App {
                         if let Some(new_line) = new_model.line_of_playlist(i) {
                             ps.selected_playlist = new_line;
                         }
-                        Self::clamp_playlist_scroll(ps, self.ui_state.visible_rows.get());
+                        Self::clamp_playlist_scroll(ps, self.ui_state.visible_rows.get() / 2);
                     }
                     _ => {}
                 }
