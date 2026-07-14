@@ -4,10 +4,8 @@ use crate::error::AppResult;
 use crate::lyrics::parser::load_lrc_file;
 use crate::lyrics::types::LyricTrack;
 
-#[allow(dead_code)]
 pub struct LyricEngine;
 
-#[allow(dead_code)]
 impl LyricEngine {
     pub fn find_lyrics(audio_path: &Path) -> Option<PathBuf> {
         // 1. Same-name .lrc file

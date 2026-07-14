@@ -20,7 +20,6 @@ impl TrackEntry {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Playlist {
     pub name: String,
     pub tracks: Vec<TrackEntry>,

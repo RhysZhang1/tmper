@@ -32,6 +32,14 @@ impl App {
         }
     }
 
+    // ── Keybinding helpers ──
+
+    /// Check if a key event matches a configured keybinding string
+    fn key_matches(&self, key: &KeyEvent, binding: &str) -> bool {
+        let expected = crate::input::keymap::parse_key_str(binding);
+        key.code == expected.code && key.modifiers == expected.modifiers
+    }
+
     // ── Key event dispatch ──
 
     fn handle_key_event(&mut self, key: KeyEvent) {
@@ -47,6 +55,30 @@ impl App {
             InsertMode::Typing(_)
         ) {
             self.handle_playlist_key(&key);
+            return;
+        }
+
+        // Command mode: all keys go to command input
+        if self.ui_state.command_mode {
+            self.handle_command_input(key);
+            return;
+        }
+
+        // Help overlay: j/k scroll, 0/Esc to close
+        if self.ui_state.show_help {
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.ui_state.help_scroll += 1;
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.ui_state.help_scroll = self.ui_state.help_scroll.saturating_sub(1);
+                }
+                KeyCode::Char('0') | KeyCode::Esc => {
+                    self.ui_state.show_help = false;
+                    self.ui_state.help_scroll = 0;
+                }
+                _ => {}
+            }
             return;
         }
 
@@ -155,27 +187,30 @@ impl App {
 
     /// Returns true if the key was consumed by the sidebar.
     fn handle_player_view_sidebar_key(&mut self, key: &KeyEvent) -> bool {
+        let down = key.code == KeyCode::Down || self.key_matches(key, &self.key_bindings.down);
+        let up = key.code == KeyCode::Up || self.key_matches(key, &self.key_bindings.up);
+
+        if down {
+            let ps = &mut self.ui_state.playlist_state;
+            let model = PlaylistFlatModel::new(&ps.playlists, ps.expanded_playlist);
+            let max_idx = model.total_lines().saturating_sub(2); // skip "..." row
+            if ps.selected_playlist < max_idx {
+                ps.selected_playlist += 1;
+            }
+            Self::clamp_playlist_scroll(ps);
+            return true;
+        }
+        if up {
+            let ps = &mut self.ui_state.playlist_state;
+            if ps.selected_playlist > 0 {
+                ps.selected_playlist -= 1;
+            }
+            if ps.selected_playlist < ps.scroll_playlists {
+                ps.scroll_playlists = ps.selected_playlist;
+            }
+            return true;
+        }
         match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                let ps = &mut self.ui_state.playlist_state;
-                let model = PlaylistFlatModel::new(&ps.playlists, ps.expanded_playlist);
-                let max_idx = model.total_lines().saturating_sub(2); // skip "..." row
-                if ps.selected_playlist < max_idx {
-                    ps.selected_playlist += 1;
-                }
-                Self::clamp_playlist_scroll(ps);
-                true
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                let ps = &mut self.ui_state.playlist_state;
-                if ps.selected_playlist > 0 {
-                    ps.selected_playlist -= 1;
-                }
-                if ps.selected_playlist < ps.scroll_playlists {
-                    ps.scroll_playlists = ps.selected_playlist;
-                }
-                true
-            }
             KeyCode::Enter => {
                 let ps = &self.ui_state.playlist_state;
                 let model = PlaylistFlatModel::new(&ps.playlists, ps.expanded_playlist);
@@ -228,93 +263,112 @@ impl App {
 
     fn handle_global_key(&mut self, key: KeyEvent) {
         let visible_h = 10u16;
-        match key.code {
-            // Playback
-            KeyCode::Char(' ') => {
-                if self.engine.is_playing() || self.ui_state.is_playing {
-                    self.engine.pause();
-                    self.ui_state.is_playing = false;
-                } else {
-                    self.engine.resume();
-                    self.ui_state.is_playing = true;
+
+        // `:` enters command mode (like Vim)
+        if key.code == KeyCode::Char(':') && key.modifiers.is_empty() {
+            if !self.search_mode {
+                self.ui_state.command_mode = true;
+                self.ui_state.command_buffer.clear();
+            }
+            return;
+        }
+
+        let is_play_pause = self.key_matches(&key, &self.key_bindings.play_pause);
+        let is_vol_down = self.key_matches(&key, &self.key_bindings.vol_down);
+        let is_vol_up = self.key_matches(&key, &self.key_bindings.vol_up);
+        let is_next = self.key_matches(&key, &self.key_bindings.next_track);
+        let is_prev = self.key_matches(&key, &self.key_bindings.prev_track);
+        let is_down = key.code == KeyCode::Down || self.key_matches(&key, &self.key_bindings.down);
+        let is_up = key.code == KeyCode::Up || self.key_matches(&key, &self.key_bindings.up);
+
+        if is_play_pause {
+            if self.engine.is_playing() || self.ui_state.is_playing {
+                self.engine.pause();
+                self.ui_state.is_playing = false;
+            } else {
+                self.engine.resume();
+                self.ui_state.is_playing = true;
+            }
+        } else if is_vol_down {
+            let new_vol = (self.ui_state.volume - 0.05).max(0.0);
+            self.ui_state.volume = new_vol;
+            self.engine.set_volume(new_vol);
+        } else if is_vol_up {
+            let new_vol = (self.ui_state.volume + 0.05).min(1.0);
+            self.ui_state.volume = new_vol;
+            self.engine.set_volume(new_vol);
+        } else if is_next {
+            self.next_track();
+        } else if is_prev {
+            self.prev_track();
+        } else if is_down {
+            self.move_selection(1, visible_h);
+        } else if is_up {
+            self.move_selection(-1, visible_h);
+        } else {
+            match key.code {
+                // Seeking
+                KeyCode::Left => {
+                    if let Err(e) = self
+                        .engine
+                        .seek_relative(-(self.config.playback.seek_step_small_secs as f64))
+                    {
+                        tracing::error!("Seek error: {e}");
+                    }
                 }
-            }
-            KeyCode::Char('-') => {
-                let new_vol = (self.ui_state.volume - 0.05).max(0.0);
-                self.ui_state.volume = new_vol;
-                self.engine.set_volume(new_vol);
-            }
-            KeyCode::Char('=') => {
-                let new_vol = (self.ui_state.volume + 0.05).min(1.0);
-                self.ui_state.volume = new_vol;
-                self.engine.set_volume(new_vol);
-            }
-            // Seeking
-            KeyCode::Left => {
-                if let Err(e) = self
-                    .engine
-                    .seek_relative(-(self.config.playback.seek_step_small_secs as f64))
-                {
-                    tracing::error!("Seek error: {e}");
+                KeyCode::Right => {
+                    if let Err(e) = self
+                        .engine
+                        .seek_relative(self.config.playback.seek_step_small_secs as f64)
+                    {
+                        tracing::error!("Seek error: {e}");
+                    }
                 }
-            }
-            KeyCode::Right => {
-                if let Err(e) = self
-                    .engine
-                    .seek_relative(self.config.playback.seek_step_small_secs as f64)
-                {
-                    tracing::error!("Seek error: {e}");
+                // Navigation
+                KeyCode::Char('G') => {
+                    let len = self.ui_state.tracks.len();
+                    if len > 0 {
+                        self.ui_state.selected_index = len.saturating_sub(1);
+                    }
                 }
-            }
-            // Navigation
-            KeyCode::Char('j') | KeyCode::Down => self.move_selection(1, visible_h),
-            KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1, visible_h),
-            KeyCode::Char('G') => {
-                let len = self.ui_state.tracks.len();
-                if len > 0 {
-                    self.ui_state.selected_index = len.saturating_sub(1);
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let half = (visible_h / 2).max(1) as i32;
+                    self.move_selection(-half, visible_h);
+                    self.move_scroll(-half);
                 }
-            }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                let half = (visible_h / 2).max(1) as i32;
-                self.move_selection(-half, visible_h);
-                self.move_scroll(-half);
-            }
-            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                let half = (visible_h / 2).max(1) as i32;
-                self.move_selection(half, visible_h);
-                self.move_scroll(half);
-            }
-            // Track change
-            KeyCode::Char('n') => self.next_track(),
-            KeyCode::Char('p') => self.prev_track(),
-            // Modes
-            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.ui_state.lyrics_offset_ms = 0;
-            }
-            KeyCode::Char('r') => {
-                self.ui_state.repeat_mode = match self.ui_state.repeat_mode {
-                    RepeatMode::Sequential => RepeatMode::Shuffle,
-                    RepeatMode::Shuffle => RepeatMode::SingleTrack,
-                    RepeatMode::SingleTrack => RepeatMode::Sequential,
-                };
-                let label = self.ui_state.repeat_mode.label().to_string();
-                self.ui_state.notification = Some((label, std::time::Instant::now()));
-            }
-            KeyCode::Enter => self.play_selected(),
-            // Lyrics offset
-            KeyCode::Char('[') => self.ui_state.lyrics_offset_ms -= 500,
-            KeyCode::Char(']') => self.ui_state.lyrics_offset_ms += 500,
-            KeyCode::Char('{') => self.ui_state.lyrics_offset_ms -= 2000,
-            KeyCode::Char('}') => self.ui_state.lyrics_offset_ms += 2000,
-            // Search
-            KeyCode::Char('/') => {
-                self.search_mode = true;
-                self.ui_state.search_query.clear();
-            }
-            _ => {
-                if self.search_mode {
-                    self.handle_search_input(key);
+                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let half = (visible_h / 2).max(1) as i32;
+                    self.move_selection(half, visible_h);
+                    self.move_scroll(half);
+                }
+                // Modes
+                KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.ui_state.lyrics_offset_ms = 0;
+                }
+                KeyCode::Char('r') => {
+                    self.ui_state.repeat_mode = match self.ui_state.repeat_mode {
+                        RepeatMode::Sequential => RepeatMode::Shuffle,
+                        RepeatMode::Shuffle => RepeatMode::SingleTrack,
+                        RepeatMode::SingleTrack => RepeatMode::Sequential,
+                    };
+                    let label = self.ui_state.repeat_mode.label().to_string();
+                    self.ui_state.notification = Some((label, std::time::Instant::now()));
+                }
+                KeyCode::Enter => self.play_selected(),
+                // Lyrics offset
+                KeyCode::Char('[') => self.ui_state.lyrics_offset_ms -= 500,
+                KeyCode::Char(']') => self.ui_state.lyrics_offset_ms += 500,
+                KeyCode::Char('{') => self.ui_state.lyrics_offset_ms -= 2000,
+                KeyCode::Char('}') => self.ui_state.lyrics_offset_ms += 2000,
+                // Search
+                KeyCode::Char('/') => {
+                    self.search_mode = true;
+                    self.ui_state.search_query.clear();
+                }
+                _ => {
+                    if self.search_mode {
+                        self.handle_search_input(key);
+                    }
                 }
             }
         }
@@ -331,6 +385,177 @@ impl App {
                 self.ui_state.search_query.clear();
             }
             _ => {}
+        }
+    }
+
+    // ── Command mode ──
+
+    fn handle_command_input(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => {
+                let cmd = crate::input::command::parse_command(&self.ui_state.command_buffer);
+                self.dispatch_command(cmd);
+                self.ui_state.command_mode = false;
+                self.ui_state.command_buffer.clear();
+            }
+            KeyCode::Esc => {
+                self.ui_state.command_mode = false;
+                self.ui_state.command_buffer.clear();
+            }
+            KeyCode::Backspace => {
+                self.ui_state.command_buffer.pop();
+            }
+            KeyCode::Char(c) => {
+                self.ui_state.command_buffer.push(c);
+            }
+            _ => {}
+        }
+    }
+
+    fn dispatch_command(&mut self, cmd: crate::input::command::Command) {
+        match cmd {
+            crate::input::command::Command::Quit => {
+                self.save_state();
+                self.should_quit = true;
+            }
+            crate::input::command::Command::Help => {
+                self.ui_state.show_help = true;
+            }
+            crate::input::command::Command::Version => {
+                self.ui_state.notification = Some((
+                    "tmper v0.1.0".to_string(),
+                    std::time::Instant::now(),
+                ));
+            }
+            crate::input::command::Command::Theme(name) => {
+                self.config.ui.theme = name;
+                Self::write_config(&self.config);
+            }
+            crate::input::command::Command::Seek(arg) => {
+                if let Ok(secs) = arg.parse::<f64>() {
+                    let _ = self.engine.seek_relative(secs);
+                }
+            }
+            crate::input::command::Command::Volume(v) => {
+                let vol = (v as f32) / 100.0;
+                self.ui_state.volume = vol;
+                self.engine.set_volume(vol);
+            }
+            crate::input::command::Command::Repeat(arg) => {
+                let new_mode = match arg.to_lowercase().as_str() {
+                    "shuffle" | "random" => crate::ui::RepeatMode::Shuffle,
+                    "single" | "one" => crate::ui::RepeatMode::SingleTrack,
+                    _ => crate::ui::RepeatMode::Sequential,
+                };
+                self.ui_state.repeat_mode = new_mode;
+            }
+            crate::input::command::Command::Shuffle(arg) => {
+                self.ui_state.repeat_mode = match arg.to_lowercase().as_str() {
+                    "on" | "true" | "yes" => crate::ui::RepeatMode::Shuffle,
+                    _ => crate::ui::RepeatMode::Sequential,
+                };
+            }
+            crate::input::command::Command::View(name) => {
+                let view = match name.to_lowercase().as_str() {
+                    "player" | "1" => crate::ui::ViewMode::Player,
+                    "library" | "2" => crate::ui::ViewMode::Library,
+                    "lyrics" | "3" => crate::ui::ViewMode::Lyrics,
+                    "visualizer" | "4" => crate::ui::ViewMode::Visualizer,
+                    "playlists" | "5" => crate::ui::ViewMode::Playlists,
+                    "browser" | "6" => crate::ui::ViewMode::Browser,
+                    "settings" | "7" => crate::ui::ViewMode::Settings,
+                    _ => {
+                        self.ui_state.notification = Some((
+                            format!("Unknown view: {name}"),
+                            std::time::Instant::now(),
+                        ));
+                        return;
+                    }
+                };
+                if view == crate::ui::ViewMode::Library {
+                    self.ensure_library_loaded();
+                }
+                self.ui_state.active_view = view;
+            }
+            crate::input::command::Command::Import(path) => {
+                let import_path = std::path::PathBuf::from(&path);
+                match crate::library::playlist_manager::import_m3u(&import_path) {
+                    Ok(playlist) => {
+                        let songs: Vec<std::path::PathBuf> = playlist
+                            .tracks
+                            .iter()
+                            .map(|t| t.path.clone())
+                            .collect();
+                        let name = playlist.name.clone();
+                        let count = playlist.tracks.len();
+                        self.ui_state.playlist_state.playlists.push(
+                            crate::ui::views::playlist_view::PlaylistData { name, songs },
+                        );
+                        self.save_playlists();
+                        self.ui_state.notification = Some((
+                            format!("Imported: {count} tracks"),
+                            std::time::Instant::now(),
+                        ));
+                    }
+                    Err(e) => {
+                        self.ui_state.notification = Some((
+                            format!("Import failed: {e}"),
+                            std::time::Instant::now(),
+                        ));
+                    }
+                }
+            }
+            crate::input::command::Command::Export(name) => {
+                let ps = &self.ui_state.playlist_state;
+                if let Some((_, pl_data)) = ps
+                    .playlists
+                    .iter()
+                    .enumerate()
+                    .find(|(_, p)| p.name.to_lowercase() == name.to_lowercase())
+                {
+                    let mut playlist = crate::playlist::Playlist::new(&pl_data.name);
+                    for song in &pl_data.songs {
+                        let title = song
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("Unknown")
+                            .to_string();
+                        playlist.push(crate::playlist::TrackEntry::new(
+                            song.clone(),
+                            title,
+                            String::new(),
+                            0.0,
+                        ));
+                    }
+                    let export_path =
+                        crate::paths::data_dir().join(format!("{}.m3u", pl_data.name));
+                    match crate::library::playlist_manager::export_m3u(&playlist, &export_path) {
+                        Ok(()) => {
+                            self.ui_state.notification = Some((
+                                format!("Exported to {}", export_path.display()),
+                                std::time::Instant::now(),
+                            ));
+                        }
+                        Err(e) => {
+                            self.ui_state.notification = Some((
+                                format!("Export failed: {e}"),
+                                std::time::Instant::now(),
+                            ));
+                        }
+                    }
+                } else {
+                    self.ui_state.notification = Some((
+                        format!("Playlist not found: {name}"),
+                        std::time::Instant::now(),
+                    ));
+                }
+            }
+            crate::input::command::Command::Unknown(cmd) => {
+                self.ui_state.notification = Some((
+                    format!("Unknown command: {cmd}"),
+                    std::time::Instant::now(),
+                ));
+            }
         }
     }
 

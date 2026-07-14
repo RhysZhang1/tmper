@@ -1,9 +1,8 @@
 pub mod views;
 pub mod widgets;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph};
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Style};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +37,7 @@ pub enum ViewMode {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TrackDisplay {
     pub path: std::path::PathBuf,
     pub title: String,
@@ -78,6 +78,9 @@ pub struct UiState {
     pub selected_index: usize,
     pub playing_index: Option<usize>,
     pub scroll_offset: usize,
+    pub command_mode: bool,
+    pub command_buffer: String,
+    pub help_scroll: usize,
 }
 
 impl Default for UiState {
@@ -115,6 +118,9 @@ impl Default for UiState {
             selected_index: 0,
             playing_index: None,
             scroll_offset: 0,
+            command_mode: false,
+            command_buffer: String::new(),
+            help_scroll: 0,
         }
     }
 }
@@ -122,7 +128,7 @@ impl Default for UiState {
 pub fn render(f: &mut Frame, state: &UiState) {
     // Help overlay — highest priority, always on top
     if state.show_help {
-        crate::ui::widgets::help_popup::render_help(f);
+        crate::ui::widgets::help_popup::render_help(f, state.help_scroll);
         return;
     }
 
@@ -150,6 +156,15 @@ pub fn render(f: &mut Frame, state: &UiState) {
                 .alignment(ratatui::layout::Alignment::Center);
             f.render_widget(para, popup);
         }
+    }
+
+    // Command bar (shown when in command mode)
+    if state.command_mode {
+        let area = f.area();
+        let cmd_area = Rect::new(0, area.height.saturating_sub(1), area.width, 1);
+        let prompt = format!(":{}", state.command_buffer);
+        let para = Paragraph::new(prompt).style(Style::default().fg(Color::Yellow));
+        f.render_widget(para, cmd_area);
     }
 
     if state.active_view == ViewMode::Player {
@@ -196,188 +211,6 @@ pub fn render(f: &mut Frame, state: &UiState) {
         crate::ui::views::library_view::render_library_view(f, f.area(), &state.library_state);
         return;
     }
-
-    let area = f.area();
-
-    let has_lyrics = state.lyric_track.is_some();
-
-    // Layout: title + progress + [lyrics] + playlist + status
-    let mut constraints = vec![
-        Constraint::Length(1), // title bar
-        Constraint::Length(1), // progress bar
-    ];
-    if has_lyrics {
-        constraints.push(Constraint::Length(6)); // lyrics panel
-    }
-    constraints.push(Constraint::Min(3)); // playlist
-    constraints.push(Constraint::Length(1)); // status bar
-
-    let main_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(area);
-
-    let mut idx = 0;
-    render_title_bar(f, main_layout[idx], state);
-    idx += 1;
-    render_progress_bar(f, main_layout[idx], state);
-    idx += 1;
-
-    if has_lyrics {
-        if let Some(ref track) = state.lyric_track {
-            crate::ui::widgets::lyrics_panel::render_lyrics(
-                f,
-                main_layout[idx],
-                track,
-                state.current_lyric_index,
-            );
-        }
-        idx += 1;
-    }
-
-    render_playlist(f, main_layout[idx], state);
-    idx += 1;
-    render_status_bar(f, main_layout[idx], state);
-}
-
-fn render_title_bar(f: &mut Frame, area: Rect, state: &UiState) {
-    let play_icon = if state.is_playing { "▶" } else { "⏸" };
-    let pos_str = format_duration(state.position);
-    let dur_str = format_duration(state.duration);
-
-    let line = Line::from(vec![
-        Span::styled(play_icon, Style::default().fg(Color::Green)),
-        Span::raw(" "),
-        Span::styled(
-            format!("{} — {}", state.title, state.artist),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            format!("{} / {}", pos_str, dur_str),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]);
-
-    let para = Paragraph::new(line);
-    f.render_widget(para, area);
-}
-
-fn render_progress_bar(f: &mut Frame, area: Rect, state: &UiState) {
-    let progress = if state.duration > 0.0 {
-        (state.position / state.duration).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-
-    let vol_pct = (state.volume * 100.0) as u32;
-    let mode_label = state.repeat_mode.label();
-    let label = format!("Vol: {}%  {}", vol_pct, mode_label);
-
-    let gauge = Gauge::default()
-        .block(Block::default().borders(Borders::NONE))
-        .gauge_style(Style::default().fg(Color::Magenta))
-        .label(label)
-        .ratio(progress);
-
-    f.render_widget(gauge, area);
-}
-
-fn render_playlist(f: &mut Frame, area: Rect, state: &UiState) {
-    let filtered: Vec<(usize, &TrackDisplay)> = state
-        .tracks
-        .iter()
-        .enumerate()
-        .filter(|(_, t)| {
-            if state.search_query.is_empty() {
-                return true;
-            }
-            let q = state.search_query.to_lowercase();
-            t.title.to_lowercase().contains(&q) || t.artist.to_lowercase().contains(&q)
-        })
-        .collect();
-
-    let visible_height = area.height as usize;
-    let total_tracks = filtered.len();
-
-    let start = state.scroll_offset;
-    let end = (start + visible_height).min(total_tracks);
-
-    let items: Vec<ListItem> = (start..end)
-        .map(|i| {
-            let (orig_idx, track) = &filtered[i];
-            let dur = format_duration(track.duration_secs);
-
-            let is_current = state.playing_index == Some(*orig_idx);
-            let is_selected = state.selected_index == *orig_idx;
-
-            let prefix = if is_current { "▶ " } else { "  " };
-
-            let line_text = format!(
-                "{}{}. {} — {}    {}",
-                prefix,
-                *orig_idx + 1,
-                track.title,
-                track.artist,
-                dur
-            );
-
-            let style = if is_current {
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD)
-            } else if is_selected {
-                Style::default().fg(Color::White).bg(Color::DarkGray)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-
-            ListItem::new(line_text).style(style)
-        })
-        .collect();
-
-    let list = List::new(items).block(Block::default().borders(Borders::NONE));
-
-    f.render_widget(list, area);
-}
-
-fn render_status_bar(f: &mut Frame, area: Rect, state: &UiState) {
-    let total_duration: f64 = state.tracks.iter().map(|t| t.duration_secs).sum();
-    let dur_str = format_duration(total_duration);
-
-    let mode = state.repeat_mode.label();
-
-    let view_label = match state.active_view {
-        ViewMode::Player => "Player",
-        ViewMode::Lyrics => "Lyrics",
-        ViewMode::Library => "Library",
-        ViewMode::Visualizer => "Visualizer",
-        ViewMode::Playlists => "Playlists",
-        ViewMode::Browser => "Browser",
-        ViewMode::Settings => "Settings",
-    };
-
-    let playlist_label = if let Some(idx) = state.active_playlist {
-        state
-            .playlist_state
-            .playlists
-            .get(idx)
-            .map(|p| p.name.as_str())
-            .unwrap_or(&state.playlist_name)
-    } else {
-        &state.playlist_name
-    };
-    let status = format!(
-        " {} | {} tracks | {} | {}  [{}]",
-        playlist_label,
-        state.tracks.len(),
-        dur_str,
-        mode,
-        view_label,
-    );
-
-    let para = Paragraph::new(status).style(Style::default().fg(Color::DarkGray));
-    f.render_widget(para, area);
 }
 
 pub fn format_duration(secs: f64) -> String {

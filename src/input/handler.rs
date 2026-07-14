@@ -7,19 +7,21 @@ use crate::event::AppEvent;
 pub struct KeyHandler {
     last_key: Option<(KeyEvent, Instant)>,
     timeout_ms: u64,
+    quit_key: KeyEvent,
 }
 
 impl KeyHandler {
-    pub fn new(timeout_ms: u64) -> Self {
+    pub fn new(timeout_ms: u64, quit_key: KeyEvent) -> Self {
         Self {
             last_key: None,
             timeout_ms,
+            quit_key,
         }
     }
 
     pub fn process(&mut self, event: KeyEvent) -> Option<AppEvent> {
-        // Direct quit
-        if event.code == KeyCode::Char('q') {
+        // Direct quit (configurable via keybindings)
+        if event.code == self.quit_key.code && event.modifiers == self.quit_key.modifiers {
             self.last_key = None;
             return Some(AppEvent::Quit);
         }

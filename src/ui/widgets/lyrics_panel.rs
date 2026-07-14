@@ -6,6 +6,7 @@ use ratatui::Frame;
 
 use crate::lyrics::types::LyricTrack;
 
+#[allow(dead_code)]
 pub fn render_lyrics(f: &mut Frame, area: Rect, track: &LyricTrack, current_line_index: usize) {
     let visible_lines = area.height as usize;
     if visible_lines < 2 {
@@ -47,14 +48,4 @@ pub fn render_lyrics(f: &mut Frame, area: Rect, track: &LyricTrack, current_line
 
     let paragraph = Paragraph::new(lines);
     f.render_widget(paragraph, area);
-}
-
-#[allow(dead_code)]
-pub fn render_no_lyrics(f: &mut Frame, area: Rect) {
-    let text = Line::from(Span::styled(
-        "No lyrics found",
-        Style::default().fg(Color::DarkGray),
-    ));
-    let para = Paragraph::new(text);
-    f.render_widget(para, area);
 }

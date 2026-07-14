@@ -1,5 +1,3 @@
-#![allow(dead_code)] // WIP: public API not yet wired to UI
-#[allow(dead_code)]
 use std::fs;
 use std::path::{Path, PathBuf};
 

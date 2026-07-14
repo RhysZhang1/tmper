@@ -68,6 +68,51 @@ impl App {
 
         state.notification = None;
 
+        // Export expanded playlist to M3U
+        if key.code == KeyCode::Char('e') && key.modifiers.is_empty() {
+            if let Some(ep) = state.expanded_playlist {
+                if ep < state.playlists.len() {
+                    let pl_data = &state.playlists[ep];
+                    let mut playlist = crate::playlist::Playlist::new(&pl_data.name);
+                    for song in &pl_data.songs {
+                        let title = song
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("Unknown")
+                            .to_string();
+                        playlist.push(crate::playlist::TrackEntry::new(
+                            song.clone(),
+                            title,
+                            String::new(),
+                            0.0,
+                        ));
+                    }
+                    let export_path =
+                        crate::paths::data_dir().join(format!("{}.m3u", pl_data.name));
+                    match crate::library::playlist_manager::export_m3u(&playlist, &export_path) {
+                        Ok(()) => {
+                            state.notification = Some((
+                                format!("Exported to {}", export_path.display()),
+                                std::time::Instant::now(),
+                            ));
+                        }
+                        Err(e) => {
+                            state.notification = Some((
+                                format!("Export failed: {e}"),
+                                std::time::Instant::now(),
+                            ));
+                        }
+                    }
+                }
+            } else {
+                state.notification = Some((
+                    "Expand a playlist first, then press 'e' to export".to_string(),
+                    std::time::Instant::now(),
+                ));
+            }
+            return;
+        }
+
         match key.code {
             KeyCode::Tab | KeyCode::Char('l') | KeyCode::Right => {
                 state.focused = match state.focused {

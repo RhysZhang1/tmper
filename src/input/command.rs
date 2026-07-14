@@ -1,5 +1,6 @@
-#![allow(dead_code)] // WIP: public API not yet wired to UI
-#[derive(Debug, Clone)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Command {
     Quit,
     Help,
@@ -10,6 +11,8 @@ pub enum Command {
     Repeat(String),
     Shuffle(String),
     View(String),
+    Import(String),
+    Export(String),
     Unknown(String),
 }
 
@@ -36,6 +39,8 @@ pub fn parse_command(input: &str) -> Command {
         "repeat" => Command::Repeat(arg.unwrap_or("").to_string()),
         "shuffle" => Command::Shuffle(arg.unwrap_or("").to_string()),
         "view" => Command::View(arg.unwrap_or("").to_string()),
+        "import" => Command::Import(arg.unwrap_or("").to_string()),
+        "export" => Command::Export(arg.unwrap_or("").to_string()),
         _ => Command::Unknown(input.to_string()),
     }
 }

@@ -179,6 +179,27 @@ theme = "dracula"    # 可选: tokyo-night, dracula, nord, solarized-dark, catpp
 | `Ctrl+r` | 重置歌词偏移 |
 | `0` | 帮助面板 |
 | `q` | 退出 |
+| `:` | 进入命令模式 (Vim 风格，见下方命令参考) |
+| `e` (歌单视图) | 导出当前展开的歌单为 M3U |
+
+---
+
+## 命令模式（按 `:` 进入）
+
+类似 Vim 的底栏命令系统，`:` 进入命令模式后输入命令，`Enter` 执行，`Esc` 取消：
+
+| 命令 | 功能 |
+|------|------|
+| `:q` / `:quit` | 退出程序 |
+| `:help` | 显示帮助面板 |
+| `:version` | 显示版本号 |
+| `:theme <名称>` | 切换主题 (tokyo-night / dracula / nord / solarized-dark / catppuccin-mocha) |
+| `:seek <秒数>` | 快进/快退（正数前进，负数后退） |
+| `:volume <0-100>` | 设置音量 |
+| `:repeat <模式>` | 循环模式 (sequential / shuffle / single) |
+| `:view <名称>` | 切换视图 (player / library / lyrics / visualizer / playlists / browser / settings) |
+| `:import <路径>` | 从 M3U 文件导入歌单 |
+| `:export <名称>` | 导出指定歌单为 data/<名称>.m3u |
 
 ---
 
@@ -249,7 +270,7 @@ A: 确认 `config.toml` 中 `[visualizer] enabled = true`。频谱需要播放�
 
 ### Q: 如何添加更多音乐？
 
-A: 编辑 `config/config.toml` 的 `music_dirs`，添加音乐目录路径，然后按 `:` 输入 `:library scan`（命令模式功能开发中，当前重启后会自动检测新文件）。
+A: 编辑 `config/config.toml` 的 `music_dirs`，添加音乐目录路径，然后重启程序即可自动扫描。也可以通过 `:import <path.m3u>` 命令导入 M3U 歌单。
 
 ### Q: 支持哪些音频格式？
 

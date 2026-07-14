@@ -15,6 +15,7 @@ use crate::cli::{Cli, Command};
 use crate::config::Config;
 use crate::event::AppEvent;
 use crate::input::handler::KeyHandler;
+use crate::input::keymap::{self, KeyBindings};
 use crate::library::database::LibraryDb;
 use crate::ui::{self, UiState};
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,7 @@ pub struct App {
     should_quit: bool,
     search_mode: bool,
     key_handler: KeyHandler,
+    key_bindings: KeyBindings,
     fft_cancel_tx: Option<tokio::sync::watch::Sender<()>>,
     library_db: LibraryDb,
     fft_data: Arc<Mutex<Vec<f32>>>,
@@ -47,6 +49,8 @@ impl App {
         let engine = AudioEngine::new()?;
         let library_db = LibraryDb::open(&crate::paths::data_dir().join("library.db"))
             .unwrap_or_else(|_| LibraryDb::open_memory().expect("in-memory db"));
+        let key_bindings = KeyBindings::load();
+        let quit_key = keymap::parse_key_str(&key_bindings.quit);
         Ok(Self {
             config: config.clone(),
             ui_state: UiState {
@@ -57,7 +61,8 @@ impl App {
             engine,
             should_quit: false,
             search_mode: false,
-            key_handler: KeyHandler::new(200),
+            key_handler: KeyHandler::new(200, quit_key),
+            key_bindings,
             library_db,
             fft_cancel_tx: None,
             fft_data: Arc::new(Mutex::new(Vec::new())),

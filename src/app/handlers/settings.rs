@@ -192,7 +192,7 @@ impl App {
         Self::write_config(config);
     }
 
-    fn write_config(config: &crate::config::Config) {
+    pub(crate) fn write_config(config: &crate::config::Config) {
         let path = crate::paths::config_dir().join("config.toml");
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);

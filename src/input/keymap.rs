@@ -1,6 +1,38 @@
-#![allow(dead_code)] // WIP: public API not yet wired to UI
-#[allow(dead_code)]
+#![allow(dead_code)]
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::Deserialize;
+
+/// Parse a keybinding string into a crossterm KeyEvent.
+/// Supported formats: single char ("j"), "^X" for Ctrl+X, special names.
+pub fn parse_key_str(s: &str) -> KeyEvent {
+    let s = s.trim();
+    if s.is_empty() {
+        return KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+    }
+    // Ctrl+<char> via caret notation
+    if s.len() == 2 && s.starts_with('^') {
+        let c = s.chars().nth(1).unwrap();
+        return KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+    }
+    // Single char
+    if s.len() == 1 {
+        let c = s.chars().next().unwrap();
+        return KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+    }
+    // Special names
+    match s.to_lowercase().as_str() {
+        "space" => KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+        "enter" => KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        "esc" | "escape" => KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        "backspace" => KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        "tab" => KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        "up" => KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+        "down" => KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        "left" => KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+        "right" => KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        _ => KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct KeyBindings {
