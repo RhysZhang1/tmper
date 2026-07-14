@@ -161,13 +161,9 @@ impl App {
                 config.visualizer.color_scheme = schemes[next].to_string();
             }
             4 => {
-                // Default volume
+                // Default volume (cycles 0..1 in 0.05 steps, wraps at 1.0)
                 let new_vol = ((config.playback.default_volume + 0.05) * 100.0).round() / 100.0;
-                config.playback.default_volume = if new_vol > 1.05 {
-                    0.0
-                } else {
-                    new_vol.min(1.0)
-                };
+                config.playback.default_volume = if new_vol >= 1.0 { 0.0 } else { new_vol };
             }
             5 => {
                 // Seek step
