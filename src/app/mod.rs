@@ -143,12 +143,11 @@ impl App {
                 break;
             }
 
-            // When Kitty or SIXEL native graphics has an active image, tell
-            // the UI to skip half-block character rendering (prevents flicker).
-            // Only set when the cache is populated — not just when chafa is
-            // available, otherwise we'd show nothing during the first frame.
-            self.ui_state.native_cover_active = self.ui_state.show_cover_art
-                && (is_kitty_graphics_compatible() || self.chafa_sixel_cache.is_some());
+            // Always render half-blocks as fallback underneath any native
+            // graphics overlay (Kitty/SIXEL). If the terminal supports the
+            // protocol the native image covers the blocks; if not the user
+            // still sees the half-block fallback.
+            self.ui_state.native_cover_active = false;
 
             if let Err(e) = terminal.draw(|f| ui::render(f, &self.ui_state)) {
                 tracing::error!("Render error: {e}");
@@ -312,10 +311,9 @@ impl App {
                 .arg("-s")
                 .arg(format!("{}x{}", w_char, h_char))
                 .arg("--no-cache")
-                // No file arg — chafa reads from stdin when piped
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
                 .spawn()
             {
                 Ok(mut child) => {
@@ -324,7 +322,13 @@ impl App {
                     }
                     drop(child.stdin.take());
                     match child.wait_with_output() {
-                        Ok(out) => out.stdout,
+                        Ok(out) => {
+                            if !out.stderr.is_empty() {
+                                let msg = String::from_utf8_lossy(&out.stderr);
+                                tracing::warn!("chafa stderr: {msg}");
+                            }
+                            out.stdout
+                        }
                         Err(e) => {
                             tracing::warn!("chafa wait failed: {e}");
                             return;
@@ -339,6 +343,7 @@ impl App {
             };
 
             if output.is_empty() {
+                tracing::warn!("chafa produced empty SIXEL output");
                 self.chafa_sixel_cache = None;
                 return;
             }
