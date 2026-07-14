@@ -310,7 +310,7 @@ impl App {
                 .arg("-s")
                 .arg(format!("{}x{}", w_char, h_char))
                 .arg("--no-cache")
-                .arg("/dev/stdin")
+                // No file arg — chafa reads from stdin when piped
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::null())
