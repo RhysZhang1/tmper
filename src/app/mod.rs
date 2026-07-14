@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) mod handlers;
 pub(crate) mod persistence;
+pub(crate) mod playback;
 
 pub struct App {
     config: Config,
@@ -226,7 +227,8 @@ impl App {
                 // Split into chunks (Kitty recommends ~4K payload per chunk).
                 let max_chunk = 4096usize;
                 for (i, chunk) in b64.as_bytes().chunks(max_chunk).enumerate() {
-                    let chunk_str = unsafe { std::str::from_utf8_unchecked(chunk) };
+                    let chunk_str = std::str::from_utf8(chunk)
+                        .expect("base64 output is always valid ASCII");
                     let more = if (i + 1) * max_chunk < b64.len() { 1 } else { 0 };
                     let _ = write!(
                         std::io::stdout(),

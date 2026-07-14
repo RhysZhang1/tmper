@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -174,7 +175,7 @@ impl App {
                         self.ui_state.position = 0.0;
                         self.ui_state.duration = duration;
                         self.ui_state.is_playing = true;
-                        self.ui_state.cover_art = info.cover_art.clone();
+                        self.ui_state.cover_art = info.cover_art.map(Arc::new);
                         self.ui_state
                             .cover_gen
                             .set(self.ui_state.cover_gen.get() + 1);

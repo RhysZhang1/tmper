@@ -26,7 +26,6 @@ pub struct Playlist {
     pub current_index: Option<usize>,
 }
 
-#[allow(dead_code)]
 impl Playlist {
     pub fn new(name: &str) -> Self {
         Self {
@@ -36,10 +35,12 @@ impl Playlist {
         }
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.tracks.len()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.tracks.is_empty()
     }
@@ -51,6 +52,7 @@ impl Playlist {
         }
     }
 
+    #[allow(dead_code)]
     pub fn remove(&mut self, index: usize) {
         if index >= self.tracks.len() {
             return;
@@ -74,6 +76,7 @@ impl Playlist {
         }
     }
 
+    #[allow(dead_code)]
     pub fn next(&mut self) -> Option<usize> {
         match self.current_index {
             Some(idx) if idx + 1 < self.tracks.len() => {

@@ -59,7 +59,6 @@ impl App {
                     return;
                 }
                 Self::cycle_setting(config, state, &self.key_bindings);
-                return;
             }
             KeyCode::Char('l') | KeyCode::Right => {
                 Self::cycle_setting(config, state, &self.key_bindings);

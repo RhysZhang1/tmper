@@ -1,6 +1,7 @@
 pub mod views;
 pub mod widgets;
 use std::cell::Cell;
+use std::sync::Arc;
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -76,7 +77,7 @@ pub struct UiState {
     pub active_playlist: Option<usize>,
     pub active_playlist_song: Option<usize>,
     pub tracks: Vec<TrackDisplay>,
-    pub cover_art: Option<Vec<u8>>,
+    pub cover_art: Option<Arc<Vec<u8>>>,
     pub show_cover_art: bool,
     pub selected_index: usize,
     pub playing_index: Option<usize>,
@@ -284,7 +285,6 @@ pub fn render(f: &mut Frame, state: &UiState) {
     }
     if state.active_view == ViewMode::Library {
         crate::ui::views::library_view::render_library_view(f, f.area(), &state.library_state);
-        return;
     }
 }
 

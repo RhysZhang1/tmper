@@ -1,4 +1,3 @@
-#[allow(dead_code)]
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq)]
