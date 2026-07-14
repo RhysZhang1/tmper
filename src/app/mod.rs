@@ -143,10 +143,12 @@ impl App {
                 break;
             }
 
-            // When Kitty or SIXEL native graphics is active, tell the UI to
-            // skip half-block character rendering (prevent flicker/overwrite).
+            // When Kitty or SIXEL native graphics has an active image, tell
+            // the UI to skip half-block character rendering (prevents flicker).
+            // Only set when the cache is populated — not just when chafa is
+            // available, otherwise we'd show nothing during the first frame.
             self.ui_state.native_cover_active = self.ui_state.show_cover_art
-                && (is_kitty_graphics_compatible() || self.chafa_available);
+                && (is_kitty_graphics_compatible() || self.chafa_sixel_cache.is_some());
 
             if let Err(e) = terminal.draw(|f| ui::render(f, &self.ui_state)) {
                 tracing::error!("Render error: {e}");
@@ -388,17 +390,17 @@ impl App {
     }
 }
 
-/// Check if the `chafa` binary is available on PATH.
+/// Check if the `chafa` binary is available and working.
 fn which_chafa() -> bool {
-    std::env::var_os("PATH")
-        .and_then(|paths| {
-            std::env::split_paths(&paths).any(|dir| {
-                let candidate = dir.join("chafa");
-                // On Unix, check if it's executable (not a directory)
-                candidate.is_file()
-            }).then_some(())
-        })
-        .is_some()
+    let ok = std::process::Command::new("chafa")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    tracing::info!("chafa detected: {ok}");
+    ok
 }
 
 /// Returns true if the terminal supports the Kitty graphics protocol.
