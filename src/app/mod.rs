@@ -18,7 +18,6 @@ use crate::input::handler::KeyHandler;
 use crate::input::keymap::{self, KeyBindings};
 use crate::library::database::LibraryDb;
 use crate::ui::{self, UiState};
-use image::GenericImageView;
 use serde::{Deserialize, Serialize};
 
 pub(crate) mod handlers;
@@ -35,8 +34,6 @@ pub struct App {
     fft_cancel_tx: Option<tokio::sync::watch::Sender<()>>,
     library_db: LibraryDb,
     fft_data: Arc<Mutex<Vec<f32>>>,
-    last_cover_art_version: u64,
-    viuer_rendered: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -69,8 +66,6 @@ impl App {
             library_db,
             fft_cancel_tx: None,
             fft_data: Arc::new(Mutex::new(Vec::new())),
-            last_cover_art_version: 0,
-            viuer_rendered: false,
         })
     }
 
@@ -139,8 +134,6 @@ impl App {
                 tracing::error!("Render error: {e}");
             }
 
-            // viuer: render cover art via Kitty terminal graphics protocol
-            self.render_cover_via_viuer();
         }
 
         // Stop FFT
@@ -151,99 +144,4 @@ impl App {
         Ok(())
     }
 
-    /// Render cover art via terminal graphics protocol (Kitty).
-    /// Uses env-var detection only — avoids stdin query that would conflict
-    /// with crossterm's raw-mode event reader.
-    /// Only renders when cover art changes; Kitty images persist across frames.
-    fn render_cover_via_viuer(&mut self) {
-        if !self.ui_state.show_cover_art {
-            if self.viuer_rendered {
-                use std::io::Write;
-                // Kitty graphics: delete all placed images
-                let _ = write!(std::io::stdout(), "\x1b_Ga=d,d=I\x1b\\");
-                let _ = std::io::stdout().flush();
-                self.viuer_rendered = false;
-            }
-            self.last_cover_art_version = self.ui_state.cover_art_version.get();
-            return;
-        }
-
-        let version = self.ui_state.cover_art_version.get();
-        if version == self.last_cover_art_version {
-            return;
-        }
-        self.last_cover_art_version = version;
-
-        let cover = match self.ui_state.cover_art {
-            Some(ref c) => c.clone(),
-            None => return,
-        };
-
-        let (x, y, w, h) = self.ui_state.cover_art_area.get();
-        if w == 0 || h == 0 {
-            return;
-        }
-
-        // Protocol detection via env vars only — no terminal queries,
-        // because viuer's query reads stdin, which conflicts with our
-        // raw-mode event reader.
-        let is_kitty = std::env::var("KITTY_WINDOW_ID").is_ok();
-        let is_iterm = std::env::var("TERM_PROGRAM")
-            .map(|v| v == "iTerm.app")
-            .unwrap_or(false);
-        let is_sixel = std::env::var("TERM")
-            .map(|v| {
-                v.contains("foot")
-                    || v.contains("wezterm")
-                    || v.contains("contour")
-                    || v.contains("yaft")
-            })
-            .unwrap_or(false);
-        if !is_kitty && !is_iterm && !is_sixel {
-            return; // No image protocol → rely on block chars
-        }
-
-        // Load image, compute scaled pixel size, render via Kitty protocol
-        match image::load_from_memory(&cover) {
-            Ok(img) => {
-                let (img_w, img_h) = img.dimensions();
-                // Scale image to fit cell area (~10×20 px per cell)
-                let cell_px_w = w as u32 * 10;
-                let cell_px_h = h as u32 * 20;
-                let scale = (cell_px_w as f64 / img_w as f64)
-                    .min(cell_px_h as f64 / img_h as f64)
-                    .min(1.0);
-                let out_w = (img_w as f64 * scale).round() as u32;
-                let out_h = (img_h as f64 * scale).round() as u32;
-
-                // Move cursor to cover area first, then render relative to it.
-                // This avoids coordinate confusion (Kitty interprets x,y as
-                // character cells, while Sixel treats them as pixels).
-                let _ = crossterm::execute!(
-                    std::io::stdout(),
-                    crossterm::cursor::MoveTo(x, y),
-                );
-                let config = viuer::Config {
-                    x: 0,
-                    y: 0,
-                    width: Some(out_w),
-                    height: Some(out_h),
-                    absolute_offset: false,
-                    restore_cursor: false,
-                    use_kitty: is_kitty,
-                    use_iterm: is_iterm,
-                    use_sixel: is_sixel,
-                    transparent: false,
-                    ..Default::default()
-                };
-
-                if viuer::print(&img, &config).is_ok() {
-                    self.viuer_rendered = true;
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Failed to decode cover art for viuer: {e}");
-            }
-        }
-    }
 }
