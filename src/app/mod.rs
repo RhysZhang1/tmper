@@ -281,6 +281,15 @@ impl App {
             self.last_cover_gen_chafa = 0;
             return;
         }
+        // Hide cover when overlays (help, command input) are on top
+        if self.ui_state.show_help || self.ui_state.command_mode {
+            if self.chafa_sixel_cache.is_some() {
+                self.chafa_clear_pending = true;
+            }
+            self.chafa_sixel_cache = None;
+            self.last_cover_gen_chafa = 0;
+            return;
+        }
         use std::io::Write;
 
         if !self.chafa_available {
