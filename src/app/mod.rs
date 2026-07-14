@@ -41,6 +41,7 @@ pub struct App {
     last_cover_gen: u64,
     chafa_available: bool,
     last_cover_gen_chafa: u64,
+    chafa_sixel_cache: Option<Vec<u8>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -77,6 +78,7 @@ impl App {
             last_cover_gen: 0,
             chafa_available: which_chafa(),
             last_cover_gen_chafa: 0,
+            chafa_sixel_cache: None,
         })
     }
 
@@ -141,12 +143,6 @@ impl App {
                 break;
             }
 
-            // Always render half-blocks as fallback underneath any native
-            // graphics overlay (Kitty/SIXEL). If the terminal supports the
-            // protocol the native image covers the blocks; if not the user
-            // still sees the half-block fallback.
-            self.ui_state.native_cover_active = false;
-
             if let Err(e) = terminal.draw(|f| ui::render(f, &self.ui_state)) {
                 tracing::error!("Render error: {e}");
             }
@@ -205,7 +201,7 @@ impl App {
         }
 
         // Load, resize, and output via Kitty protocol
-        match image::load_from_memory(&cover) {
+        match image::load_from_memory(&cover[..]) {
             Ok(img) => {
                 let (img_w, img_h) = img.dimensions();
                 // Approximate cell size: 10 px wide × 20 px tall (Kitty default)
@@ -254,11 +250,10 @@ impl App {
         }
     }
 
-    /// Render cover art via chafa subprocess using symbol (half-block) output.
+    /// Render cover art via chafa subprocess using SIXEL protocol.
     ///
-    /// Runs chafa once when the cover changes, parses the ANSI-colored output
-    /// into ratatui Lines, and stores them in UiState for the normal render
-    /// pipeline — no terminal graphics protocol needed.
+    /// Caches the FULL chafa output (including Konsole-specific setup
+    /// sequences) and re-sends every frame so the image survives redraws.
     fn render_cover_via_chafa(&mut self) {
         use std::io::Write;
 
@@ -266,90 +261,109 @@ impl App {
             return;
         }
 
-        // Cover hidden — clear cache
-        if !self.ui_state.show_cover_art {
-            if self.ui_state.cover_chafa_lines.is_some() {
-                self.ui_state.cover_chafa_lines = None;
-                self.last_cover_gen_chafa = 0;
-            }
-            return;
-        }
-
-        // Regenerate parsed lines when cover art changes
-        let gen = self.ui_state.cover_gen.get();
-        if self.ui_state.cover_chafa_lines.is_some() && gen == self.last_cover_gen_chafa {
-            return; // Cache is up to date
-        }
-        self.last_cover_gen_chafa = gen;
-
-        let (w_char, h_char) = {
-            let r = self.ui_state.cover_rect.get();
-            (r.2, r.3)
-        };
+        let (x_char, y_char, w_char, h_char) = self.ui_state.cover_rect.get();
         if w_char == 0 || h_char == 0 {
             return;
         }
 
-        let cover = match self.ui_state.cover_art {
-            Some(ref c) => c.clone(),
-            None => {
-                self.ui_state.cover_chafa_lines = None;
-                return;
+        // Cover hidden — clear cache
+        if !self.ui_state.show_cover_art {
+            if self.chafa_sixel_cache.is_some() {
+                // Redraw area with spaces to clear SIXEL image
+                let clear: String = std::iter::repeat_n(
+                    " ".repeat(w_char as usize),
+                    h_char as usize,
+                )
+                .collect::<Vec<_>>()
+                .join("\r\n");
+                let _ = write!(std::io::stdout(), "\x1b[{};{}H{}", y_char + 1, x_char + 1, clear);
+                let _ = std::io::stdout().flush();
             }
-        };
-
-        // Run chafa in symbols mode — outputs ANSI-colored half-block text
-        let output = match std::process::Command::new("chafa")
-            .arg("-f")
-            .arg("symbols")
-            .arg("--symbols")
-            .arg("half")
-            .arg("-c")
-            .arg("full")
-            .arg("-s")
-            .arg(format!("{}x{}", w_char, h_char))
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
-            Ok(mut child) => {
-                if let Some(ref mut stdin) = child.stdin {
-                    let _ = stdin.write_all(&cover);
-                }
-                drop(child.stdin.take());
-                match child.wait_with_output() {
-                    Ok(out) => {
-                        if !out.stderr.is_empty() {
-                            let msg = String::from_utf8_lossy(&out.stderr);
-                            tracing::warn!("chafa stderr: {msg}");
-                        }
-                        out.stdout
-                    }
-                    Err(e) => {
-                        tracing::warn!("chafa wait failed: {e}");
-                        return;
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!("chafa spawn failed: {e}");
-                self.chafa_available = false;
-                return;
-            }
-        };
-
-        if output.is_empty() {
-            tracing::warn!("chafa produced empty output");
-            self.ui_state.cover_chafa_lines = None;
+            self.chafa_sixel_cache = None;
+            self.last_cover_gen_chafa = 0;
             return;
         }
 
-        // Parse ANSI-colored output into Vec<Line<'static>>
-        let lines = parse_chafa_symbols_output(&output, w_char);
-        let count = lines.len();
-        self.ui_state.cover_chafa_lines = Some(lines);
-        tracing::info!("chafa rendered: {count} lines (area {}x{})", w_char, h_char);
+        // Regenerate cache when cover art changes
+        let gen = self.ui_state.cover_gen.get();
+        if self.chafa_sixel_cache.is_none() || gen != self.last_cover_gen_chafa {
+            self.last_cover_gen_chafa = gen;
+
+            let cover = match self.ui_state.cover_art {
+                Some(ref c) => c.clone(),
+                None => {
+                    self.chafa_sixel_cache = None;
+                    return;
+                }
+            };
+
+            let output = match std::process::Command::new("chafa")
+                .arg("-f")
+                .arg("sixels")
+                .arg("-c")
+                .arg("full")
+                .arg("-s")
+                .arg(format!("{}x{}", w_char, h_char))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+            {
+                Ok(mut child) => {
+                    if let Some(ref mut stdin) = child.stdin {
+                        let _ = stdin.write_all(&cover);
+                    }
+                    drop(child.stdin.take());
+                    match child.wait_with_output() {
+                        Ok(out) => {
+                            if !out.stderr.is_empty() {
+                                let msg = String::from_utf8_lossy(&out.stderr);
+                                tracing::warn!("chafa stderr: {msg}");
+                            }
+                            out.stdout
+                        }
+                        Err(e) => {
+                            tracing::warn!("chafa wait failed: {e}");
+                            return;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("chafa spawn failed: {e}");
+                    self.chafa_available = false;
+                    return;
+                }
+            };
+
+            if output.is_empty() {
+                tracing::warn!("chafa SIXEL output is empty — terminal may not support it");
+                self.chafa_sixel_cache = None;
+                return;
+            }
+
+            // Cache the FULL output including any terminal setup sequences
+            // (\x1b[?25l, \x1b[?80l, \x1b[?8452l, etc.)
+            self.chafa_sixel_cache = Some(output.clone());
+            tracing::info!(
+                "chafa SIXEL: {} bytes cached (area {}x{})",
+                output.len(),
+                w_char,
+                h_char
+            );
+        }
+
+        // Re-send FULL cached data every frame.
+        // Must include SIXEL setup sequences (especially \x1b[?8452l on Konsole)
+        // for the terminal to render the image correctly.
+        if let Some(ref data) = self.chafa_sixel_cache {
+            // Position cursor at cover area
+            let _ = write!(std::io::stdout(), "\x1b[{};{}H", y_char + 1, x_char + 1);
+            // Write full chafa output (cursor setup + SIXEL DCS)
+            let _ = std::io::stdout().write_all(data);
+            // Re-hide cursor — chafa's \x1b[?25h shows it
+            let _ = write!(std::io::stdout(), "\x1b[?25l");
+            let _ = std::io::stdout().flush();
+        }
     }
 }
 
@@ -382,121 +396,4 @@ fn is_kitty_graphics_compatible() -> bool {
         return true;
     }
     false
-}
-
-/// Parse chafa `-f symbols` ANSI output into ratatui text Lines.
-///
-/// chafa outputs lines like:
-///   \x1b[0m\x1b[38;2;R;G;B;48;2;R;G;Bm▄\x1b[0m...
-/// with cursor-control wrappers and newlines between rows.
-fn parse_chafa_symbols_output(data: &[u8], cols: u16) -> Vec<ratatui::text::Line<'static>> {
-    use ratatui::style::Color;
-    use ratatui::text::{Line, Span};
-
-    let text = match std::str::from_utf8(data) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-
-    // Split into lines, find the content between cursor sequences
-    let mut raw_lines: Vec<&str> = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed == "\x1b[?25l" || trimmed == "\x1b[?25h" {
-            continue;
-        }
-        raw_lines.push(trimmed);
-    }
-
-    let mut result: Vec<Line<'static>> = Vec::with_capacity(raw_lines.len());
-
-    for raw in &raw_lines {
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        let bytes = raw.as_bytes();
-        let mut i = 0;
-
-        // Current colors
-        let mut fg: Option<(u8, u8, u8)> = None;
-        let mut bg: Option<(u8, u8, u8)> = None;
-
-        while i < bytes.len() {
-            if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
-                // Parse ANSI escape sequence: ESC [ params m
-                i += 2; // skip ESC[
-                let start = i;
-                while i < bytes.len() && bytes[i] != b'm' {
-                    i += 1;
-                }
-                if i < bytes.len() {
-                    let params = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
-                    i += 1; // skip 'm'
-
-                    // Reset
-                    if params == "0" || params.is_empty() {
-                        fg = None;
-                        bg = None;
-                        continue;
-                    }
-
-                    // Parse SGR parameters
-                    let parts: Vec<&str> = params.split(';').collect();
-                    let mut pi = 0;
-                    while pi < parts.len() {
-                        match parts[pi] {
-                            "0" | "" => {
-                                fg = None;
-                                bg = None;
-                            }
-                            "38" if pi + 4 < parts.len() && parts[pi + 1] == "2" => {
-                                let r = parts[pi + 2].parse().unwrap_or(0);
-                                let g = parts[pi + 3].parse().unwrap_or(0);
-                                let b = parts[pi + 4].parse().unwrap_or(0);
-                                fg = Some((r, g, b));
-                                pi += 4;
-                            }
-                            "48" if pi + 4 < parts.len() && parts[pi + 1] == "2" => {
-                                let r = parts[pi + 2].parse().unwrap_or(0);
-                                let g = parts[pi + 3].parse().unwrap_or(0);
-                                let b = parts[pi + 4].parse().unwrap_or(0);
-                                bg = Some((r, g, b));
-                                pi += 4;
-                            }
-                            _ => {}
-                        }
-                        pi += 1;
-                    }
-                }
-            } else {
-                // Regular character — collect all contiguous non-ESC chars
-                let start = i;
-                while i < bytes.len() && !(bytes[i] == 0x1b) {
-                    i += 1;
-                }
-                let chunk = &bytes[start..i];
-                if let Ok(chunk_str) = std::str::from_utf8(chunk) {
-                    let mut style = ratatui::style::Style::default();
-                    if let Some((r, g, b)) = fg {
-                        style = style.fg(Color::Rgb(r, g, b));
-                    }
-                    if let Some((r, g, b)) = bg {
-                        style = style.bg(Color::Rgb(r, g, b));
-                    }
-                    spans.push(Span::styled(chunk_str.to_string(), style));
-                }
-            }
-        }
-
-        result.push(Line::from(spans));
-    }
-
-    // Pad short rows to maintain alignment
-    let target_len = cols as usize;
-    for line in &mut result {
-        let current_len = line.width();
-        if current_len < target_len {
-            line.push_span(Span::raw(" ".repeat(target_len - current_len)));
-        }
-    }
-
-    result
 }
