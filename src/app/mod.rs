@@ -162,10 +162,16 @@ impl App {
     }
 
     /// Output cover art via native Kitty graphics protocol.
+    /// Only shows on the player view (key 1).
     /// Uses the image crate to load/resize, then outputs the Kitty escape
     /// sequence with `p=x,y` pixel positioning — no cursor movement,
     /// no crossterm buffer corruption.
     fn render_cover_via_kitty(&mut self) {
+        // Only render cover on the player view
+        if self.ui_state.active_view != crate::ui::ViewMode::Player {
+            self.kitty_rendered = false;
+            return;
+        }
         use std::io::Write;
 
         // Toggle handling: clear Kitty image when cover display is off
@@ -251,10 +257,16 @@ impl App {
     }
 
     /// Render cover art via chafa subprocess using SIXEL protocol.
+    /// Only shows on the player view (key 1).
     ///
     /// Caches the FULL chafa output (including Konsole-specific setup
     /// sequences) and re-sends every frame so the image survives redraws.
     fn render_cover_via_chafa(&mut self) {
+        // Only render cover on the player view
+        if self.ui_state.active_view != crate::ui::ViewMode::Player {
+            self.clear_sixel_cover();
+            return;
+        }
         use std::io::Write;
 
         if !self.chafa_available {
@@ -268,19 +280,7 @@ impl App {
 
         // Cover hidden — clear cache
         if !self.ui_state.show_cover_art {
-            if self.chafa_sixel_cache.is_some() {
-                // Redraw area with spaces to clear SIXEL image
-                let clear: String = std::iter::repeat_n(
-                    " ".repeat(w_char as usize),
-                    h_char as usize,
-                )
-                .collect::<Vec<_>>()
-                .join("\r\n");
-                let _ = write!(std::io::stdout(), "\x1b[{};{}H{}", y_char + 1, x_char + 1, clear);
-                let _ = std::io::stdout().flush();
-            }
-            self.chafa_sixel_cache = None;
-            self.last_cover_gen_chafa = 0;
+            self.clear_sixel_cover();
             return;
         }
 
@@ -364,6 +364,28 @@ impl App {
             let _ = write!(std::io::stdout(), "\x1b[?25l");
             let _ = std::io::stdout().flush();
         }
+    }
+
+    /// Clear the SIXEL cover image from the terminal by overwriting the
+    /// cover area with spaces.
+    fn clear_sixel_cover(&mut self) {
+        use std::io::Write;
+        if self.chafa_sixel_cache.is_none() {
+            return;
+        }
+        let (x, y, w, h) = self.ui_state.cover_rect.get();
+        if w > 0 && h > 0 {
+            let clear: String = std::iter::repeat_n(
+                " ".repeat(w as usize),
+                h as usize,
+            )
+            .collect::<Vec<_>>()
+            .join("\r\n");
+            let _ = write!(std::io::stdout(), "\x1b[{};{}H{}", y + 1, x + 1, clear);
+            let _ = std::io::stdout().flush();
+        }
+        self.chafa_sixel_cache = None;
+        self.last_cover_gen_chafa = 0;
     }
 }
 
