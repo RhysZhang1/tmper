@@ -42,6 +42,7 @@ pub struct App {
     chafa_available: bool,
     last_cover_gen_chafa: u64,
     chafa_sixel_cache: Option<Vec<u8>>,
+    chafa_clear_pending: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -79,6 +80,7 @@ impl App {
             chafa_available: which_chafa(),
             last_cover_gen_chafa: 0,
             chafa_sixel_cache: None,
+            chafa_clear_pending: false,
         })
     }
 
@@ -141,6 +143,16 @@ impl App {
 
             if self.should_quit {
                 break;
+            }
+
+            // Clear screen once when leaving player view with active SIXEL
+            // (SIXEL images persist at pixel level and block characters can't
+            // erase them — we need a full clear.)
+            if self.chafa_clear_pending {
+                use std::io::Write;
+                let _ = write!(std::io::stdout(), "\x1b[2J\x1b[H");
+                let _ = std::io::stdout().flush();
+                self.chafa_clear_pending = false;
             }
 
             if let Err(e) = terminal.draw(|f| ui::render(f, &self.ui_state)) {
@@ -264,7 +276,11 @@ impl App {
     fn render_cover_via_chafa(&mut self) {
         // Only render cover on the player view
         if self.ui_state.active_view != crate::ui::ViewMode::Player {
-            self.clear_sixel_cover();
+            if self.chafa_sixel_cache.is_some() {
+                self.chafa_clear_pending = true;
+                self.chafa_sixel_cache = None;
+                self.last_cover_gen_chafa = 0;
+            }
             return;
         }
         use std::io::Write;
@@ -280,7 +296,11 @@ impl App {
 
         // Cover hidden — clear cache
         if !self.ui_state.show_cover_art {
-            self.clear_sixel_cover();
+            if self.chafa_sixel_cache.is_some() {
+                self.chafa_clear_pending = true;
+                self.chafa_sixel_cache = None;
+                self.last_cover_gen_chafa = 0;
+            }
             return;
         }
 
@@ -366,27 +386,6 @@ impl App {
         }
     }
 
-    /// Clear the SIXEL cover image from the terminal by overwriting the
-    /// cover area with spaces.
-    fn clear_sixel_cover(&mut self) {
-        use std::io::Write;
-        if self.chafa_sixel_cache.is_none() {
-            return;
-        }
-        let (x, y, w, h) = self.ui_state.cover_rect.get();
-        if w > 0 && h > 0 {
-            let clear: String = std::iter::repeat_n(
-                " ".repeat(w as usize),
-                h as usize,
-            )
-            .collect::<Vec<_>>()
-            .join("\r\n");
-            let _ = write!(std::io::stdout(), "\x1b[{};{}H{}", y + 1, x + 1, clear);
-            let _ = std::io::stdout().flush();
-        }
-        self.chafa_sixel_cache = None;
-        self.last_cover_gen_chafa = 0;
-    }
 }
 
 /// Check if the `chafa` binary is available and working.
