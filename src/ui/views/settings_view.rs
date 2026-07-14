@@ -5,6 +5,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem};
 use ratatui::Frame;
 
 use crate::config::Config;
+use crate::input::keymap::KeyBindings;
 
 /// One row in the settings list.
 pub struct SettingItem {
@@ -20,7 +21,7 @@ pub struct SettingsState {
 }
 
 /// Rebuild the flat settings list from current config values.
-pub fn rebuild_settings(state: &mut SettingsState, config: &Config) {
+pub fn rebuild_settings(state: &mut SettingsState, config: &Config, key_bindings: &KeyBindings) {
     let items = vec![
         SettingItem {
             name: "主题".into(),
@@ -69,6 +70,56 @@ pub fn rebuild_settings(state: &mut SettingsState, config: &Config) {
             } else {
                 "否".into()
             },
+        },
+        // ── Keybinding display items ──
+        SettingItem {
+            name: "── 键位配置 ──".into(),
+            value: "config/keybindings.toml".into(),
+        },
+        SettingItem {
+            name: "  播放/暂停".into(),
+            value: key_bindings.play_pause.clone(),
+        },
+        SettingItem {
+            name: "  下一首".into(),
+            value: key_bindings.next_track.clone(),
+        },
+        SettingItem {
+            name: "  上一首".into(),
+            value: key_bindings.prev_track.clone(),
+        },
+        SettingItem {
+            name: "  音量减".into(),
+            value: key_bindings.vol_down.clone(),
+        },
+        SettingItem {
+            name: "  音量增".into(),
+            value: key_bindings.vol_up.clone(),
+        },
+        SettingItem {
+            name: "  退出".into(),
+            value: key_bindings.quit.clone(),
+        },
+        SettingItem {
+            name: "  上移".into(),
+            value: key_bindings.up.clone(),
+        },
+        SettingItem {
+            name: "  下移".into(),
+            value: key_bindings.down.clone(),
+        },
+        // ── M3U actions ──
+        SettingItem {
+            name: "── 歌单导入导出 ──".into(),
+            value: "Enter 执行".into(),
+        },
+        SettingItem {
+            name: "  导入 M3U 歌单".into(),
+            value: "使用 :import <路径>".into(),
+        },
+        SettingItem {
+            name: "  导出所有歌单".into(),
+            value: "保存到 data/*.m3u".into(),
         },
         SettingItem {
             name: "── 确认并返回 ──".into(),

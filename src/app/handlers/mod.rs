@@ -133,6 +133,7 @@ impl App {
                     crate::ui::views::settings_view::rebuild_settings(
                         &mut self.ui_state.settings_state,
                         &self.config,
+                        &self.key_bindings,
                     );
                 }
                 self.ui_state.active_view = if self.ui_state.active_view == ViewMode::Settings {

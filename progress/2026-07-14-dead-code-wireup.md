@@ -70,6 +70,23 @@
 
 **残留警告**: 为 `TrackRow`、`LyricTrack.metadata`、`TrackInfo.track_total`、`TrackDisplay`、`render_lyrics` 等公开 API 字段添加 `#[allow(dead_code)]`（这些字段用于序列化或未来扩展）
 
+## 补充修改 (2026-07-14 后续)
+
+### 命令模式 UI 改为居中弹出框
+- 将底部命令栏改为屏幕中央的弹出输入框 (56x14)
+- 输入框下方显示所有可用命令提示
+- 闪烁光标、Enter=执行/Esc=取消 提示
+
+### 设置页面 (键 7) 增加键位和 M3U 项目
+- 新增 9 行键位配置显示：播放/暂停、下一首、上一首、音量减、音量增、退出、上移、下移
+- 新增 3 行 M3U 项目：歌单导入导出 + 导入 M3U 歌单、导出所有歌单
+- 导出所有歌单：Enter 执行，保存到 data/*.m3u
+
+### 涉及文件
+- `src/ui/mod.rs` — 命令弹出框渲染
+- `src/ui/views/settings_view.rs` — rebuild_settings 增加键位和 M3U 条目
+- `src/app/handlers/settings.rs` — handle_settings_key 增加 M3U 导出、cycle_setting 签名更新
+
 ## 验证
 
 ```bash

@@ -30,30 +30,89 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                // Confirm row: last item
-                if state.cursor == state.items.len().saturating_sub(1) {
+                let last = state.items.len().saturating_sub(1);
+                if state.cursor == last {
+                    // Confirm row
                     Self::write_config(config);
                     self.ui_state.active_view = ViewMode::Player;
                     return;
                 }
-                Self::cycle_setting(config, state);
+                // M3U: export all playlists
+                if state.cursor == 20 {
+                    self.export_all_playlists_m3u();
+                    return;
+                }
+                // M3U import / keybinding items: show notification
+                if (10..=17).contains(&state.cursor) || state.cursor == 19 {
+                    self.ui_state.notification = Some((
+                        "编辑 config/keybindings.toml 或使用 :import/:export 命令".into(),
+                        std::time::Instant::now(),
+                    ));
+                    return;
+                }
+                // Section headers: skip
+                if state.cursor == 9 || state.cursor == 18 {
+                    return;
+                }
+                Self::cycle_setting(config, state, &self.key_bindings);
+                return;
             }
             KeyCode::Char('l') | KeyCode::Right => {
-                Self::cycle_setting(config, state);
+                Self::cycle_setting(config, state, &self.key_bindings);
             }
             KeyCode::Char('h') | KeyCode::Left => {
-                Self::cycle_setting_reverse(config, state);
+                Self::cycle_setting_reverse(config, state, &self.key_bindings);
             }
             _ => {}
         }
     }
 
-    fn cycle_setting(config: &mut crate::config::Config, state: &mut SettingsState) {
-        let idx = state.cursor;
-        // Skip confirm row
-        let last = state.items.len().saturating_sub(1);
-        if idx >= last {
+    /// Export all playlists to M3U files in the data directory.
+    fn export_all_playlists_m3u(&mut self) {
+        let playlists = self.ui_state.playlist_state.playlists.clone();
+        if playlists.is_empty() {
+            self.ui_state.notification = Some((
+                "没有歌单可以导出".into(),
+                std::time::Instant::now(),
+            ));
             return;
+        }
+        let mut count = 0usize;
+        for pl_data in &playlists {
+            let mut playlist = crate::playlist::Playlist::new(&pl_data.name);
+            for song in &pl_data.songs {
+                let title = song
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Unknown")
+                    .to_string();
+                playlist.push(crate::playlist::TrackEntry::new(
+                    song.clone(),
+                    title,
+                    String::new(),
+                    0.0,
+                ));
+            }
+            let export_path = crate::paths::data_dir().join(format!("{}.m3u", pl_data.name));
+            if crate::library::playlist_manager::export_m3u(&playlist, &export_path).is_ok() {
+                count += 1;
+            }
+        }
+        self.ui_state.notification = Some((
+            format!("已导出 {count}/{} 个歌单到 data/", playlists.len()),
+            std::time::Instant::now(),
+        ));
+    }
+
+    fn cycle_setting(
+        config: &mut crate::config::Config,
+        state: &mut SettingsState,
+        key_bindings: &crate::input::keymap::KeyBindings,
+    ) {
+        let idx = state.cursor;
+        let last = state.items.len().saturating_sub(1);
+        if idx >= last || idx == 9 || idx == 18 || (10..=17).contains(&idx) || idx == 19 || idx == 20 {
+            return; // section headers, keybinding display, M3U actions
         }
 
         match idx {
@@ -131,17 +190,21 @@ impl App {
         }
 
         // Rebuild display
-        crate::ui::views::settings_view::rebuild_settings(state, config);
+        crate::ui::views::settings_view::rebuild_settings(state, config, key_bindings);
 
         // Persist
         Self::write_config(config);
     }
 
-    fn cycle_setting_reverse(config: &mut crate::config::Config, state: &mut SettingsState) {
+    fn cycle_setting_reverse(
+        config: &mut crate::config::Config,
+        state: &mut SettingsState,
+        key_bindings: &crate::input::keymap::KeyBindings,
+    ) {
         let idx = state.cursor;
         let last = state.items.len().saturating_sub(1);
-        if idx >= last {
-            return;
+        if idx >= last || idx == 9 || idx == 18 || (10..=17).contains(&idx) || idx == 19 || idx == 20 {
+            return; // section headers, keybinding display, M3U actions
         }
 
         match idx {
@@ -184,11 +247,11 @@ impl App {
             }
             _ => {
                 // For booleans and others, just cycle forward (simpler)
-                Self::cycle_setting(config, state);
+                Self::cycle_setting(config, state, key_bindings);
             }
         }
 
-        crate::ui::views::settings_view::rebuild_settings(state, config);
+        crate::ui::views::settings_view::rebuild_settings(state, config, key_bindings);
         Self::write_config(config);
     }
 

@@ -1,7 +1,8 @@
 pub mod views;
 pub mod widgets;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 use serde::{Deserialize, Serialize};
@@ -158,13 +159,70 @@ pub fn render(f: &mut Frame, state: &UiState) {
         }
     }
 
-    // Command bar (shown when in command mode)
+    // Command mode: centered popup overlay
     if state.command_mode {
         let area = f.area();
-        let cmd_area = Rect::new(0, area.height.saturating_sub(1), area.width, 1);
-        let prompt = format!(":{}", state.command_buffer);
-        let para = Paragraph::new(prompt).style(Style::default().fg(Color::Yellow));
-        f.render_widget(para, cmd_area);
+        let popup_w = 56u16.min(area.width - 4);
+        let popup_h = 14u16.min(area.height - 4);
+        let x = (area.width.saturating_sub(popup_w)) / 2;
+        let y = (area.height.saturating_sub(popup_h)) / 2;
+        let popup = Rect::new(x, y, popup_w, popup_h);
+        f.render_widget(Clear, popup);
+
+        let mut lines: Vec<Line> = Vec::new();
+        let cursor = if state.command_buffer.len().is_multiple_of(2) {
+            "▊"
+        } else {
+            ""
+        };
+        lines.push(Line::from(Span::styled(
+            format!(":{} {}", state.command_buffer, cursor),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  Commands:",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            "  q quit  |  help  |  version  |  theme <name>",
+            Style::default().fg(Color::Gray),
+        )));
+        lines.push(Line::from(Span::styled(
+            "  seek <secs>  |  volume <0-100>  |  repeat <mode>",
+            Style::default().fg(Color::Gray),
+        )));
+        lines.push(Line::from(Span::styled(
+            "  view <name>  |  import <path>  |  export <name>",
+            Style::default().fg(Color::Gray),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  view names: player library lyrics visualizer",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(Span::styled(
+            "               playlists browser settings",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(Span::styled(
+            "  repeat: sequential shuffle single",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  Enter=执行  Esc=取消",
+            Style::default().fg(Color::Green),
+        )));
+
+        let para = Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Command ")
+                .border_style(Style::default().fg(Color::Yellow)),
+        );
+        f.render_widget(para, popup);
+        return;
     }
 
     if state.active_view == ViewMode::Player {
