@@ -189,7 +189,8 @@ impl App {
         if down {
             let ps = &mut self.ui_state.playlist_state;
             let model = PlaylistFlatModel::new(&ps.playlists, ps.expanded_playlist);
-            let max_idx = model.total_lines().saturating_sub(2); // skip "..." row
+            // Max reachable index = last item (total - 1, since "..." at 0)
+            let max_idx = model.total_lines().saturating_sub(1);
             if ps.selected_playlist < max_idx {
                 ps.selected_playlist += 1;
             }
@@ -200,7 +201,9 @@ impl App {
         }
         if up {
             let ps = &mut self.ui_state.playlist_state;
-            if ps.selected_playlist > 0 {
+            // Index 0 is the "..." row in the model — not selectable.
+            // The first playlist starts at index 1.
+            if ps.selected_playlist > 1 {
                 ps.selected_playlist -= 1;
             }
             if ps.selected_playlist < ps.scroll_playlists {

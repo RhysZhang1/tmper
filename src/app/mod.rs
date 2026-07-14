@@ -42,6 +42,7 @@ pub struct App {
     chafa_available: bool,
     last_cover_gen_chafa: u64,
     chafa_sixel_cache: Option<Vec<u8>>,
+    chafa_clear_pending: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -79,6 +80,7 @@ impl App {
             chafa_available: which_chafa(),
             last_cover_gen_chafa: 0,
             chafa_sixel_cache: None,
+            chafa_clear_pending: false,
         })
     }
 
@@ -141,6 +143,14 @@ impl App {
 
             if self.should_quit {
                 break;
+            }
+
+            // Clear SIXEL ghost when leaving player view (one frame delay)
+            if self.chafa_clear_pending {
+                use std::io::Write;
+                let _ = write!(std::io::stdout(), "\x1b[2J");
+                let _ = std::io::stdout().flush();
+                self.chafa_clear_pending = false;
             }
 
             if let Err(e) = terminal.draw(|f| ui::render(f, &self.ui_state)) {
@@ -264,6 +274,9 @@ impl App {
     fn render_cover_via_chafa(&mut self) {
         // Only render cover on the player view
         if self.ui_state.active_view != crate::ui::ViewMode::Player {
+            if self.chafa_sixel_cache.is_some() {
+                self.chafa_clear_pending = true;
+            }
             self.chafa_sixel_cache = None;
             self.last_cover_gen_chafa = 0;
             return;
@@ -281,6 +294,9 @@ impl App {
 
         // Cover hidden — clear cache
         if !self.ui_state.show_cover_art {
+            if self.chafa_sixel_cache.is_some() {
+                self.chafa_clear_pending = true;
+            }
             self.chafa_sixel_cache = None;
             self.last_cover_gen_chafa = 0;
             return;
