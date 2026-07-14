@@ -41,6 +41,7 @@ pub struct App {
     last_cover_gen: u64,
     chafa_available: bool,
     last_cover_gen_chafa: u64,
+    chafa_sixel_cache: Option<Vec<u8>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -77,6 +78,7 @@ impl App {
             last_cover_gen: 0,
             chafa_available: which_chafa(),
             last_cover_gen_chafa: 0,
+            chafa_sixel_cache: None,
         })
     }
 
@@ -250,124 +252,134 @@ impl App {
 
     /// Render cover art via chafa subprocess using SIXEL graphics protocol.
     /// Works on Konsole (KDE Plasma) and other terminals with SIXEL support.
+    ///
+    /// Runs chafa once when the cover changes, caches the SIXEL DCS data,
+    /// and re-sends it every frame so it survives terminal redraws.
     fn render_cover_via_chafa(&mut self) {
         use std::io::Write;
 
         if !self.chafa_available {
             return;
         }
+
+        let (x_char, y_char, w_char, h_char) = self.ui_state.cover_rect.get();
+        if w_char == 0 || h_char == 0 {
+            return;
+        }
+
+        // Cover hidden — clear cache and redraw area with spaces
         if !self.ui_state.show_cover_art {
-            if self.last_cover_gen_chafa != 0 {
-                // Cover hidden — clear SIXEL by redrawing area with spaces
-                let (x, y, w, h) = self.ui_state.cover_rect.get();
-                if w > 0 && h > 0 {
-                    let clear: String = std::iter::repeat_n(
-                        " ".repeat(w as usize),
-                        h as usize,
-                    )
-                    .collect::<Vec<_>>()
-                        .join("\r\n");
-                    let _ = write!(std::io::stdout(), "\x1b[{};{}H{}", y + 1, x + 1, clear);
-                    let _ = std::io::stdout().flush();
-                }
+            if self.chafa_sixel_cache.is_some() {
+                let clear: String = std::iter::repeat_n(
+                    " ".repeat(w_char as usize),
+                    h_char as usize,
+                )
+                .collect::<Vec<_>>()
+                .join("\r\n");
+                let _ = write!(std::io::stdout(), "\x1b[{};{}H{}", y_char + 1, x_char + 1, clear);
+                let _ = std::io::stdout().flush();
+                self.chafa_sixel_cache = None;
                 self.last_cover_gen_chafa = 0;
             }
             return;
         }
 
+        // Regenerate cache when cover art changes
         let gen = self.ui_state.cover_gen.get();
-        if gen == self.last_cover_gen_chafa {
-            return; // Already rendered
-        }
-        self.last_cover_gen_chafa = gen;
+        if self.chafa_sixel_cache.is_none() || gen != self.last_cover_gen_chafa {
+            self.last_cover_gen_chafa = gen;
 
-        let cover = match self.ui_state.cover_art {
-            Some(ref c) => c.clone(), // Arc clone — cheap
-            None => return,
-        };
-
-        let (x_char, y_char, _w_char, _h_char) = self.ui_state.cover_rect.get();
-        if _w_char == 0 || _h_char == 0 {
-            return;
-        }
-
-        // Spawn chafa with SIXEL output, capture the data
-        let output = match std::process::Command::new("chafa")
-            .arg("-f")
-            .arg("sixels")
-            .arg("-c")
-            .arg("full")
-            .arg("-s")
-            .arg(format!("{}x{}", _w_char, _h_char))
-            .arg("--no-cache")
-            .arg("/dev/stdin")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(mut child) => {
-                if let Some(ref mut stdin) = child.stdin {
-                    let _ = stdin.write_all(&cover);
+            let cover = match self.ui_state.cover_art {
+                Some(ref c) => c.clone(),
+                None => {
+                    self.chafa_sixel_cache = None;
+                    return;
                 }
-                drop(child.stdin.take());
-                match child.wait_with_output() {
-                    Ok(out) => out.stdout,
-                    Err(e) => {
-                        tracing::warn!("chafa wait failed: {e}");
-                        return;
+            };
+
+            let output = match std::process::Command::new("chafa")
+                .arg("-f")
+                .arg("sixels")
+                .arg("-c")
+                .arg("full")
+                .arg("-s")
+                .arg(format!("{}x{}", w_char, h_char))
+                .arg("--no-cache")
+                .arg("/dev/stdin")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(mut child) => {
+                    if let Some(ref mut stdin) = child.stdin {
+                        let _ = stdin.write_all(&cover);
+                    }
+                    drop(child.stdin.take());
+                    match child.wait_with_output() {
+                        Ok(out) => out.stdout,
+                        Err(e) => {
+                            tracing::warn!("chafa wait failed: {e}");
+                            return;
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                tracing::warn!("chafa spawn failed: {e}");
-                self.chafa_available = false;
+                Err(e) => {
+                    tracing::warn!("chafa spawn failed: {e}");
+                    self.chafa_available = false;
+                    return;
+                }
+            };
+
+            if output.is_empty() {
+                self.chafa_sixel_cache = None;
                 return;
             }
-        };
 
-        if output.is_empty() {
-            return;
+            // Strip cursor-control sequences and extract raw SIXEL DCS:
+            //   \x1b[?25l \x1b[?80l \x1b[?8452l ... \x1bP ... \x1b\\ \x1b[?25h
+            let mut start = 0;
+            // Find ESC P (DCS start for SIXEL)
+            while start + 1 < output.len()
+                && !(output[start] == 0x1b && output[start + 1] == b'P')
+            {
+                start += 1;
+            }
+            // Find ESC \ (ST = string terminator)
+            let mut end = output.len();
+            while end > start + 1
+                && !(output[end - 2] == 0x1b && output[end - 1] == b'\\')
+            {
+                end -= 1;
+            }
+
+            if start >= end {
+                self.chafa_sixel_cache = None;
+                return;
+            }
+
+            // Position the cursor before the SIXEL data on each send,
+            // so we store the DCS *without* a cursor prefix
+            self.chafa_sixel_cache = Some(output[start..end].to_vec());
+            tracing::info!(
+                "chafa SIXEL cover generated: {} bytes (area {}x{})",
+                end - start,
+                w_char,
+                h_char
+            );
         }
 
-        // Strip cursor-control sequences that chafa prepends/ appends:
-        //   \x1b[?25l (hide cursor), \x1b[?80l (no wrap), \x1b[?8452l (konsole-specific)
-        //   \x1b[?25h (show cursor)
-        let mut sixel_start = 0;
-        while sixel_start < output.len() && output[sixel_start] != 0x1b {
-            sixel_start += 1;
+        // Re-send cached SIXEL every frame (survives terminal redraws)
+        if let Some(ref sixel) = self.chafa_sixel_cache {
+            let _ = write!(
+                std::io::stdout(),
+                "\x1b[{};{}H",
+                y_char + 1,
+                x_char + 1
+            );
+            let _ = std::io::stdout().write_all(sixel);
+            let _ = std::io::stdout().flush();
         }
-        // Find the SIXEL DCS: ESC P
-        while sixel_start < output.len() - 1
-            && !(output[sixel_start] == 0x1b && output[sixel_start + 1] == b'P')
-        {
-            sixel_start += 1;
-        }
-        if sixel_start >= output.len() {
-            return;
-        }
-
-        // Find the ST (string terminator): ESC \
-        let mut sixel_end = output.len();
-        while sixel_end > sixel_start + 1
-            && !(output[sixel_end - 2] == 0x1b && output[sixel_end - 1] == b'\\')
-        {
-            sixel_end -= 1;
-        }
-        if sixel_end <= sixel_start {
-            return;
-        }
-
-        let sixel_data = &output[sixel_start..sixel_end];
-
-        let _ = write!(
-            std::io::stdout(),
-            "\x1b[{};{}H",
-            y_char + 1,
-            x_char + 1
-        );
-        let _ = std::io::stdout().write_all(sixel_data);
-        let _ = std::io::stdout().flush();
     }
 }
 
