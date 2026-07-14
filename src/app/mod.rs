@@ -145,11 +145,11 @@ impl App {
                 break;
             }
 
-            // Clear SIXEL ghost when leaving player view (one frame delay)
+            // Clear SIXEL ghost when leaving player view.
+            // Uses terminal.clear() so ratatui resets its internal buffer
+            // and the next draw() sends ALL cells (not just diffs).
             if self.chafa_clear_pending {
-                use std::io::Write;
-                let _ = write!(std::io::stdout(), "\x1b[2J");
-                let _ = std::io::stdout().flush();
+                let _ = terminal.clear();
                 self.chafa_clear_pending = false;
             }
 
