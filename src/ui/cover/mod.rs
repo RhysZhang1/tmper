@@ -26,6 +26,10 @@ pub struct CoverRenderer {
     /// `terminal.clear()` before the next ratatui draw so the internal diff
     /// buffer covers all cells and overwrites any SIXEL residue.
     clear_pending: bool,
+    /// Frame countdown that suppresses ALL cover output when > 0.
+    /// Decrements each frame. Set after track transitions to prevent
+    /// terminal escape-sequence interference during state changes.
+    suppress_countdown: u8,
 }
 
 impl CoverRenderer {
@@ -38,6 +42,7 @@ impl CoverRenderer {
             last_cover_gen_chafa: 0,
             chafa_sixel_cache: None,
             clear_pending: false,
+            suppress_countdown: 0,
         }
     }
 
@@ -54,9 +59,21 @@ impl CoverRenderer {
         self.clear_pending = false;
     }
 
+    /// Suppress all cover output for the next `n` frames.
+    /// Call after track transitions to prevent terminal escape-sequence
+    /// interference (spurious input events from SIXEL/Kitty data).
+    pub fn suppress_frames(&mut self, n: u8) {
+        self.suppress_countdown = self.suppress_countdown.saturating_add(n);
+    }
+
     /// Call after every ratatui draw when on the player view (key 1).
     /// Attempts Kitty protocol first; falls back to chafa SIXEL.
     pub fn render_kitty(&mut self, state: &UiState) {
+        // Suppress during track transitions to prevent escape-seq interference
+        if self.suppress_countdown > 0 {
+            self.suppress_countdown -= 1;
+            return;
+        }
         // Only render cover on the player view
         if state.active_view != crate::ui::ViewMode::Player {
             self.kitty_rendered = false;
@@ -158,6 +175,11 @@ impl CoverRenderer {
     /// Caches the FULL chafa output (including Konsole-specific setup
     /// sequences) and re-sends every frame so the image survives redraws.
     pub fn render_chafa(&mut self, state: &UiState) {
+        // Suppress during track transitions to prevent escape-seq interference.
+        // (render_kitty already decremented — just check here.)
+        if self.suppress_countdown > 0 {
+            return;
+        }
         // Only render cover on the player view
         if state.active_view != crate::ui::ViewMode::Player {
             if self.chafa_sixel_cache.is_some() {

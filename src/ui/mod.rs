@@ -87,6 +87,10 @@ pub struct UiState {
     pub command_mode: bool,
     pub command_buffer: String,
     pub help_scroll: usize,
+    /// Cooldown timestamp for help toggle — spurious '0' key events
+    /// (triggered by terminal escape-sequence interference) are ignored
+    /// if they arrive within this window.
+    pub last_help_toggle: Option<std::time::Instant>,
     /// Actual visible rows computed from terminal size during render.
     /// Updated each frame; read by scroll handlers to avoid hardcoded limits.
     pub visible_rows: Cell<usize>,
@@ -134,6 +138,7 @@ impl Default for UiState {
             command_mode: false,
             command_buffer: String::new(),
             help_scroll: 0,
+            last_help_toggle: None,
             visible_rows: Cell::new(20),
             cover_gen: Cell::new(0),
             cover_rect: Cell::new((0, 0, 0, 0)),

@@ -71,7 +71,7 @@ source ~/.cargo/env
 ### 第二步：编译
 
 ```bash
-cd ~/Desktop/Terminal_music_player
+cd ~/Desktop/tmper
 cargo build --release
 ```
 
