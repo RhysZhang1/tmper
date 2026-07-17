@@ -62,6 +62,11 @@ impl CoverRenderer {
             self.kitty_rendered = false;
             return;
         }
+        // Hide cover when overlays (help, command input) are on top
+        if state.show_help || state.command_mode {
+            self.kitty_rendered = false;
+            return;
+        }
 
         // Toggle handling: clear Kitty image when cover display is off
         if !state.show_cover_art {

@@ -70,6 +70,8 @@ pub struct AudioEngine {
     decoder: Option<AudioDecoder>,
     sample_rate: u32,
     channels: u8,
+    /// Cached volume (0.0–1.0), reapplied after sink replacement.
+    current_volume: f32,
     duration_secs: Arc<Mutex<Option<f64>>>,
     pub pcm_buffer: Arc<Mutex<VecDeque<f32>>>,
     /// Real-time position tracking (wall-clock based, adjusted for pauses).
@@ -86,6 +88,7 @@ impl AudioEngine {
             decoder: None,
             sample_rate: runtime::DEFAULT_SAMPLE_RATE,
             channels: 2,
+            current_volume: 0.8,
             duration_secs: Arc::new(Mutex::new(None)),
             pcm_buffer: Arc::new(Mutex::new(VecDeque::with_capacity(
                 runtime::PCM_BUFFER_CAPACITY,
@@ -114,6 +117,7 @@ impl AudioEngine {
         // Replace sink entirely — this creates a fresh playing sink
         // and avoids rodio's permanent-detach-on-stop() issue.
         self.output.stop_and_replace();
+        self.output.set_volume(self.current_volume);
         self.pcm_buffer.lock().unwrap().clear();
 
         let mut decoder = AudioDecoder::open(path)?;
@@ -199,6 +203,7 @@ impl AudioEngine {
 
         // Replace sink and stream remaining packets
         self.output.stop_and_replace();
+        self.output.set_volume(self.current_volume);
         self.pcm_buffer.lock().unwrap().clear();
 
         let channels = self.channels;
@@ -242,7 +247,8 @@ impl AudioEngine {
         }
     }
 
-    pub fn set_volume(&self, vol: f32) {
+    pub fn set_volume(&mut self, vol: f32) {
+        self.current_volume = vol;
         self.output.set_volume(vol);
     }
 

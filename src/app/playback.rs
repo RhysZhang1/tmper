@@ -98,6 +98,10 @@ impl App {
     }
 
     pub(super) fn on_track_ended(&mut self) {
+        // Defensive: reset overlays that may have been spuriously triggered
+        // by terminal escape sequence interaction during a track transition.
+        self.ui_state.show_help = false;
+
         // Try playlist-scoped first
         if let Some(pl_idx) = self.ui_state.active_playlist {
             let songs = {
