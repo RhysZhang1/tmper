@@ -100,7 +100,9 @@ fn cover_as_colored_lines(inner: Rect, bytes: &[u8]) -> Option<Vec<Line<'static>
             };
             let style = match (a1 >= 128, a2 >= 128) {
                 // Both visible: ▄ with fg = bottom half, bg = top half
-                (true, true) => Style::default().fg(Color::Rgb(qr, qg, qb)).bg(Color::Rgb(pr, pg, pb)),
+                (true, true) => Style::default()
+                    .fg(Color::Rgb(qr, qg, qb))
+                    .bg(Color::Rgb(pr, pg, pb)),
                 // Only top visible: ▀ with fg = top half, bg transparent
                 (true, false) => Style::default().fg(Color::Rgb(pr, pg, pb)).bg(Color::Reset),
                 // Only bottom visible: ▄ with fg = bottom half, bg transparent

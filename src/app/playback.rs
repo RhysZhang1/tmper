@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crate::app::App;
+use crate::constants::runtime;
 use crate::lyrics::engine::LyricEngine;
 use crate::ui::RepeatMode;
 use crate::visualizer::fft::FftAnalyzer;
@@ -185,7 +186,7 @@ impl App {
         let smoothing = self.config.visualizer.smoothing;
 
         tokio::task::spawn_blocking(move || {
-            let fft_size = 2048;
+            let fft_size = runtime::FFT_SIZE;
             let mut analyzer = FftAnalyzer::new(fft_size);
             let mut processor = SpectrumProcessor::new(num_bars, smoothing);
 
@@ -199,25 +200,25 @@ impl App {
                     let buf = pcm_buf.lock().unwrap();
                     if buf.len() < fft_size {
                         drop(buf);
-                        std::thread::sleep(Duration::from_millis(16));
+                        std::thread::sleep(Duration::from_millis(runtime::FFT_WAIT_SLEEP_MS));
                         continue;
                     }
                     buf.iter().take(fft_size).copied().collect()
                 };
 
                 if samples.len() < fft_size {
-                    std::thread::sleep(Duration::from_millis(16));
+                    std::thread::sleep(Duration::from_millis(runtime::FFT_WAIT_SLEEP_MS));
                     continue;
                 }
 
                 let magnitudes = analyzer.process(&samples);
-                let bars = processor.process(&magnitudes, 44100);
+                let bars = processor.process(&magnitudes, runtime::DEFAULT_SAMPLE_RATE);
 
                 if let Ok(mut data) = fft_data.lock() {
                     *data = bars;
                 }
 
-                std::thread::sleep(Duration::from_millis(32));
+                std::thread::sleep(Duration::from_millis(runtime::FFT_LOOP_SLEEP_MS));
             }
         });
     }
@@ -250,7 +251,11 @@ impl App {
                 return;
             }
             let adjusted_pos = position_secs + self.ui_state.lyrics_offset_ms as f64 / 1000.0;
-            let idx = LyricEngine::sync(track, adjusted_pos.max(0.0), self.ui_state.current_lyric_index);
+            let idx = LyricEngine::sync(
+                track,
+                adjusted_pos.max(0.0),
+                self.ui_state.current_lyric_index,
+            );
             self.ui_state.current_lyric_index = idx;
         }
     }

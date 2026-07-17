@@ -1,3 +1,4 @@
+pub mod cover;
 pub mod views;
 pub mod widgets;
 use std::cell::Cell;
@@ -10,6 +11,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 use serde::{Deserialize, Serialize};
 
+use crate::constants::runtime;
 use crate::lyrics::types::LyricTrack;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,7 +155,7 @@ pub fn render(f: &mut Frame, state: &UiState) {
 
     // Floating notification for mode changes (shown before everything else)
     let should_notify = if let Some((_, t)) = &state.notification {
-        t.elapsed().as_secs_f64() < 0.5
+        t.elapsed().as_secs_f64() < runtime::NOTIFICATION_DURATION_SECS
     } else {
         false
     };
@@ -195,12 +197,16 @@ pub fn render(f: &mut Frame, state: &UiState) {
         };
         lines.push(Line::from(Span::styled(
             format!(":{} {}", state.command_buffer, cursor),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "  Commands:",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(Span::styled(
             "  q quit  |  help  |  version  |  theme <name>",

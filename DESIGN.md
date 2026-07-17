@@ -3,8 +3,8 @@
 > **项目名称**: tmper — 终端音乐播放器
 > **语言**: Rust
 > **平台**: Arch Linux + KDE Plasma
-> **文档版本**: v3.0（实现文档）
-> **最后更新**: 2026-07-13
+> **文档版本**: v3.1（实现文档）
+> **最后更新**: 2026-07-17
 
 ---
 
@@ -686,6 +686,7 @@ tmper/
 │   ├── main.rs                 #   入口：tracing init、config load、App::run()
 │   ├── cli.rs                  #   clap CLI 参数解析
 │   ├── config.rs               #   Config 加载/默认值
+│   ├── constants.rs            #   运行时调优常量（集中管理 magic numbers）
 │   ├── error.rs                #   AppError + AppResult<T>
 │   ├── event.rs                #   AppEvent 枚举
 │   ├── playlist.rs             #   TrackEntry + Playlist 数据结构
@@ -693,9 +694,10 @@ tmper/
 │   │
 │   ├── app/                    #   应用核心
 │   │   ├── mod.rs              #     App struct + run() 事件循环
+│   │   ├── playback.rs         #     播放控制：move_selection, next_track, FFT 线程
 │   │   ├── persistence.rs      #     状态/歌单/路径 保存和加载
 │   │   └── handlers/           #     按键事件处理器
-│   │       ├── mod.rs          #       handle_event、全局按键、播放器视图
+│   │       ├── mod.rs          #       handle_event、switch_view、全局按键
 │   │       ├── playlist.rs     #       歌单视图按键
 │   │       ├── library.rs      #       曲库视图按键
 │   │       ├── browser.rs      #       文件浏览器按键
@@ -727,6 +729,8 @@ tmper/
 │   ├── ui/                     #   用户界面
 │   │   ├── mod.rs              #     UiState、ViewMode、render() 入口
 │   │   ├── theme.rs            #     5 套预设主题
+│   │   ├── cover/              #     封面图渲染（终端协议直接输出）
+│   │   │   └── mod.rs          #       CoverRenderer: Kitty / SIXEL 协议
 │   │   ├── views/              #     视图
 │   │   │   ├── player_view.rs  #       播放器主视图
 │   │   │   ├── library_view.rs #       曲库浏览器

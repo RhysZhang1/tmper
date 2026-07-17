@@ -74,10 +74,8 @@ impl App {
     fn export_all_playlists_m3u(&mut self) {
         let playlists = self.ui_state.playlist_state.playlists.clone();
         if playlists.is_empty() {
-            self.ui_state.notification = Some((
-                "没有歌单可以导出".into(),
-                std::time::Instant::now(),
-            ));
+            self.ui_state.notification =
+                Some(("没有歌单可以导出".into(), std::time::Instant::now()));
             return;
         }
         let mut count = 0usize;
@@ -114,7 +112,13 @@ impl App {
     ) {
         let idx = state.cursor;
         let last = state.items.len().saturating_sub(1);
-        if idx >= last || idx == 9 || idx == 18 || (10..=17).contains(&idx) || idx == 19 || idx == 20 {
+        if idx >= last
+            || idx == 9
+            || idx == 18
+            || (10..=17).contains(&idx)
+            || idx == 19
+            || idx == 20
+        {
             return; // section headers, keybinding display, M3U actions
         }
 
@@ -202,7 +206,13 @@ impl App {
     ) {
         let idx = state.cursor;
         let last = state.items.len().saturating_sub(1);
-        if idx >= last || idx == 9 || idx == 18 || (10..=17).contains(&idx) || idx == 19 || idx == 20 {
+        if idx >= last
+            || idx == 9
+            || idx == 18
+            || (10..=17).contains(&idx)
+            || idx == 19
+            || idx == 20
+        {
             return; // section headers, keybinding display, M3U actions
         }
 

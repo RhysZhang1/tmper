@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::audio::decoder::AudioDecoder;
 use crate::audio::output::AudioOutput;
+use crate::constants::runtime;
 use crate::error::AppResult;
 
 /// Wraps a PCM sample iterator, copying each sample to a shared ring buffer.
@@ -83,10 +84,12 @@ impl AudioEngine {
         Ok(Self {
             output,
             decoder: None,
-            sample_rate: 44100,
+            sample_rate: runtime::DEFAULT_SAMPLE_RATE,
             channels: 2,
             duration_secs: Arc::new(Mutex::new(None)),
-            pcm_buffer: Arc::new(Mutex::new(VecDeque::with_capacity(8192))),
+            pcm_buffer: Arc::new(Mutex::new(VecDeque::with_capacity(
+                runtime::PCM_BUFFER_CAPACITY,
+            ))),
             position: Mutex::new(PositionState {
                 start: None,
                 total_paused: Duration::ZERO,
@@ -124,8 +127,11 @@ impl AudioEngine {
 
         while let Some(samples) = decoder.read_packet()? {
             let source = rodio::buffer::SamplesBuffer::new(channels as u16, sample_rate, samples);
-            self.output
-                .append_source(InstrumentedSource::new(source, pcm_buf.clone(), 8192));
+            self.output.append_source(InstrumentedSource::new(
+                source,
+                pcm_buf.clone(),
+                runtime::PCM_BUFFER_CAPACITY,
+            ));
         }
 
         self.decoder = Some(decoder);
@@ -201,8 +207,11 @@ impl AudioEngine {
 
         while let Some(samples) = decoder.read_packet()? {
             let source = rodio::buffer::SamplesBuffer::new(channels as u16, sample_rate, samples);
-            self.output
-                .append_source(InstrumentedSource::new(source, pcm_buf.clone(), 8192));
+            self.output.append_source(InstrumentedSource::new(
+                source,
+                pcm_buf.clone(),
+                runtime::PCM_BUFFER_CAPACITY,
+            ));
         }
 
         // Position tracking from the new offset

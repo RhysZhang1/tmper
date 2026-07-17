@@ -37,13 +37,12 @@ pub fn render_help(f: &mut Frame, scroll: usize) {
     };
     let title = format!(" 帮助 — 按 0 或 Esc 关闭 {} ", indicator);
 
-    let para = Paragraph::new(visible)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(title)
-                .style(Style::default().fg(Color::Yellow)),
-        );
+    let para = Paragraph::new(visible).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .style(Style::default().fg(Color::Yellow)),
+    );
 
     f.render_widget(para, popup_area);
 }

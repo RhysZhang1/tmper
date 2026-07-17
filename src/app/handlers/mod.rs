@@ -6,6 +6,7 @@ mod settings;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::App;
+use crate::constants::runtime;
 use crate::event::AppEvent;
 use crate::ui::views::playlist_view::{InsertMode, LineTarget, PlaylistFlatModel};
 use crate::ui::{RepeatMode, ViewMode};
@@ -79,64 +80,13 @@ impl App {
 
         // View switching (works in all views)
         match key.code {
-            KeyCode::Char('1') => self.ui_state.active_view = ViewMode::Player,
-            KeyCode::Char('2') => {
-                let switching_to_library = self.ui_state.active_view != ViewMode::Library;
-                self.ui_state.active_view = if switching_to_library {
-                    self.ensure_library_loaded();
-                    ViewMode::Library
-                } else {
-                    ViewMode::Player
-                };
-            }
-            KeyCode::Char('3') => {
-                self.ui_state.active_view = if self.ui_state.active_view == ViewMode::Lyrics {
-                    ViewMode::Player
-                } else {
-                    ViewMode::Lyrics
-                };
-            }
-            KeyCode::Char('4') => {
-                self.ui_state.active_view = if self.ui_state.active_view == ViewMode::Visualizer {
-                    ViewMode::Player
-                } else {
-                    ViewMode::Visualizer
-                };
-            }
-            KeyCode::Char('5') => {
-                if self.ui_state.active_view != ViewMode::Playlists {
-                    self.enter_playlist_view();
-                }
-                self.ui_state.active_view = if self.ui_state.active_view == ViewMode::Playlists {
-                    ViewMode::Player
-                } else {
-                    ViewMode::Playlists
-                };
-            }
-            KeyCode::Char('6') => {
-                if self.ui_state.active_view != ViewMode::Browser {
-                    self.enter_file_browser();
-                }
-                self.ui_state.active_view = if self.ui_state.active_view == ViewMode::Browser {
-                    ViewMode::Player
-                } else {
-                    ViewMode::Browser
-                };
-            }
-            KeyCode::Char('7') => {
-                if self.ui_state.active_view != ViewMode::Settings {
-                    crate::ui::views::settings_view::rebuild_settings(
-                        &mut self.ui_state.settings_state,
-                        &self.config,
-                        &self.key_bindings,
-                    );
-                }
-                self.ui_state.active_view = if self.ui_state.active_view == ViewMode::Settings {
-                    ViewMode::Player
-                } else {
-                    ViewMode::Settings
-                };
-            }
+            KeyCode::Char('1') => self.switch_view(ViewMode::Player),
+            KeyCode::Char('2') => self.switch_view(ViewMode::Library),
+            KeyCode::Char('3') => self.switch_view(ViewMode::Lyrics),
+            KeyCode::Char('4') => self.switch_view(ViewMode::Visualizer),
+            KeyCode::Char('5') => self.switch_view(ViewMode::Playlists),
+            KeyCode::Char('6') => self.switch_view(ViewMode::Browser),
+            KeyCode::Char('7') => self.switch_view(ViewMode::Settings),
             KeyCode::Char('0') => self.ui_state.show_help = !self.ui_state.show_help,
             KeyCode::Esc => {
                 if self.ui_state.show_help {
@@ -291,11 +241,11 @@ impl App {
                 self.ui_state.is_playing = true;
             }
         } else if is_vol_down {
-            let new_vol = (self.ui_state.volume - 0.05).max(0.0);
+            let new_vol = (self.ui_state.volume - runtime::VOLUME_STEP).max(0.0);
             self.ui_state.volume = new_vol;
             self.engine.set_volume(new_vol);
         } else if is_vol_up {
-            let new_vol = (self.ui_state.volume + 0.05).min(1.0);
+            let new_vol = (self.ui_state.volume + runtime::VOLUME_STEP).min(1.0);
             self.ui_state.volume = new_vol;
             self.engine.set_volume(new_vol);
         } else if is_next {
@@ -423,10 +373,8 @@ impl App {
                 self.ui_state.show_help = true;
             }
             crate::input::command::Command::Version => {
-                self.ui_state.notification = Some((
-                    "tmper v0.1.0".to_string(),
-                    std::time::Instant::now(),
-                ));
+                self.ui_state.notification =
+                    Some(("tmper v0.1.0".to_string(), std::time::Instant::now()));
             }
             crate::input::command::Command::Theme(name) => {
                 self.config.ui.theme = name;
@@ -466,10 +414,8 @@ impl App {
                     "browser" | "6" => crate::ui::ViewMode::Browser,
                     "settings" | "7" => crate::ui::ViewMode::Settings,
                     _ => {
-                        self.ui_state.notification = Some((
-                            format!("Unknown view: {name}"),
-                            std::time::Instant::now(),
-                        ));
+                        self.ui_state.notification =
+                            Some((format!("Unknown view: {name}"), std::time::Instant::now()));
                         return;
                     }
                 };
@@ -482,16 +428,14 @@ impl App {
                 let import_path = std::path::PathBuf::from(&path);
                 match crate::library::playlist_manager::import_m3u(&import_path) {
                     Ok(playlist) => {
-                        let songs: Vec<std::path::PathBuf> = playlist
-                            .tracks
-                            .iter()
-                            .map(|t| t.path.clone())
-                            .collect();
+                        let songs: Vec<std::path::PathBuf> =
+                            playlist.tracks.iter().map(|t| t.path.clone()).collect();
                         let name = playlist.name.clone();
                         let count = playlist.tracks.len();
-                        self.ui_state.playlist_state.playlists.push(
-                            crate::ui::views::playlist_view::PlaylistData { name, songs },
-                        );
+                        self.ui_state
+                            .playlist_state
+                            .playlists
+                            .push(crate::ui::views::playlist_view::PlaylistData { name, songs });
                         self.save_playlists();
                         self.ui_state.notification = Some((
                             format!("Imported: {count} tracks"),
@@ -499,10 +443,8 @@ impl App {
                         ));
                     }
                     Err(e) => {
-                        self.ui_state.notification = Some((
-                            format!("Import failed: {e}"),
-                            std::time::Instant::now(),
-                        ));
+                        self.ui_state.notification =
+                            Some((format!("Import failed: {e}"), std::time::Instant::now()));
                     }
                 }
             }
@@ -538,10 +480,8 @@ impl App {
                             ));
                         }
                         Err(e) => {
-                            self.ui_state.notification = Some((
-                                format!("Export failed: {e}"),
-                                std::time::Instant::now(),
-                            ));
+                            self.ui_state.notification =
+                                Some((format!("Export failed: {e}"), std::time::Instant::now()));
                         }
                     }
                 } else {
@@ -552,10 +492,8 @@ impl App {
                 }
             }
             crate::input::command::Command::Unknown(cmd) => {
-                self.ui_state.notification = Some((
-                    format!("Unknown command: {cmd}"),
-                    std::time::Instant::now(),
-                ));
+                self.ui_state.notification =
+                    Some((format!("Unknown command: {cmd}"), std::time::Instant::now()));
             }
         }
     }
@@ -597,13 +535,13 @@ impl App {
     fn handle_tick(&mut self) {
         // Notification auto-dismiss
         if let Some((_, time)) = &self.ui_state.playlist_state.notification {
-            if time.elapsed().as_secs_f64() >= 1.0 {
+            if time.elapsed().as_secs_f64() >= runtime::PLAYLIST_NOTIFICATION_SECS {
                 self.ui_state.playlist_state.notification = None;
             }
         }
         // Mode change notification auto-dismiss (0.5s)
         if let Some((_, time)) = &self.ui_state.notification {
-            if time.elapsed().as_secs_f64() >= 0.5 {
+            if time.elapsed().as_secs_f64() >= runtime::NOTIFICATION_DURATION_SECS {
                 self.ui_state.notification = None;
             }
         }
@@ -640,6 +578,33 @@ impl App {
 
         // Sync config flag to UI state (user may have toggled in settings)
         self.ui_state.show_cover_art = self.config.ui.show_cover_art;
+    }
+
+    /// Switch to `target` view. If already on that view, toggle back to Player.
+    /// Runs view-specific initialization before the switch.
+    fn switch_view(&mut self, target: ViewMode) {
+        // Always toggle back to Player if already on the target view
+        if self.ui_state.active_view == target {
+            self.ui_state.active_view = ViewMode::Player;
+            return;
+        }
+
+        // Run view-specific setup before switching
+        match target {
+            ViewMode::Library => self.ensure_library_loaded(),
+            ViewMode::Playlists => self.enter_playlist_view(),
+            ViewMode::Browser => self.enter_file_browser(),
+            ViewMode::Settings => {
+                crate::ui::views::settings_view::rebuild_settings(
+                    &mut self.ui_state.settings_state,
+                    &self.config,
+                    &self.key_bindings,
+                );
+            }
+            _ => {}
+        }
+
+        self.ui_state.active_view = target;
     }
 
     // ── Helpers ──

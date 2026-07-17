@@ -32,6 +32,7 @@
 | [phase4-2026-07-12.md](phase4-2026-07-12.md) | P4 频谱可视化 | 2026-07-12 |
 | [phase5-2026-07-12.md](phase5-2026-07-12.md) | P5 曲库 + 高级 UI | 2026-07-12 |
 | [2026-07-13-rewrite-and-fixes.md](2026-07-13-rewrite-and-fixes.md) | P1–P5 全面修复+重构+UI重写 | 2026-07-13 |
+| [2026-07-17-refactor.md](2026-07-17-refactor.md) | 代码结构优化：常量提取、封面模块化、视图切换统一 | 2026-07-17 |
 
 ---
 
@@ -42,7 +43,7 @@
 | cargo build | ✅ 零 warning |
 | cargo test | ✅ 41/41 通过 |
 | cargo clippy | ✅ 零 warning |
-| 代码量 | ~5165 行 Rust |
+| 代码量 | ~7,400 行 Rust |
 
 ## 下一步
 

@@ -56,8 +56,7 @@ impl App {
                         }
                     }
                     BrowserPanel::Filesystem => {
-                        state.selected_fs_index =
-                            state.selected_fs_index.saturating_sub(1);
+                        state.selected_fs_index = state.selected_fs_index.saturating_sub(1);
                         let sel = state.selected_fs_index;
                         if sel < state.scroll_fs {
                             state.scroll_fs = sel;
@@ -67,7 +66,7 @@ impl App {
                         }
                     }
                 }
-            },
+            }
             KeyCode::Enter => match state.focused {
                 BrowserPanel::Library => {
                     let idx = state.selected_library_index;

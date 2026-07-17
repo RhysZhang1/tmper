@@ -94,10 +94,8 @@ impl App {
                             ));
                         }
                         Err(e) => {
-                            state.notification = Some((
-                                format!("Export failed: {e}"),
-                                std::time::Instant::now(),
-                            ));
+                            state.notification =
+                                Some((format!("Export failed: {e}"), std::time::Instant::now()));
                         }
                     }
                 }
@@ -161,9 +159,13 @@ impl App {
                     if state.selected_playlist < state.scroll_playlists {
                         state.scroll_playlists = state.selected_playlist;
                     }
-                    if state.selected_playlist >= state.scroll_playlists + self.ui_state.visible_rows.get() {
-                        state.scroll_playlists =
-                            state.selected_playlist.saturating_sub(self.ui_state.visible_rows.get()) + 1;
+                    if state.selected_playlist
+                        >= state.scroll_playlists + self.ui_state.visible_rows.get()
+                    {
+                        state.scroll_playlists = state
+                            .selected_playlist
+                            .saturating_sub(self.ui_state.visible_rows.get())
+                            + 1;
                     }
                 }
             },

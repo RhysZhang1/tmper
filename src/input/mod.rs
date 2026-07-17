@@ -1,3 +1,3 @@
-pub mod handler;
 pub mod command;
+pub mod handler;
 pub mod keymap;
