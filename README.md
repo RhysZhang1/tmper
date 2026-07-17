@@ -1,8 +1,8 @@
 # tmper — 终端音乐播放器
 
-一个运行在终端里的音乐播放器，使用 Rust 编写，ratatui TUI 框架。
+一个运行在终端里的全功能音乐播放器，使用 Rust 编写，ratatui TUI 框架。
 
-支持多格式音频解码、元数据显示、内嵌封面图展示、LRC 歌词同步、cava 风格频谱可视化、歌单管理，纯键盘 Vim 风格操作。
+支持多格式音频解码、元数据显示、内嵌封面图展示（Kitty 协议 / SIXEL / 半块字符三层渐进）、LRC 歌词同步、cava 风格频谱可视化、歌单管理、SQLite 曲库，纯键盘 Vim 风格操作。
 
 ---
 
@@ -10,52 +10,54 @@
 
 ### 音频播放
 - 支持 MP3、FLAC、OGG、Opus、WAV、AAC、M4A、WMA、APE、WavPack、AIFF 等格式
-- 基于 [Symphonia](https://github.com/pdeljanov/Symphonia) 纯 Rust 解码，无需安装 ffmpeg
-- 音量控制、快进快退（← 后退5秒 / → 前进5秒，真实音频 seek）
+- 基于 [Symphonia](https://github.com/pdeljanov/Symphonia) 纯 Rust 解码，**无需安装 ffmpeg**
+- 音量控制、快进快退（← 后退 / → 前进，真实音频 seek）
+- 顺序 / 随机 / 单曲 三种循环模式
 
-### 元数据与封面
-- 自动读取 ID3v1/v2、Vorbis Comments、APE、MP4 等标签，**含内嵌封面图**
-- 封面图显示：chafa 风格半块字符渲染 (▄ + fg/bg)，Lanczos3 缩放 + Floyd-Steinberg 抖动
-- 缺失字段自动回退（标题用文件名、艺术家显示"Unknown Artist"）
+### 封面图显示
+- **三层渐进渲染**：
+  1. **Kitty 图形协议** — 原生像素渲染（Kitty、WezTerm、Ghostty）
+  2. **SIXEL** — 通过 `chafa` 子进程（Konsole Plasma 6+，可选）
+  3. **半块字符** — Lanczos3 缩放 + Floyd-Steinberg 误差扩散抖动（通用回退）
+- 自动读取内嵌封面（ID3v2 APIC / Vorbis Comments / MP4）
+
+### 元数据
+- ID3v1/v2、Vorbis Comments、APE、MP4 等标签自动读取
+- 缺失字段自动回退（标题用文件名、艺术家显示 "Unknown Artist"）
 - SQLite 曲库索引，支持全文搜索
 
 ### 歌词系统
 - 标准 LRC 和增强 LRC（逐字时间戳）解析
-- 自动编码检测：UTF-8 → GBK → Shift-JIS，跳过解码错误的 fallback
+- 自动编码检测：UTF-8 → GBK → Shift-JIS
 - 同名 `.lrc` 文件放在音频旁即自动加载
-- 实时同步高亮，偏移微调（±0.5s / ±2s）
+- 实时同步高亮，偏移微调（`[` `]` ±0.5s / `{` `}` ±2s）
 - 全屏 KTV 歌词视图
 
 ### 频谱可视化 (cava 风格)
-- 实时 FFT 分析（2048 点 Hann 窗，~30 FPS 处理）
-- 对数频率分桶（60Hz–8kHz，32 柱），去掉低频噪声区
-- 统一缓慢平滑（α=0.22），30 FPS UI 刷新
-- 绿→黄→红 逐柱颜色渐变
-- 全屏鱼缸模式，暂停时渐变衰减
+- 实时 FFT 分析（2048 点 Hann 窗，~30 FPS）
+- 对数频率分桶（32 柱），绿→黄→红 颜色渐变
+- 暂停时自动衰减
 
 ### 用户界面
-- **歌曲信息**：播放时在进度条下方显示专辑、流派、年份、编码格式
-- **曲库浏览器**：艺术家→专辑→歌曲三栏浏览，支持模糊搜索（/ 键输入，Enter 搜索）
-- **两栏布局**：左侧封面+歌单 / 右侧歌词+频谱+控制栏
-- 七个视图：播放器、曲库浏览器、全屏歌词、全屏频谱、歌单管理、文件浏览器、设置
-- **Player View 歌单侧栏**：j/k 导航，Enter 展开/播放歌曲，与 View 5 同步
-- 播放列表管理：添加、删除、展开/折叠
-- 实时搜索过滤
-- 帮助面板（按 `0` 查看全部键位）
+- **7 个视图**：播放器(1) / 曲库(2) / 全屏歌词(3) / 全屏频谱(4) / 歌单管理(5) / 文件浏览器(6) / 设置(7)
+- 播放器两栏布局：左侧封面+歌单 / 右侧歌词+频谱+控制栏
+- Vim 风格模态键盘、`gg`/`dd` 双键序列、`/` 搜索
+- 命令模式（`:` 进入，类似 Vim 底栏）
+- 帮助面板（按 `0`）
 
 ### 配置与持久化
 - 5 套内置主题：Tokyo Night、Dracula、Nord、Solarized Dark、Catppuccin Mocha
-- 自定义快捷键
-- 退出自动保存状态（音量、播放模式、当前曲目、歌词偏移），下次启动可恢复
-- 所有文件自包含在项目文件夹中
+- 自定义快捷键（`config/keybindings.toml`）
+- 退出自动保存状态，下次启动恢复
 
 ---
 
 ## 系统要求
 
 - **Linux** 操作系统（Arch、Ubuntu、Debian、Fedora 等）
-- 音频输出设备（PulseAudio / PipeWire / ALSA 均可）
-- **Rust** 编译工具链（1.70+）
+- 音频输出设备（PulseAudio / PipeWire / ALSA）
+- **Rust** 编译工具链 1.70+
+- **可选**：`chafa` 命令行工具（提供 Konsole 等终端的 SIXEL 封面图渲染）
 
 ---
 
@@ -71,40 +73,51 @@ source ~/.cargo/env
 ### 第二步：编译
 
 ```bash
-cd ~/Desktop/tmper
+cd tmper
 cargo build --release
 ```
 
-编译产物在 `target/release/tmper`，约 7MB 的单文件二进制。
+编译产物在 `target/release/tmper`（单文件二进制，约 7MB）。
 
-### 第三步：加入 PATH
+### 第三步（可选）：加入 PATH
 
 在 `~/.bashrc` 末尾添加：
 
 ```bash
-export PATH="$HOME/Desktop/Terminal_music_player/target/release:$PATH"
+export PATH="$HOME/path/to/tmper/target/release:$PATH"
 ```
 
-然后执行 `source ~/.bashrc` 或重新打开终端。
-
-### 第四步：运行
+### 第四步（可选）：安装 chafa（封面图 SIXEL 渲染）
 
 ```bash
-tmper                  # 交互模式
-tmper play 歌曲.flac   # 播放指定文件
+# Arch
+sudo pacman -S chafa
+
+# Ubuntu/Debian
+sudo apt install chafa
+
+# Fedora
+sudo dnf install chafa
 ```
 
-提示：已经创建了 `tmper` 符号链接，也可以用 `tmper` 命令启动。
+没有 chafa 也能正常使用——封面图会使用半块字符渲染。
+
+### 运行
+
+```bash
+tmper                      # 交互模式
+tmper play ~/Music/歌曲.flac  # 播放指定文件
+```
 
 ---
 
 ## 使用教程
 
-### 基本操作
+### 基本布局
 
 启动后进入播放器视图，两栏布局：
 
-````
+```
 ┌─ Now Playing ───────┬─ Lyrics ──────────────────────────┐
 │        ♫            │  第一行歌词 (淡色)                 │
 │   Bohemian Rhapsody │  ▶ 当前行歌词 (高亮青色)          │
@@ -116,19 +129,16 @@ tmper play 歌曲.flac   # 播放指定文件
 │      Song B        ├────────────────────────────────────┤
 │  ▶ Rock ▼          │ ▶ 03:12/05:55 [████░░] Vol:80% 🔁  │
 └────────────────────┴────────────────────────────────────┘
-````
+```
 
 ### 播放音乐
 
 ```bash
-# 播放单曲
-tmper play ~/Music/song.flac
-
-# 播放整个目录
-tmper play ~/Music/Queen/
+tmper play ~/Music/song.flac   # 播放单曲
+tmper play ~/Music/Queen/      # 播放整个目录
 ```
 
-然后用 `j`/`k` 移动光标，`Enter` 播放选中的曲目，`Space` 暂停/恢复。
+`j`/`k` 移动光标，`Enter` 播放选中曲目，`Space` 暂停/恢复。
 
 ### 加载歌词
 
@@ -142,18 +152,16 @@ tmper play ~/Music/Queen/
 
 支持中文歌词（GBK 编码自动识别）。
 
-### 浏览曲库
-
-按 `2` 进入曲库浏览器（三栏布局），按 `h`/`l` 切换焦点栏，`j`/`k` 浏览，`Enter` 播放。
-
 ### 切换主题
 
 编辑 `config/config.toml`：
 
 ```toml
 [ui]
-theme = "dracula"    # 可选: tokyo-night, dracula, nord, solarized-dark, catppuccin-mocha
+theme = "dracula"
 ```
+
+可选值：`tokyo-night`、`dracula`、`nord`、`solarized-dark`、`catppuccin-mocha`
 
 ---
 
@@ -164,68 +172,64 @@ theme = "dracula"    # 可选: tokyo-night, dracula, nord, solarized-dark, catpp
 | `Space` | 播放 / 暂停 |
 | `n` / `p` | 下一首 / 上一首 |
 | `-` / `=` | 音量减 / 加 |
-| `Enter` | 播放选中 |
-| `j` / `k` | 下 / 上移动（Player View 中导航侧栏歌单） |
-| `Enter(歌单侧栏)` | 在歌单名上→展开/折叠 / 在歌曲上→播放 |
+| `Enter` | 播放选中曲目 |
+| `j` / `k` / `↓` / `↑` | 下 / 上移动 |
 | `←` / `→` | 快退 / 快进 5 秒（真实 seek） |
-| `g` `g` | 跳到顶部 |
-| `G` | 跳到底部 |
+| `g` `g` | 跳到列表顶部 |
+| `G` | 跳到列表底部 |
 | `Ctrl+d` / `Ctrl+u` | 翻半页 |
-| `d` `d` | 删除当前 |
-| `r` | 切换循环模式（顺序 / 随机 / 单曲循环） |
-| `/` | 搜索（视图1实时过滤，视图2模糊搜索DB） |
-| `1` `2` `3` `4` `5` `6` `7` | 切换视图 |
-| `[` `]` `{` `}` | 歌词偏移 |
-| `Ctrl+r` | 重置歌词偏移 |
+| `d` `d` | 删除当前曲目 |
+| `r` | 切换循环模式（顺序 / 随机 / 单曲） |
+| `/` | 搜索过滤 |
+| `1`–`7` | 切换视图 |
 | `0` | 帮助面板 |
+| `[` `]` `{` `}` | 歌词偏移微调 |
+| `Ctrl+r` | 重置歌词偏移 |
 | `q` | 退出 |
-| `:` | 进入命令模式 (Vim 风格，见下方命令参考) |
-| `e` (歌单视图) | 导出当前展开的歌单为 M3U |
+| `:` | 命令模式 (Vim 风格) |
 
 ---
 
 ## 命令模式（按 `:` 进入）
 
-类似 Vim 的底栏命令系统，`:` 进入命令模式后输入命令，`Enter` 执行，`Esc` 取消：
-
-| 命令 | 功能 |
+| 命令 | 说明 |
 |------|------|
 | `:q` / `:quit` | 退出程序 |
 | `:help` | 显示帮助面板 |
 | `:version` | 显示版本号 |
-| `:theme <名称>` | 切换主题 (tokyo-night / dracula / nord / solarized-dark / catppuccin-mocha) |
-| `:seek <秒数>` | 快进/快退（正数前进，负数后退） |
+| `:theme <名称>` | 切换主题 |
+| `:seek <秒数>` | 跳转（正数前进，负数后退） |
 | `:volume <0-100>` | 设置音量 |
 | `:repeat <模式>` | 循环模式 (sequential / shuffle / single) |
 | `:view <名称>` | 切换视图 (player / library / lyrics / visualizer / playlists / browser / settings) |
-| `:import <路径>` | 从 M3U 文件导入歌单 |
-| `:export <名称>` | 导出指定歌单为 data/<名称>.m3u |
+| `:import <路径>` | 导入 M3U 歌单 |
+| `:export <名称>` | 导出歌单为 M3U |
 
 ---
 
 ## 配置文件
 
-所有配置文件都在 `config/` 目录下：
+所有配置文件在项目目录下的 `config/` 中：
 
 ### config/config.toml
 
 ```toml
 [library]
-music_dirs = ["~/Music"]            # 音乐目录
-extensions = ["mp3", "flac", ...]   # 扫描格式
-scan_on_startup = false             # 启动时自动扫描
+music_dirs = ["~/Music"]
+extensions = ["mp3", "flac", "ogg", "opus", "wav", "aac", "m4a", "ape", "wv", "aiff", "wma"]
+scan_on_startup = false
 
 [playback]
-default_volume = 0.8                # 默认音量（0.0–1.0）
-gapless = true                      # 无缝播放
-seek_step_small_secs = 5            # 快进退步长
-seek_step_large_secs = 30           # 大步快进退
+default_volume = 0.8
+gapless = true
+seek_step_small_secs = 5
+seek_step_large_secs = 30
 
 [visualizer]
 enabled = true
-num_bars = 32                       # 频谱柱数量
-frame_rate = 30                     # 刷新率
-smoothing = 0.35                    # 平滑系数（0–1）
+num_bars = 32
+frame_rate = 30
+smoothing = 0.35
 
 [lyrics]
 auto_load = true
@@ -233,6 +237,7 @@ encoding_fallbacks = ["utf-8", "gbk", "shift-jis"]
 
 [ui]
 theme = "tokyo-night"
+show_cover_art = true
 ```
 
 ### config/keybindings.toml
@@ -254,90 +259,114 @@ down = "j"
 
 ### Q: 启动后按键没反应？
 
-A: 检查日志文件 `data/tmper.log`。如果终端窗口太小（少于 10 行），界面无法正常渲染，请调大窗口。
+检查日志文件 `data/tmper.log`。终端窗口至少需要 10 行高度。
 
 ### Q: 播放没有声音？
 
-A: 确认系统音频正常（PulseAudio/PipeWire/ALSA）。可以先用其他播放器测试。检查日志文件中是否有音频错误。
+确认 PulseAudio / PipeWire / ALSA 正常工作。先用其他播放器测试。
+
+### Q: 封面图显示为像素块而非高清图？
+
+需要满足以下条件之一：
+- **Kitty / WezTerm / Ghostty 终端**：自动使用原生像素渲染
+- **Konsole (Plasma 6+)**：安装 `chafa` 包后自动使用 SIXEL 渲染
+- 其他终端：使用半块字符渲染（▄ + fg/bg 两倍垂直分辨率）
 
 ### Q: 歌词不显示？
 
-A: 确保 `.lrc` 文件与音频文件同名、同目录。检查歌词文件编码是否为 UTF-8 / GBK / Shift-JIS。也可以按 `3` 切换到全屏歌词视图查看（即使无歌词也会显示"No lyrics found"）。
-
-### Q: 频谱不跳动？
-
-A: 确认 `config.toml` 中 `[visualizer] enabled = true`。频谱需要播放音频时才会显示。按 `4` 可以切换到全屏频谱视图。
+确保 `.lrc` 文件与音频文件同名、同目录。检查歌词编码是否为 UTF-8 / GBK / Shift-JIS。按 `3` 切换到全屏歌词视图。
 
 ### Q: 如何添加更多音乐？
 
-A: 编辑 `config/config.toml` 的 `music_dirs`，添加音乐目录路径，然后重启程序即可自动扫描。也可以通过 `:import <path.m3u>` 命令导入 M3U 歌单。
+编辑 `config/config.toml` 的 `music_dirs`，或使用 `:import <path.m3u>` 导入 M3U 歌单。
 
 ### Q: 支持哪些音频格式？
 
-A: MP3、FLAC、OGG Vorbis、Opus、WAV、AAC（.aac/.m4a）、ALAC（.m4a）、WavPack（.wv）、WMA、AIFF、APE。如果遇到不支持的格式，程序会跳过并记录日志。
-
-### Q: 如何卸载？
-
-A: 删除项目文件夹即可（所有文件都在里面）：
-```bash
-rm -rf ~/Desktop/Terminal_music_player
-```
-然后从 `~/.bashrc` 中删除对应的 PATH 行。
+MP3、FLAC、OGG Vorbis、Opus、WAV、AAC（.aac/.m4a）、ALAC（.m4a）、WavPack（.wv）、WMA、AIFF、APE。
 
 ### Q: 支持 macOS / Windows 吗？
 
-A: 目前仅支持 Linux。macOS 理论上可编译（rodio 支持 CoreAudio），但未测试。Windows 需要替换音频后端，暂不支持。
+目前仅支持 Linux。macOS 理论上可编译（rodio 支持 CoreAudio），但未测试。Windows 暂不支持。
 
 ---
 
 ## 项目结构
 
 ```
-Terminal_music_player/
-├── Cargo.toml                 # Rust 项目配置
-├── DESIGN.md                  # 完整设计文档
-├── README.md                  # 本文件
+tmper/
+├── Cargo.toml                    # Rust 项目配置
+├── Cargo.lock
+├── DESIGN.md                     # 架构设计文档
+├── README.md                     # 本文件
 │
-├── config/                    # 配置文件目录
-│   ├── default.toml           # 默认配置模板
-│   ├── config.toml            # 用户配置（自动生成）
-│   └── keybindings.toml       # 自定义快捷键（可选）
+├── config/                       # 配置文件（自包含）
+│   ├── config.toml               #   主配置
+│   └── keybindings.toml          #   快捷键
 │
-├── data/                      # 运行时数据（自动生成）
-│   ├── tmper.log           # 日志文件
-│   ├── state.json             # 退出时保存的状态
-│   └── library.db             # 曲库索引数据库
+├── data/                         # 运行时数据（自动生成）
+│   ├── tmper.log                 #   日志
+│   ├── state.json                #   退出状态
+│   ├── playlists.json            #   歌单
+│   └── library.db                #   SQLite 曲库
 │
-├── themes/                    # 主题文件
+├── src/                          # 源代码 (~7,400 行 Rust)
+│   ├── main.rs                   #   入口
+│   ├── constants.rs              #   运行时调优常量
+│   ├── config.rs                 #   配置加载
+│   ├── cli.rs                    #   命令行解析
+│   ├── error.rs                  #   错误类型
+│   ├── event.rs                  #   事件枚举
+│   ├── playlist.rs               #   播放列表数据结构
+│   ├── paths.rs                  #   路径工具
+│   ├── app/                      #   应用核心
+│   │   ├── mod.rs                #     App + 事件循环
+│   │   ├── playback.rs           #     播放控制
+│   │   ├── persistence.rs        #     状态持久化
+│   │   └── handlers/             #     按键分发
+│   ├── audio/                    #   音频引擎
+│   │   ├── decoder.rs            #     Symphonia 解码
+│   │   ├── output.rs             #     Rodio 输出
+│   │   └── engine.rs             #     播放/暂停/seek
+│   ├── metadata/                 #   元数据
+│   │   └── reader.rs             #     Lofty 标签
+│   ├── lyrics/                   #   歌词
+│   │   ├── types.rs              #     数据结构
+│   │   ├── parser.rs             #     LRC 解析
+│   │   └── engine.rs             #     同步引擎
+│   ├── visualizer/               #   频谱
+│   │   ├── fft.rs                #     FFT 分析
+│   │   ├── processor.rs          #     后处理
+│   │   └── render.rs             #     字符渲染
+│   ├── library/                  #   曲库
+│   │   ├── database.rs           #     SQLite
+│   │   ├── scanner.rs            #     目录扫描
+│   │   └── playlist_manager.rs   #     M3U 导入/导出
+│   ├── ui/                       #   界面
+│   │   ├── mod.rs                #     UiState + render()
+│   │   ├── theme.rs              #     主题
+│   │   ├── cover/                #     封面渲染
+│   │   │   └── mod.rs            #       Kitty / SIXEL 协议
+│   │   ├── views/                #     7 个视图
+│   │   └── widgets/              #     可复用组件
+│   └── input/                    #   键盘
+│       ├── handler.rs            #     KeyHandler
+│       ├── keymap.rs             #     键位配置
+│       └── command.rs            #     命令解析
 │
-├── progress/                  # 开发进度记录
-│
-├── src/                       # 源代码
-│   ├── main.rs, app.rs        # 入口 + 事件循环
-│   ├── config.rs, cli.rs      # 配置 + 命令行
-│   ├── playlist.rs            # 播放列表
-│   ├── audio/                 # 音频引擎
-│   ├── metadata/              # 标签读取
-│   ├── lyrics/                # 歌词解析 + 同步
-│   ├── visualizer/            # FFT + 频谱渲染
-│   ├── library/               # SQLite + 扫描 + M3U
-│   ├── ui/                    # 界面渲染
-│   └── input/                 # 键盘处理
-│
-└── tests/fixtures/            # 测试音频文件
+└── tests/fixtures/               # 测试音频
+    └── test.wav                  #   440Hz 正弦波
 ```
 
 ---
 
-## 开发命令
+## 开发
 
 ```bash
-cargo build                   # 调试编译
-cargo build --release         # 发布编译
-cargo test                    # 运行全部测试
-cargo test <测试名>            # 运行单个测试
-cargo clippy -- -D warnings   # 代码检查
-cargo fmt --all               # 格式化代码
+cargo build                        # 调试编译
+cargo build --release              # 发布编译（单文件 ~7MB）
+cargo test                         # 全部测试（41 个）
+cargo clippy -- -D warnings        # 代码检查
+cargo fmt --all                    # 格式化
 
 # 提交前完整检查
 cargo fmt --all && cargo clippy -- -D warnings && cargo test
@@ -349,13 +378,15 @@ cargo fmt --all && cargo clippy -- -D warnings && cargo test
 
 | 分类 | 库 | 说明 |
 |------|----|------|
-| 异步 | tokio | 事件循环、定时器 |
+| 异步 | tokio | 事件循环、定时器、后台线程 |
 | TUI | ratatui + crossterm | 终端界面框架 |
-| 音频 | symphonia + rodio | 解码 + 输出 |
-| 标签 | lofty | 元数据读取 |
-| FFT | rustfft | 频谱分析 |
-| 数据库 | rusqlite | 曲库索引 |
-| 配置 | toml + serde + clap | 配置文件 + 命令行 |
+| 音频 | symphonia + rodio | 多格式解码 + 音频输出 |
+| 标签 | lofty | 元数据（ID3/Vorbis/APE/MP4） |
+| FFT | rustfft | 2048 点频谱分析 |
+| 数据库 | rusqlite (bundled) | SQLite 曲库索引 |
+| 图像 | image | 封面图解码 + Lanczos3 缩放 |
+| 配置 | toml + serde + clap | 配置文件 + 命令行参数 |
+| 编码 | encoding_rs | 歌词编码自动检测 |
 
 ---
 
