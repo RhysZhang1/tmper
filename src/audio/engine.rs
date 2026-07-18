@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -75,8 +76,9 @@ pub struct AudioEngine {
     pub pcm_buffer: Arc<Mutex<VecDeque<f32>>>,
     position: Mutex<PositionState>,
     current_path: Option<PathBuf>,
-    /// Handle for in-progress async decode, aborted on stop/seek.
     decode_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Flag shared with the background decode task; set to cancel.
+    cancel_flag: Arc<AtomicBool>,
 }
 
 impl AudioEngine {
@@ -100,20 +102,22 @@ impl AudioEngine {
             }),
             current_path: None,
             decode_handle: None,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         })
     }
 
     /// Cancel any in-progress async decode.
-    /// Stops the shared sink (waking `sleep_until_end` in the background
-    /// task), replaces it with a fresh one, and drops the JoinHandle.
     fn cancel_decode(&mut self) {
-        if self.decode_handle.take().is_some() {
-            // stop_and_replace stops the old Arc<Sink> and creates a new one.
-            // The background task still holds an Arc to the old sink, but
-            // sink.stop() clears its queue and wakes sleep_until_end(),
-            // so the task exits cleanly without abort().
+        if self.decode_handle.is_some() {
+            // Signal the background task to stop its wait loop.
+            self.cancel_flag.store(true, Ordering::SeqCst);
+            // Stop the shared sink — unblocks the bg task if it's in
+            // the cancellable wait loop.
             self.output.stop_and_replace();
             self.output.set_volume(self.current_volume);
+            // Reset flag for next use.
+            self.cancel_flag = Arc::new(AtomicBool::new(false));
+            self.decode_handle = None;
         }
     }
 
@@ -176,6 +180,7 @@ impl AudioEngine {
         let pcm_buf = self.pcm_buffer.clone();
         let duration = self.duration_secs.clone();
         let volume = self.current_volume;
+        let cancel = self.cancel_flag.clone();
         sink.set_volume(volume);
 
         let decode_path = path_buf.clone();
@@ -202,8 +207,11 @@ impl AudioEngine {
                 );
                 sink.append(instrumented);
             }
-            // Blocks until the shared sink drains or is stopped externally.
-            sink.sleep_until_end();
+            // Cancellable wait loop: polls every 50ms, exits immediately
+            // when cancel_flag is set or the sink drains naturally.
+            while !cancel.load(Ordering::Relaxed) && !sink.empty() {
+                std::thread::sleep(Duration::from_millis(50));
+            }
         });
 
         self.decode_handle = Some(h);
