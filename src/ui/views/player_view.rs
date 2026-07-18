@@ -4,9 +4,39 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
+use std::cell::Cell;
+use std::sync::Arc;
 
+use crate::lyrics::types::LyricTrack;
 use crate::ui::format_duration;
-use crate::ui::UiState;
+use crate::ui::views::playlist_view::PlaylistManagerState;
+use crate::ui::{RepeatMode, TrackDisplay};
+
+/// Read-only view parameters for the player view.
+/// Extracted from `UiState` so each render function declares exactly what it needs.
+pub struct PlayerViewParams<'a> {
+    pub title: &'a str,
+    pub artist: &'a str,
+    pub position: f64,
+    pub duration: f64,
+    pub volume: f32,
+    pub is_playing: bool,
+    pub album: &'a str,
+    pub genre: &'a str,
+    pub year: &'a str,
+    pub codec: &'a str,
+    pub repeat_mode: RepeatMode,
+    pub cover_art: Option<&'a Arc<Vec<u8>>>,
+    pub show_cover_art: bool,
+    pub cover_rect: &'a Cell<(u16, u16, u16, u16)>,
+    pub lyric_track: Option<&'a LyricTrack>,
+    pub current_lyric_index: usize,
+    pub visualizer_data: &'a [f32],
+    pub playlist_state: &'a PlaylistManagerState,
+    pub playing_index: Option<usize>,
+    pub tracks: &'a [TrackDisplay],
+    pub active_playlist: Option<usize>,
+}
 
 /// Decode cover art bytes and render as colored block characters (chafa-style).
 /// Uses Lanczos3 resize + lower-half block (▄) with fg/bg for 2× vertical resolution.
@@ -126,29 +156,29 @@ fn cover_as_colored_lines(inner: Rect, bytes: &[u8]) -> Option<Vec<Line<'static>
 
 /// Main player view: two-column layout with cover/playlist (left)
 /// and lyrics/spectrum/controls (right).
-pub fn render_player_view(f: &mut Frame, area: Rect, state: &UiState) {
+pub fn render_player_view(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(33), Constraint::Percentage(67)])
         .split(area);
 
-    render_left_panel(f, cols[0], state);
-    render_right_panel(f, cols[1], state);
+    render_left_panel(f, cols[0], params);
+    render_right_panel(f, cols[1], params);
 }
 
 // ═══════════════════════ LEFT PANEL ═══════════════════════
 
-fn render_left_panel(f: &mut Frame, area: Rect, state: &UiState) {
+fn render_left_panel(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
     let split = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
-    render_cover_art(f, split[0], state);
-    render_mini_playlist(f, split[1], state);
+    render_cover_art(f, split[0], params);
+    render_mini_playlist(f, split[1], params);
 }
 
-fn render_cover_art(f: &mut Frame, area: Rect, state: &UiState) {
+fn render_cover_art(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Now Playing ")
@@ -156,14 +186,14 @@ fn render_cover_art(f: &mut Frame, area: Rect, state: &UiState) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Store position for Kitty protocol rendering (read-only, no state mut)
-    state
+    // Store position for Kitty protocol rendering
+    params
         .cover_rect
         .set((inner.x, inner.y, inner.width, inner.height));
 
-    if state.show_cover_art {
+    if params.show_cover_art {
         // Try to render cover art as colored blocks
-        if let Some(ref cover) = state.cover_art {
+        if let Some(cover) = params.cover_art {
             if let Some(lines) = cover_as_colored_lines(inner, &cover[..]) {
                 let para = Paragraph::new(lines);
                 f.render_widget(para, inner);
@@ -174,15 +204,15 @@ fn render_cover_art(f: &mut Frame, area: Rect, state: &UiState) {
 
     // Fallback / no-image mode: show detailed song info
     let h = inner.height.max(3);
-    let play_icon = if state.is_playing { "▶" } else { "⏸" };
-    let pos_str = format_duration(state.position);
-    let dur_str = format_duration(state.duration);
+    let play_icon = if params.is_playing { "▶" } else { "⏸" };
+    let pos_str = format_duration(params.position);
+    let dur_str = format_duration(params.duration);
 
     let mut lines: Vec<Line> = Vec::new();
     let w = inner.width as usize;
 
     // Vertical centering
-    let content_lines = if state.album.is_empty() && state.genre.is_empty() {
+    let content_lines = if params.album.is_empty() && params.genre.is_empty() {
         4
     } else {
         6
@@ -193,10 +223,10 @@ fn render_cover_art(f: &mut Frame, area: Rect, state: &UiState) {
     }
 
     // Track title
-    let title = if state.title.is_empty() || state.title == "No track" {
+    let title = if params.title.is_empty() || params.title == "No track" {
         "No track"
     } else {
-        state.title.as_str()
+        params.title
     };
     lines.push(Line::from(vec![Span::styled(
         format!("{:^w$}", title, w = w),
@@ -206,10 +236,10 @@ fn render_cover_art(f: &mut Frame, area: Rect, state: &UiState) {
     )]));
 
     // Artist
-    let artist = if state.artist.is_empty() || state.artist == "—" {
+    let artist = if params.artist.is_empty() || params.artist == "—" {
         ""
     } else {
-        state.artist.as_str()
+        params.artist
     };
     if !artist.is_empty() {
         lines.push(Line::from(vec![Span::styled(
@@ -219,7 +249,7 @@ fn render_cover_art(f: &mut Frame, area: Rect, state: &UiState) {
     }
 
     // Playback time
-    if state.duration > 0.0 {
+    if params.duration > 0.0 {
         let time_str = format!("{} {} / {}", play_icon, pos_str, dur_str);
         lines.push(Line::from(vec![Span::styled(
             format!("{:^w$}", time_str, w = w),
@@ -228,16 +258,16 @@ fn render_cover_art(f: &mut Frame, area: Rect, state: &UiState) {
     }
 
     // Spacer before metadata
-    if !state.album.is_empty() || !state.genre.is_empty() {
+    if !params.album.is_empty() || !params.genre.is_empty() {
         lines.push(Line::from(""));
     }
 
     // Album
-    if !state.album.is_empty() {
+    if !params.album.is_empty() {
         lines.push(Line::from(vec![
             Span::styled(" 专辑: ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                state.album.as_str(),
+                params.album,
                 Style::default().fg(Color::Rgb(180, 180, 200)),
             ),
         ]));
@@ -245,21 +275,21 @@ fn render_cover_art(f: &mut Frame, area: Rect, state: &UiState) {
 
     // Genre + Year + Codec
     let mut meta_parts = Vec::new();
-    if !state.genre.is_empty() {
+    if !params.genre.is_empty() {
         meta_parts.push(Span::styled(
-            format!("{} ", state.genre),
+            format!("{} ", params.genre),
             Style::default().fg(Color::Rgb(160, 200, 160)),
         ));
     }
-    if !state.year.is_empty() {
+    if !params.year.is_empty() {
         meta_parts.push(Span::styled(
-            format!("{} ", state.year),
+            format!("{} ", params.year),
             Style::default().fg(Color::Rgb(200, 180, 140)),
         ));
     }
-    if !state.codec.is_empty() {
+    if !params.codec.is_empty() {
         meta_parts.push(Span::styled(
-            state.codec.to_uppercase(),
+            params.codec.to_uppercase(),
             Style::default().fg(Color::Rgb(140, 140, 180)),
         ));
     }
@@ -271,7 +301,7 @@ fn render_cover_art(f: &mut Frame, area: Rect, state: &UiState) {
     f.render_widget(para, inner);
 }
 
-fn render_mini_playlist(f: &mut Frame, area: Rect, state: &UiState) {
+fn render_mini_playlist(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Playlists ")
@@ -279,7 +309,7 @@ fn render_mini_playlist(f: &mut Frame, area: Rect, state: &UiState) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let ps = &state.playlist_state;
+    let ps = params.playlist_state;
     if ps.playlists.is_empty() {
         let para = Paragraph::new("(no playlists)").style(Style::default().fg(Color::DarkGray));
         f.render_widget(para, inner);
@@ -291,9 +321,9 @@ fn render_mini_playlist(f: &mut Frame, area: Rect, state: &UiState) {
     let model = PlaylistFlatModel::new(&ps.playlists, ps.expanded_playlist);
     let all_lines =
         model.build_styled_lines(true, &InsertMode::Off, ps.selected_playlist, |song| {
-            state
+            params
                 .playing_index
-                .and_then(|pi| state.tracks.get(pi).map(|t| t.path == *song))
+                .and_then(|pi| params.tracks.get(pi).map(|t| t.path == *song))
                 .unwrap_or(false)
         });
 
@@ -315,7 +345,7 @@ fn render_mini_playlist(f: &mut Frame, area: Rect, state: &UiState) {
 
 // ═══════════════════════ RIGHT PANEL ═══════════════════════
 
-fn render_right_panel(f: &mut Frame, area: Rect, state: &UiState) {
+fn render_right_panel(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
     let split = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -326,13 +356,13 @@ fn render_right_panel(f: &mut Frame, area: Rect, state: &UiState) {
         ])
         .split(area);
 
-    render_lyrics_section(f, split[0], state);
-    render_spectrum_section(f, split[1], state);
-    render_song_info(f, split[2], state);
-    render_control_bar(f, split[3], state);
+    render_lyrics_section(f, split[0], params);
+    render_spectrum_section(f, split[1], params);
+    render_song_info(f, split[2], params);
+    render_control_bar(f, split[3], params);
 }
 
-fn render_lyrics_section(f: &mut Frame, area: Rect, state: &UiState) {
+fn render_lyrics_section(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Lyrics ")
@@ -340,7 +370,7 @@ fn render_lyrics_section(f: &mut Frame, area: Rect, state: &UiState) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    if let Some(ref track) = state.lyric_track {
+    if let Some(track) = params.lyric_track {
         if track.lines.is_empty() {
             let para =
                 Paragraph::new("No lyrics found").style(Style::default().fg(Color::DarkGray));
@@ -356,8 +386,8 @@ fn render_lyrics_section(f: &mut Frame, area: Rect, state: &UiState) {
         let half = visible_lines / 2;
         let total = track.lines.len();
 
-        let start = if state.current_lyric_index > half {
-            state.current_lyric_index.saturating_sub(half)
+        let start = if params.current_lyric_index > half {
+            params.current_lyric_index.saturating_sub(half)
         } else {
             0
         };
@@ -366,15 +396,15 @@ fn render_lyrics_section(f: &mut Frame, area: Rect, state: &UiState) {
         let lines: Vec<Line> = (start..end)
             .map(|i| {
                 let lyric = &track.lines[i];
-                let is_current = i == state.current_lyric_index;
-                let is_past = i < state.current_lyric_index;
+                let is_current = i == params.current_lyric_index;
+                let is_past = i < params.current_lyric_index;
 
                 let style = if is_current {
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD)
                 } else if is_past {
-                    let dist = state.current_lyric_index.saturating_sub(i) as f32;
+                    let dist = params.current_lyric_index.saturating_sub(i) as f32;
                     let fade = (dist / half.max(1) as f32).min(1.0);
                     let gray = (200.0 * (1.0 - fade * 0.6)) as u8;
                     Style::default().fg(Color::Rgb(gray, gray, gray))
@@ -394,7 +424,7 @@ fn render_lyrics_section(f: &mut Frame, area: Rect, state: &UiState) {
     }
 }
 
-fn render_spectrum_section(f: &mut Frame, area: Rect, state: &UiState) {
+fn render_spectrum_section(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Spectrum ")
@@ -402,21 +432,21 @@ fn render_spectrum_section(f: &mut Frame, area: Rect, state: &UiState) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    if state.visualizer_data.is_empty() {
+    if params.visualizer_data.is_empty() {
         let para = Paragraph::new("No audio data").style(Style::default().fg(Color::DarkGray));
         f.render_widget(para, inner);
         return;
     }
 
-    crate::ui::widgets::visualizer_panel::render_visualizer(f, inner, &state.visualizer_data);
+    crate::ui::widgets::visualizer_panel::render_visualizer(f, inner, params.visualizer_data);
 }
 
-fn render_song_info(f: &mut Frame, area: Rect, state: &UiState) {
+fn render_song_info(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
     let mut parts: Vec<Span> = Vec::new();
     // Show active playlist name first
-    if let Some(pl_idx) = state.active_playlist {
-        if pl_idx < state.playlist_state.playlists.len() {
-            let pl_name = &state.playlist_state.playlists[pl_idx].name;
+    if let Some(pl_idx) = params.active_playlist {
+        if pl_idx < params.playlist_state.playlists.len() {
+            let pl_name = &params.playlist_state.playlists[pl_idx].name;
             parts.push(Span::styled(
                 format!(" {} {} ", '🎵', pl_name),
                 Style::default()
@@ -426,27 +456,27 @@ fn render_song_info(f: &mut Frame, area: Rect, state: &UiState) {
         }
     }
 
-    if !state.album.is_empty() {
+    if !params.album.is_empty() {
         parts.push(Span::styled(
-            format!(" {} {} ", "\u{1f4bf}", state.album),
+            format!(" {} {} ", "\u{1f4bf}", params.album),
             Style::default().fg(Color::Rgb(180, 180, 200)),
         ));
     }
-    if !state.genre.is_empty() {
+    if !params.genre.is_empty() {
         parts.push(Span::styled(
-            format!(" {} {} ", "\u{266a}", state.genre),
+            format!(" {} {} ", "\u{266a}", params.genre),
             Style::default().fg(Color::Rgb(160, 200, 160)),
         ));
     }
-    if !state.year.is_empty() {
+    if !params.year.is_empty() {
         parts.push(Span::styled(
-            format!(" {} {} ", "\u{1f4c5}", state.year),
+            format!(" {} {} ", "\u{1f4c5}", params.year),
             Style::default().fg(Color::Rgb(200, 180, 140)),
         ));
     }
-    if !state.codec.is_empty() {
+    if !params.codec.is_empty() {
         parts.push(Span::styled(
-            format!(" {} ", state.codec.to_uppercase()),
+            format!(" {} ", params.codec.to_uppercase()),
             Style::default().fg(Color::Rgb(140, 140, 180)),
         ));
     }
@@ -458,21 +488,21 @@ fn render_song_info(f: &mut Frame, area: Rect, state: &UiState) {
     }
 }
 
-fn render_control_bar(f: &mut Frame, area: Rect, state: &UiState) {
-    let play_icon = if state.is_playing { "▶" } else { "⏸" };
-    let pos_str = format_duration(state.position);
-    let dur_str = format_duration(state.duration);
-    let vol_pct = (state.volume * 100.0) as u32;
+fn render_control_bar(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
+    let play_icon = if params.is_playing { "▶" } else { "⏸" };
+    let pos_str = format_duration(params.position);
+    let dur_str = format_duration(params.duration);
+    let vol_pct = (params.volume * 100.0) as u32;
 
-    let progress = if state.duration > 0.0 {
-        (state.position / state.duration).clamp(0.0, 1.0)
+    let progress = if params.duration > 0.0 {
+        (params.position / params.duration).clamp(0.0, 1.0)
     } else {
         0.0
     };
 
     let time_str = format!("{} {} / {}", play_icon, pos_str, dur_str);
     let vol_str = format!("Vol:{}%", vol_pct);
-    let mode_str = state.repeat_mode.label().to_string();
+    let mode_str = params.repeat_mode.label().to_string();
 
     // Calculate space for progress bar
     let fixed = time_str.len() + vol_str.len() + mode_str.len() + 6;
@@ -483,10 +513,7 @@ fn render_control_bar(f: &mut Frame, area: Rect, state: &UiState) {
     let bar_progress = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
     let bar = format!(
         "{} {} [{}] {}",
-        time_str,
-        vol_str,
-        bar_progress,
-        state.repeat_mode.label(),
+        time_str, vol_str, bar_progress, mode_str
     );
 
     let para = Paragraph::new(Line::from(Span::styled(

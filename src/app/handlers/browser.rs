@@ -73,7 +73,7 @@ impl App {
                     let lib_len = state.library_paths.len();
                     if idx < lib_len {
                         let path = state.library_paths.remove(idx);
-                        self.ui_state.tracks.retain(|t| t.path != path);
+                        self.ui_state.player.tracks.retain(|t| t.path != path);
                         let new_len = state.library_paths.len();
                         state.selected_library_index = idx.min(new_len.saturating_sub(1));
                         self.save_library_paths();
@@ -117,6 +117,7 @@ impl App {
         self.refresh_file_browser();
         self.ui_state.file_browser_state.library_paths = self
             .ui_state
+            .player
             .tracks
             .iter()
             .map(|t| t.path.clone())

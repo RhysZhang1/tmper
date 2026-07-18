@@ -7,7 +7,7 @@ pub mod runtime {
 
     /// Capacity of the PCM ring buffer shared between the rodio source and
     /// the FFT thread (in `f32` samples).
-    pub const PCM_BUFFER_CAPACITY: usize = 8192;
+    pub const PCM_BUFFER_CAPACITY: usize = 32768;
 
     /// Default sample rate used when Symphonia can't determine the rate from
     /// the container / codec params.

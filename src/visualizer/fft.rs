@@ -34,12 +34,15 @@ impl FftAnalyzer {
         let n = self.size.min(samples.len());
 
         // Apply window and copy to scratch buffer (as complex)
-        #[allow(clippy::needless_range_loop)]
-        for i in 0..n {
-            self.scratch[i] = Complex::new(samples[i] * self.window[i], 0.0);
+        for (scratch, (&sample, &w)) in self
+            .scratch
+            .iter_mut()
+            .zip(samples.iter().zip(self.window.iter()).take(n))
+        {
+            *scratch = Complex::new(sample * w, 0.0);
         }
-        for i in n..self.size {
-            self.scratch[i] = Complex::new(0.0, 0.0);
+        for scratch in self.scratch.iter_mut().skip(n) {
+            *scratch = Complex::new(0.0, 0.0);
         }
 
         // FFT

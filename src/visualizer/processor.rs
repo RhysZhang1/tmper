@@ -33,8 +33,7 @@ impl SpectrumProcessor {
 
         // Log-scale bucketing
         let mut bars = vec![0.0f32; self.num_bars];
-        #[allow(clippy::needless_range_loop)]
-        for i in 0..self.num_bars {
+        for (i, bar) in bars.iter_mut().enumerate() {
             let ratio = i as f32 / self.num_bars as f32;
             let freq_low = start_freq * (end_freq / start_freq).powf(ratio);
             let freq_high =
@@ -47,18 +46,16 @@ impl SpectrumProcessor {
                 let max_mag = magnitudes[bin_low..bin_high]
                     .iter()
                     .fold(0.0f32, |a, &b| a.max(b));
-                bars[i] = max_mag;
+                *bar = max_mag;
             }
         }
 
         // Smooth in both directions — slow rise AND slow fall.
         // Lower alpha = smoother / lazier movement.
-        #[allow(clippy::needless_range_loop)]
-        for i in 0..self.num_bars {
-            let raw = bars[i];
-            let prev = self.smoothing[i];
-            self.smoothing[i] = self.alpha * raw + (1.0 - self.alpha) * prev;
-            bars[i] = self.smoothing[i];
+        for (bar, smooth) in bars.iter_mut().zip(self.smoothing.iter_mut()) {
+            let raw = *bar;
+            *smooth = self.alpha * raw + (1.0 - self.alpha) * *smooth;
+            *bar = *smooth;
         }
 
         // Dynamic range normalization

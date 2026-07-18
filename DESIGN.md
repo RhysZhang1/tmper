@@ -3,8 +3,8 @@
 > **项目名称**: tmper — 终端音乐播放器
 > **语言**: Rust
 > **平台**: Arch Linux + KDE Plasma
-> **文档版本**: v3.1（实现文档）
-> **最后更新**: 2026-07-17
+> **文档版本**: v3.2（实现文档）
+> **最后更新**: 2026-07-18
 
 ---
 
@@ -778,3 +778,24 @@ tmper/
 | 日志 | tracing + tracing-subscriber | 0.1/0.3 | 结构化日志 |
 | 错误 | thiserror + anyhow | 2/1 | 错误类型 + 传播 |
 | 终端流 | futures-util | 0.3 | crossterm EventStream |
+
+---
+
+## 13. 版本历史
+
+| 版本 | 日期 | 变更 |
+|------|------|------|
+| v3.0 | 2026-07-12 | 初始实现文档 |
+| v3.1 | 2026-07-17 | 重构：提取 constants.rs、覆盖渲染模块化、统一视图切换 |
+| v3.2 | 2026-07-18 | 代码质量改进计划（参见 `progress/2026-07-18-code-quality.md`）：PCM 缓冲增大、消除 clippy allow、render() 改 match、Config 默认值去重、RUST_LOG 支持、KeyHandler 控制字符过滤 |
+
+### 已知技术债（v3.2 记录）
+
+> 详细实施计划见 `progress/2026-07-18-deferred-issues-plan.md`
+
+| 问题 | 严重度 | 说明 | 计划 |
+|------|--------|------|------|
+| UiState 上帝结构体 | 🔴 | 30+ 字段集中在一个 struct，状态变更来源难以追踪 | 分两阶段：只读参数抽取 → 状态分组 |
+| stdout 直接写入 | 🔴 | Kitty/SIXEL 渲染绕过 ratatui 写 stdout，终端误解析为输入事件 | ratatui-image 替换直接写入 |
+| play_file 同步解码 | 🟡 | 长文件解码阻塞事件循环数百毫秒 | spawn_blocking + channel 流式传输 |
+| 无集成测试 | 🟡 | 42 个测试全为单元测试，需跨视图/事件循环集成测试 | TestApp harness + P0-P2 分级实施 |

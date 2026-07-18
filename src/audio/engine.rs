@@ -199,7 +199,7 @@ impl AudioEngine {
         let mut decoder = AudioDecoder::open(&path)?;
         self.sample_rate = decoder.sample_rate;
         self.channels = decoder.channels;
-        decoder.skip_to_secs(target)?;
+        decoder.seek_to_secs(target)?;
 
         // Replace sink and stream remaining packets
         self.output.stop_and_replace();

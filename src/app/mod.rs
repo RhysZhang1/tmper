@@ -18,8 +18,8 @@ use crate::event::AppEvent;
 use crate::input::handler::KeyHandler;
 use crate::input::keymap::{self, KeyBindings};
 use crate::library::database::LibraryDb;
-use crate::ui::cover::CoverRenderer;
-use crate::ui::{self, UiState};
+use crate::ui::cover::{CoverParams, CoverRenderer};
+use crate::ui::{self, PlayerCore, UiState};
 use serde::{Deserialize, Serialize};
 
 pub(crate) mod handlers;
@@ -59,7 +59,10 @@ impl App {
             config: config.clone(),
             ui_state: UiState {
                 volume: config.playback.default_volume,
-                show_cover_art: config.ui.show_cover_art,
+                player: PlayerCore {
+                    show_cover_art: config.ui.show_cover_art,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             engine,
@@ -148,9 +151,18 @@ impl App {
             }
 
             // Kitty graphics: native pixel rendering (Kitty-compatible terminals)
-            self.cover_renderer.render_kitty(&self.ui_state);
+            let cover_params = CoverParams {
+                active_view: self.ui_state.view.active_view,
+                show_help: self.ui_state.view.show_help,
+                command_mode: self.ui_state.command_mode,
+                show_cover_art: self.ui_state.player.show_cover_art,
+                cover_gen: self.ui_state.player.cover_gen.get(),
+                cover_art: self.ui_state.player.cover_art.clone(),
+                cover_rect: self.ui_state.cover_rect.get(),
+            };
+            self.cover_renderer.render_kitty(&cover_params);
             // SIXEL graphics via chafa subprocess (Konsole, etc.)
-            self.cover_renderer.render_chafa(&self.ui_state);
+            self.cover_renderer.render_chafa(&cover_params);
         }
 
         // Stop FFT

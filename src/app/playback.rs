@@ -11,30 +11,30 @@ impl App {
     /// Move selection by `delta` rows, clamping to track list bounds.
     /// Updates scroll offset to keep selection visible.
     pub(super) fn move_selection(&mut self, delta: i32, visible_h: u16) {
-        if self.ui_state.tracks.is_empty() {
+        if self.ui_state.player.tracks.is_empty() {
             return;
         }
-        let len = self.ui_state.tracks.len() as i32;
-        let new_idx = (self.ui_state.selected_index as i32 + delta).clamp(0, len - 1);
-        self.ui_state.selected_index = new_idx as usize;
+        let len = self.ui_state.player.tracks.len() as i32;
+        let new_idx = (self.ui_state.player.selected_index as i32 + delta).clamp(0, len - 1);
+        self.ui_state.player.selected_index = new_idx as usize;
 
-        let scroll = self.ui_state.scroll_offset as i32;
+        let scroll = self.ui_state.player.scroll_offset as i32;
         let vis = visible_h as i32;
         if new_idx < scroll {
-            self.ui_state.scroll_offset = new_idx.max(0) as usize;
+            self.ui_state.player.scroll_offset = new_idx.max(0) as usize;
         } else if new_idx >= scroll + vis {
-            self.ui_state.scroll_offset = (new_idx - vis + 1).max(0) as usize;
+            self.ui_state.player.scroll_offset = (new_idx - vis + 1).max(0) as usize;
         }
     }
 
     pub(super) fn move_scroll(&mut self, delta: i32) {
-        let new_scroll = (self.ui_state.scroll_offset as i32 + delta).max(0);
-        self.ui_state.scroll_offset = new_scroll as usize;
+        let new_scroll = (self.ui_state.player.scroll_offset as i32 + delta).max(0);
+        self.ui_state.player.scroll_offset = new_scroll as usize;
     }
 
     pub(super) fn play_selected(&mut self) {
-        if self.ui_state.selected_index < self.ui_state.tracks.len() {
-            let path = self.ui_state.tracks[self.ui_state.selected_index]
+        if self.ui_state.player.selected_index < self.ui_state.player.tracks.len() {
+            let path = self.ui_state.player.tracks[self.ui_state.player.selected_index]
                 .path
                 .clone();
             self.load_and_play(&path);
@@ -58,10 +58,10 @@ impl App {
             }
         }
         // Fallback: global track list
-        if let Some(idx) = self.ui_state.playing_index {
-            if idx + 1 < self.ui_state.tracks.len() {
-                self.ui_state.selected_index = idx + 1;
-                let path = self.ui_state.tracks[idx + 1].path.clone();
+        if let Some(idx) = self.ui_state.player.playing_index {
+            if idx + 1 < self.ui_state.player.tracks.len() {
+                self.ui_state.player.selected_index = idx + 1;
+                let path = self.ui_state.player.tracks[idx + 1].path.clone();
                 self.load_and_play(&path);
             }
         }
@@ -88,19 +88,19 @@ impl App {
             }
         }
         // Fallback: global track list
-        if let Some(idx) = self.ui_state.playing_index {
+        if let Some(idx) = self.ui_state.player.playing_index {
             if idx > 0 {
-                self.ui_state.selected_index = idx - 1;
-                let path = self.ui_state.tracks[idx - 1].path.clone();
+                self.ui_state.player.selected_index = idx - 1;
+                let path = self.ui_state.player.tracks[idx - 1].path.clone();
                 self.load_and_play(&path);
             }
         }
     }
 
     pub(super) fn on_track_ended(&mut self) {
-        // Defensive: reset overlays that may have been spuriously triggered
-        // by terminal escape sequence interaction during a track transition.
-        self.ui_state.show_help = false;
+        // Reset transient playback and view state before loading next track.
+        self.ui_state.player.reset_on_track_change();
+        self.ui_state.view.reset_on_track_change();
         // Suppress direct-to-stdout cover rendering for a few frames so
         // SIXEL/Kitty escape sequences don't produce spurious stdin events
         // while the terminal is processing the track switch.
@@ -150,34 +150,34 @@ impl App {
         }
 
         // Fallback: global track list
-        if let Some(idx) = self.ui_state.playing_index {
+        if let Some(idx) = self.ui_state.player.playing_index {
             match self.ui_state.repeat_mode {
                 RepeatMode::SingleTrack => {
-                    if idx < self.ui_state.tracks.len() {
-                        let path = self.ui_state.tracks[idx].path.clone();
+                    if idx < self.ui_state.player.tracks.len() {
+                        let path = self.ui_state.player.tracks[idx].path.clone();
                         self.load_and_play(&path);
                         return;
                     }
                 }
                 RepeatMode::Sequential => {
-                    let next = (idx + 1) % self.ui_state.tracks.len();
-                    self.ui_state.selected_index = next;
-                    let path = self.ui_state.tracks[next].path.clone();
+                    let next = (idx + 1) % self.ui_state.player.tracks.len();
+                    self.ui_state.player.selected_index = next;
+                    let path = self.ui_state.player.tracks[next].path.clone();
                     self.load_and_play(&path);
                     return;
                 }
                 RepeatMode::Shuffle => {
                     use rand::Rng;
                     let mut rng = rand::thread_rng();
-                    let next = rng.gen_range(0..self.ui_state.tracks.len());
-                    self.ui_state.selected_index = next;
-                    let path = self.ui_state.tracks[next].path.clone();
+                    let next = rng.gen_range(0..self.ui_state.player.tracks.len());
+                    self.ui_state.player.selected_index = next;
+                    let path = self.ui_state.player.tracks[next].path.clone();
                     self.load_and_play(&path);
                     return;
                 }
             }
         }
-        self.ui_state.is_playing = false;
+        self.ui_state.player.is_playing = false;
         self.engine.stop();
     }
 
@@ -232,21 +232,21 @@ impl App {
     }
 
     pub(crate) fn load_lyrics_for_current(&mut self) {
-        if let Some(idx) = self.ui_state.playing_index {
-            if idx < self.ui_state.tracks.len() {
-                let path = &self.ui_state.tracks[idx].path.clone();
+        if let Some(idx) = self.ui_state.player.playing_index {
+            if idx < self.ui_state.player.tracks.len() {
+                let path = &self.ui_state.player.tracks[idx].path.clone();
                 match LyricEngine::load(path) {
                     Ok(Some(track)) => {
                         tracing::info!("Lyrics loaded: {} lines", track.lines.len());
-                        self.ui_state.lyric_track = Some(track);
-                        self.ui_state.current_lyric_index = 0;
+                        self.ui_state.lyrics.lyric_track = Some(track);
+                        self.ui_state.lyrics.current_lyric_index = 0;
                     }
                     Ok(None) => {
-                        self.ui_state.lyric_track = None;
+                        self.ui_state.lyrics.lyric_track = None;
                     }
                     Err(e) => {
                         tracing::warn!("Failed to load lyrics: {e}");
-                        self.ui_state.lyric_track = None;
+                        self.ui_state.lyrics.lyric_track = None;
                     }
                 }
             }
@@ -254,17 +254,17 @@ impl App {
     }
 
     pub(super) fn sync_lyrics(&mut self, position_secs: f64) {
-        if let Some(ref track) = self.ui_state.lyric_track {
+        if let Some(ref track) = self.ui_state.lyrics.lyric_track {
             if track.lines.is_empty() {
                 return;
             }
-            let adjusted_pos = position_secs + self.ui_state.lyrics_offset_ms as f64 / 1000.0;
+            let adjusted_pos = position_secs + self.ui_state.lyrics.lyrics_offset_ms as f64 / 1000.0;
             let idx = LyricEngine::sync(
                 track,
                 adjusted_pos.max(0.0),
-                self.ui_state.current_lyric_index,
+                self.ui_state.lyrics.current_lyric_index,
             );
-            self.ui_state.current_lyric_index = idx;
+            self.ui_state.lyrics.current_lyric_index = idx;
         }
     }
 }

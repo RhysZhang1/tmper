@@ -193,7 +193,7 @@ impl App {
                 paths.push(p.clone());
             }
         }
-        for t in &self.ui_state.tracks {
+        for t in &self.ui_state.player.tracks {
             if !paths.contains(&t.path) {
                 paths.push(t.path.clone());
             }

@@ -51,96 +51,137 @@ pub struct TrackDisplay {
     pub duration_secs: f64,
 }
 
-pub struct UiState {
+/// Core player state — all fields related to the currently playing track.
+#[derive(Debug, Clone)]
+pub struct PlayerCore {
     pub title: String,
     pub artist: String,
-    pub position: f64,
-    pub duration: f64,
-    pub volume: f32,
-    pub is_playing: bool,
     pub album: String,
     pub genre: String,
     pub year: String,
     pub codec: String,
-    pub repeat_mode: RepeatMode,
-    pub notification: Option<(String, std::time::Instant)>,
-    pub search_query: String,
+    pub position: f64,
+    pub duration: f64,
+    pub is_playing: bool,
+    pub tracks: Vec<TrackDisplay>,
+    pub playing_index: Option<usize>,
+    pub selected_index: usize,
+    pub scroll_offset: usize,
+    pub cover_art: Option<Arc<Vec<u8>>>,
+    pub show_cover_art: bool,
+    pub cover_gen: Cell<u64>,
+}
+
+impl Default for PlayerCore {
+    fn default() -> Self {
+        Self {
+            title: "No track".into(),
+            artist: "—".into(),
+            album: String::new(),
+            genre: String::new(),
+            year: String::new(),
+            codec: String::new(),
+            position: 0.0,
+            duration: 0.0,
+            is_playing: false,
+            tracks: Vec::new(),
+            playing_index: None,
+            selected_index: 0,
+            scroll_offset: 0,
+            cover_art: None,
+            show_cover_art: true,
+            cover_gen: Cell::new(0),
+        }
+    }
+}
+
+impl PlayerCore {
+    /// Reset transient playback state on track change.
+    pub fn reset_on_track_change(&mut self) {
+        self.position = 0.0;
+        self.is_playing = false;
+    }
+}
+
+/// Lyrics state — isolated from player core.
+#[derive(Debug, Clone, Default)]
+pub struct LyricsState {
     pub lyric_track: Option<LyricTrack>,
     pub current_lyric_index: usize,
     pub lyrics_offset_ms: i64,
-    pub visualizer_data: Vec<f32>,
-    pub show_help: bool,
+}
+
+/// View-related transient UI state.
+#[derive(Debug, Clone)]
+pub struct ViewState {
     pub active_view: ViewMode,
+    pub show_help: bool,
+    pub help_scroll: usize,
+    pub last_help_toggle: Option<std::time::Instant>,
+}
+
+impl Default for ViewState {
+    fn default() -> Self {
+        Self {
+            active_view: ViewMode::Player,
+            show_help: false,
+            help_scroll: 0,
+            last_help_toggle: None,
+        }
+    }
+}
+
+impl ViewState {
+    /// Dismiss overlays on track change.
+    pub fn reset_on_track_change(&mut self) {
+        self.show_help = false;
+    }
+}
+
+pub struct UiState {
+    pub player: PlayerCore,
+    pub volume: f32,
+    pub repeat_mode: RepeatMode,
+    pub lyrics: LyricsState,
+    pub visualizer_data: Vec<f32>,
+    pub view: ViewState,
     pub playlist_state: crate::ui::views::playlist_view::PlaylistManagerState,
     pub file_browser_state: crate::ui::views::file_browser_view::FileBrowserState,
     pub library_state: crate::ui::views::library_view::LibraryState,
     pub settings_state: crate::ui::views::settings_view::SettingsState,
-    pub playlist_name: String,
+    /// Cross-view playlist playback context.
     pub active_playlist: Option<usize>,
     pub active_playlist_song: Option<usize>,
-    pub tracks: Vec<TrackDisplay>,
-    pub cover_art: Option<Arc<Vec<u8>>>,
-    pub show_cover_art: bool,
-    pub selected_index: usize,
-    pub playing_index: Option<usize>,
-    pub scroll_offset: usize,
+    pub playlist_name: String,
     pub command_mode: bool,
     pub command_buffer: String,
-    pub help_scroll: usize,
-    /// Cooldown timestamp for help toggle — spurious '0' key events
-    /// (triggered by terminal escape-sequence interference) are ignored
-    /// if they arrive within this window.
-    pub last_help_toggle: Option<std::time::Instant>,
-    /// Actual visible rows computed from terminal size during render.
-    /// Updated each frame; read by scroll handlers to avoid hardcoded limits.
+    pub search_query: String,
+    pub notification: Option<(String, std::time::Instant)>,
     pub visible_rows: Cell<usize>,
-    /// Monotonic counter bumped each time cover art changes.
-    pub cover_gen: Cell<u64>,
-    /// Inner rect of cover art area (x, y, w, h in chars) — set during render.
     pub cover_rect: Cell<(u16, u16, u16, u16)>,
 }
 
 impl Default for UiState {
     fn default() -> Self {
         Self {
-            title: "No track".into(),
-            artist: "—".into(),
-            position: 0.0,
-            duration: 0.0,
+            player: PlayerCore::default(),
             volume: 0.8,
-            is_playing: false,
-            album: String::new(),
-            genre: String::new(),
-            year: String::new(),
-            codec: String::new(),
             repeat_mode: RepeatMode::Sequential,
-            notification: None,
-            search_query: String::new(),
-            lyric_track: None,
-            current_lyric_index: 0,
-            lyrics_offset_ms: 0,
+            lyrics: LyricsState::default(),
             visualizer_data: Vec::new(),
-            show_help: false,
-            active_view: ViewMode::Player,
+            view: ViewState::default(),
             playlist_state: crate::ui::views::playlist_view::PlaylistManagerState::default(),
             file_browser_state: crate::ui::views::file_browser_view::FileBrowserState::default(),
             library_state: crate::ui::views::library_view::LibraryState::default(),
             settings_state: crate::ui::views::settings_view::SettingsState::default(),
-            playlist_name: "Default".into(),
             active_playlist: None,
             active_playlist_song: None,
-            tracks: Vec::new(),
-            cover_art: None,
-            show_cover_art: true,
-            selected_index: 0,
-            playing_index: None,
-            scroll_offset: 0,
+            playlist_name: "Default".into(),
             command_mode: false,
             command_buffer: String::new(),
-            help_scroll: 0,
-            last_help_toggle: None,
+            search_query: String::new(),
+            notification: None,
             visible_rows: Cell::new(20),
-            cover_gen: Cell::new(0),
             cover_rect: Cell::new((0, 0, 0, 0)),
         }
     }
@@ -153,8 +194,8 @@ pub fn render(f: &mut Frame, state: &UiState) {
         .set(f.area().height.saturating_sub(2) as usize);
 
     // Help overlay — highest priority, always on top
-    if state.show_help {
-        crate::ui::widgets::help_popup::render_help(f, state.help_scroll);
+    if state.view.show_help {
+        crate::ui::widgets::help_popup::render_help(f, state.view.help_scroll);
         return;
     }
 
@@ -254,48 +295,79 @@ pub fn render(f: &mut Frame, state: &UiState) {
         return;
     }
 
-    if state.active_view == ViewMode::Player {
-        crate::ui::views::player_view::render_player_view(f, f.area(), state);
-        return;
-    }
-    if state.active_view == ViewMode::Lyrics {
-        if let Some(ref track) = state.lyric_track {
-            crate::ui::views::lyrics_view::render_lyrics_view(
+    match state.view.active_view {
+        ViewMode::Player => {
+            let params = crate::ui::views::player_view::PlayerViewParams {
+                title: &state.player.title,
+                artist: &state.player.artist,
+                position: state.player.position,
+                duration: state.player.duration,
+                volume: state.volume,
+                is_playing: state.player.is_playing,
+                album: &state.player.album,
+                genre: &state.player.genre,
+                year: &state.player.year,
+                codec: &state.player.codec,
+                repeat_mode: state.repeat_mode,
+                cover_art: state.player.cover_art.as_ref(),
+                show_cover_art: state.player.show_cover_art,
+                cover_rect: &state.cover_rect,
+                lyric_track: state.lyrics.lyric_track.as_ref(),
+                current_lyric_index: state.lyrics.current_lyric_index,
+                visualizer_data: &state.visualizer_data,
+                playlist_state: &state.playlist_state,
+                playing_index: state.player.playing_index,
+                tracks: &state.player.tracks,
+                active_playlist: state.active_playlist,
+            };
+            crate::ui::views::player_view::render_player_view(f, f.area(), &params);
+        }
+        ViewMode::Lyrics => {
+            if let Some(ref track) = state.lyrics.lyric_track {
+                crate::ui::views::lyrics_view::render_lyrics_view(
+                    f,
+                    f.area(),
+                    track,
+                    state.lyrics.current_lyric_index,
+                    state.lyrics.lyrics_offset_ms,
+                );
+            }
+        }
+        ViewMode::Visualizer => {
+            crate::ui::widgets::visualizer_panel::render_visualizer(
                 f,
                 f.area(),
-                track,
-                state.current_lyric_index,
-                state.lyrics_offset_ms,
+                &state.visualizer_data,
             );
-            return;
         }
-    }
-    if state.active_view == ViewMode::Visualizer {
-        crate::ui::widgets::visualizer_panel::render_visualizer(
-            f,
-            f.area(),
-            &state.visualizer_data,
-        );
-        return;
-    }
-    if state.active_view == ViewMode::Playlists {
-        crate::ui::views::playlist_view::render_playlist_view(f, f.area(), &state.playlist_state);
-        return;
-    }
-    if state.active_view == ViewMode::Browser {
-        crate::ui::views::file_browser_view::render_file_browser(
-            f,
-            f.area(),
-            &state.file_browser_state,
-        );
-        return;
-    }
-    if state.active_view == ViewMode::Settings {
-        crate::ui::views::settings_view::render_settings_view(f, f.area(), &state.settings_state);
-        return;
-    }
-    if state.active_view == ViewMode::Library {
-        crate::ui::views::library_view::render_library_view(f, f.area(), &state.library_state);
+        ViewMode::Playlists => {
+            crate::ui::views::playlist_view::render_playlist_view(
+                f,
+                f.area(),
+                &state.playlist_state,
+            );
+        }
+        ViewMode::Browser => {
+            crate::ui::views::file_browser_view::render_file_browser(
+                f,
+                f.area(),
+                &state.file_browser_state,
+            );
+        }
+        ViewMode::Settings => {
+            crate::ui::views::settings_view::render_settings_view(
+                f,
+                f.area(),
+                &state.settings_state,
+            );
+        }
+        ViewMode::Library => {
+            crate::ui::views::library_view::render_library_view(
+                f,
+                f.area(),
+                &state.library_state,
+            );
+        }
     }
 }
 

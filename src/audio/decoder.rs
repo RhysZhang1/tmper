@@ -4,10 +4,11 @@ use std::path::Path;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{Decoder, DecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::{FormatOptions, FormatReader};
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
+use symphonia::core::units::Time;
 
 use crate::error::{AppError, AppResult};
 
@@ -131,6 +132,35 @@ impl AudioDecoder {
         }
         Ok(skipped)
     }
+
+    /// Container-level native seek to `target_secs`.
+    ///
+    /// Uses the format reader's seek table (MP3/FLAC/M4A etc.) instead of
+    /// decoding-and-discarding. After seeking, the decoder is `reset()` to
+    /// flush its internal buffers (required by symphonia after a format seek).
+    ///
+    /// Falls back to `skip_to_secs` if the container does not support
+    /// seeking — preserving the previous behavior for those formats.
+    pub fn seek_to_secs(&mut self, target_secs: f64) -> AppResult<()> {
+        let target = target_secs.max(0.0);
+        let seek_to = SeekTo::Time {
+            time: Time::new(target.floor() as u64, target.fract()),
+            track_id: Some(self.track_id),
+        };
+        match self.format.seek(SeekMode::Accurate, seek_to) {
+            Ok(_) => {
+                self.decoder.reset();
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "native seek failed ({e}); falling back to decode-skip to {target_secs}s"
+                );
+                self.skip_to_secs(target_secs)?;
+                Ok(())
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -163,5 +193,23 @@ mod tests {
     fn test_open_nonexistent_file() {
         let result = AudioDecoder::open(Path::new("tests/fixtures/nonexistent.wav"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_seek_to_secs_yields_samples() {
+        let path = Path::new("tests/fixtures/test.wav");
+        let mut decoder = AudioDecoder::open(path).expect("Failed to open test.wav");
+
+        // Native seek to the middle of the 2s fixture.
+        decoder
+            .seek_to_secs(1.0)
+            .expect("seek_to_secs should succeed on wav");
+
+        // After seeking, the next read must still produce samples.
+        let packet = decoder
+            .read_packet()
+            .expect("read_packet after seek should not error")
+            .expect("should have samples after seek");
+        assert!(!packet.is_empty(), "post-seek packet must be non-empty");
     }
 }

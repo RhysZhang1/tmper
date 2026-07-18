@@ -19,11 +19,12 @@ impl App {
             volume: self.ui_state.volume,
             repeat_mode: self.ui_state.repeat_mode,
 
-            lyrics_offset_ms: self.ui_state.lyrics_offset_ms,
+            lyrics_offset_ms: self.ui_state.lyrics.lyrics_offset_ms,
             last_track_path: self
                 .ui_state
+                .player
                 .playing_index
-                .and_then(|i| self.ui_state.tracks.get(i))
+                .and_then(|i| self.ui_state.player.tracks.get(i))
                 .map(|t| t.path.to_string_lossy().to_string()),
         };
 
@@ -124,8 +125,8 @@ impl App {
                 .clone()
                 .unwrap_or_else(|| "Unknown Artist".into());
             let duration = info.duration.as_secs_f64();
-            if !self.ui_state.tracks.iter().any(|t| t.path == info.path) {
-                self.ui_state.tracks.push(TrackDisplay {
+            if !self.ui_state.player.tracks.iter().any(|t| t.path == info.path) {
+                self.ui_state.player.tracks.push(TrackDisplay {
                     path: info.path.clone(),
                     title,
                     artist,
@@ -145,8 +146,8 @@ impl App {
                     .unwrap_or_else(|| "Unknown Artist".into());
                 let duration = info.duration.as_secs_f64();
 
-                if !self.ui_state.tracks.iter().any(|t| t.path == info.path) {
-                    self.ui_state.tracks.push(TrackDisplay {
+                if !self.ui_state.player.tracks.iter().any(|t| t.path == info.path) {
+                    self.ui_state.player.tracks.push(TrackDisplay {
                         path: info.path.clone(),
                         title: title.clone(),
                         artist: artist.clone(),
@@ -156,29 +157,31 @@ impl App {
 
                 if let Some(idx) = self
                     .ui_state
+                    .player
                     .tracks
                     .iter()
                     .position(|t| t.path == info.path)
                 {
-                    self.ui_state.playing_index = Some(idx);
-                    self.ui_state.selected_index = idx;
+                    self.ui_state.player.playing_index = Some(idx);
+                    self.ui_state.player.selected_index = idx;
                 }
 
                 match self.engine.play_file(path) {
                     Ok(()) => {
-                        self.ui_state.title = title;
-                        self.ui_state.artist = artist;
-                        self.ui_state.album = info.album.unwrap_or_default();
-                        self.ui_state.genre = info.genre.unwrap_or_default();
-                        self.ui_state.year = info.year.map(|y| y.to_string()).unwrap_or_default();
-                        self.ui_state.codec = info.codec.clone();
-                        self.ui_state.position = 0.0;
-                        self.ui_state.duration = duration;
-                        self.ui_state.is_playing = true;
-                        self.ui_state.cover_art = info.cover_art.map(Arc::new);
+                        self.ui_state.player.title = title;
+                        self.ui_state.player.artist = artist;
+                        self.ui_state.player.album = info.album.unwrap_or_default();
+                        self.ui_state.player.genre = info.genre.unwrap_or_default();
+                        self.ui_state.player.year = info.year.map(|y| y.to_string()).unwrap_or_default();
+                        self.ui_state.player.codec = info.codec.clone();
+                        self.ui_state.player.position = 0.0;
+                        self.ui_state.player.duration = duration;
+                        self.ui_state.player.is_playing = true;
+                        self.ui_state.player.cover_art = info.cover_art.map(Arc::new);
                         self.ui_state
+                            .player
                             .cover_gen
-                            .set(self.ui_state.cover_gen.get() + 1);
+                            .set(self.ui_state.player.cover_gen.get() + 1);
                         self.engine.set_volume(self.ui_state.volume);
                         self.load_lyrics_for_current();
                         self.start_fft();
@@ -186,8 +189,8 @@ impl App {
                     }
                     Err(e) => {
                         tracing::error!("Failed to play file: {e}");
-                        self.ui_state.title = format!("Error: {e}");
-                        self.ui_state.is_playing = false;
+                        self.ui_state.player.title = format!("Error: {e}");
+                        self.ui_state.player.is_playing = false;
                     }
                 }
             }

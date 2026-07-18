@@ -190,7 +190,7 @@ impl Default for LibraryConfig {
             music_dirs: default_music_dirs(),
             extensions: default_extensions(),
             scan_on_startup: false,
-            follow_symlinks: true,
+            follow_symlinks: default_true(),
         }
     }
 }
@@ -198,45 +198,45 @@ impl Default for PlaybackConfig {
     fn default() -> Self {
         Self {
             default_volume: default_volume(),
-            gapless: true,
-            crossfade_seconds: 2,
-            resume_on_startup: true,
-            seek_step_small_secs: 5,
-            seek_step_large_secs: 30,
+            gapless: default_true(),
+            crossfade_seconds: default_crossfade(),
+            resume_on_startup: default_true(),
+            seek_step_small_secs: default_seek_step_small(),
+            seek_step_large_secs: default_seek_step_large(),
         }
     }
 }
 impl Default for VisualizerConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
-            num_bars: 32,
-            frame_rate: 30,
-            smoothing: 0.35,
-            char_set: "blocks".into(),
-            color_scheme: "gradient".into(),
-            show_on_idle: true,
+            enabled: default_true(),
+            num_bars: default_num_bars(),
+            frame_rate: default_frame_rate(),
+            smoothing: default_smoothing(),
+            char_set: default_char_set(),
+            color_scheme: default_color_scheme(),
+            show_on_idle: default_true(),
         }
     }
 }
 impl Default for LyricsConfig {
     fn default() -> Self {
         Self {
-            auto_load: true,
+            auto_load: default_true(),
             encoding_fallbacks: default_encoding_fallbacks(),
-            display_lines_before: 4,
-            lrc_search_embedded: true,
+            display_lines_before: default_display_lines(),
+            lrc_search_embedded: default_true(),
         }
     }
 }
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            theme: "tokyo-night".into(),
-            show_progress_bar: true,
-            show_cover_art: true,
-            cover_art_max_width: 25,
-            default_view: "player".into(),
+            theme: default_theme(),
+            show_progress_bar: default_true(),
+            show_cover_art: default_true(),
+            cover_art_max_width: default_cover_art_width(),
+            default_view: default_view(),
         }
     }
 }

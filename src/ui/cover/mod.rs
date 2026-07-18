@@ -7,11 +7,24 @@
 //!   → half-block characters (fallback in player_view.rs)
 
 use std::io::Write;
+use std::sync::Arc;
 
 use base64::Engine;
 use image::GenericImageView;
 
-use crate::ui::UiState;
+use crate::ui::ViewMode;
+
+/// Read-only parameters for cover art rendering.
+/// Extracted from `UiState` so the cover renderer only sees what it needs.
+pub struct CoverParams {
+    pub active_view: ViewMode,
+    pub show_help: bool,
+    pub command_mode: bool,
+    pub show_cover_art: bool,
+    pub cover_gen: u64,
+    pub cover_art: Option<Arc<Vec<u8>>>,
+    pub cover_rect: (u16, u16, u16, u16),
+}
 
 /// Manages cover-art rendering state and terminal protocol output.
 ///
@@ -68,25 +81,25 @@ impl CoverRenderer {
 
     /// Call after every ratatui draw when on the player view (key 1).
     /// Attempts Kitty protocol first; falls back to chafa SIXEL.
-    pub fn render_kitty(&mut self, state: &UiState) {
+    pub fn render_kitty(&mut self, params: &CoverParams) {
         // Suppress during track transitions to prevent escape-seq interference
         if self.suppress_countdown > 0 {
             self.suppress_countdown -= 1;
             return;
         }
         // Only render cover on the player view
-        if state.active_view != crate::ui::ViewMode::Player {
+        if params.active_view != ViewMode::Player {
             self.kitty_rendered = false;
             return;
         }
         // Hide cover when overlays (help, command input) are on top
-        if state.show_help || state.command_mode {
+        if params.show_help || params.command_mode {
             self.kitty_rendered = false;
             return;
         }
 
         // Toggle handling: clear Kitty image when cover display is off
-        if !state.show_cover_art {
+        if !params.show_cover_art {
             if self.kitty_rendered {
                 let _ = write!(std::io::stdout(), "\x1b_Ga=d,d=I\x1b\\");
                 let _ = std::io::stdout().flush();
@@ -101,18 +114,18 @@ impl CoverRenderer {
             return;
         }
 
-        let gen = state.cover_gen.get();
+        let gen = params.cover_gen;
         if gen == self.last_cover_gen {
             return; // Image unchanged, Kitty image persists on screen
         }
         self.last_cover_gen = gen;
 
-        let cover = match state.cover_art {
+        let cover = match params.cover_art {
             Some(ref c) => c.clone(),
             None => return,
         };
 
-        let (x_chars, y_chars, w_chars, h_chars) = state.cover_rect.get();
+        let (x_chars, y_chars, w_chars, h_chars) = params.cover_rect;
         if w_chars == 0 || h_chars == 0 {
             return;
         }
@@ -174,14 +187,14 @@ impl CoverRenderer {
     ///
     /// Caches the FULL chafa output (including Konsole-specific setup
     /// sequences) and re-sends every frame so the image survives redraws.
-    pub fn render_chafa(&mut self, state: &UiState) {
+    pub fn render_chafa(&mut self, params: &CoverParams) {
         // Suppress during track transitions to prevent escape-seq interference.
         // (render_kitty already decremented — just check here.)
         if self.suppress_countdown > 0 {
             return;
         }
         // Only render cover on the player view
-        if state.active_view != crate::ui::ViewMode::Player {
+        if params.active_view != ViewMode::Player {
             if self.chafa_sixel_cache.is_some() {
                 self.clear_pending = true;
             }
@@ -190,7 +203,7 @@ impl CoverRenderer {
             return;
         }
         // Hide cover when overlays (help, command input) are on top
-        if state.show_help || state.command_mode {
+        if params.show_help || params.command_mode {
             if self.chafa_sixel_cache.is_some() {
                 self.clear_pending = true;
             }
@@ -203,13 +216,13 @@ impl CoverRenderer {
             return;
         }
 
-        let (x_char, y_char, w_char, h_char) = state.cover_rect.get();
+        let (x_char, y_char, w_char, h_char) = params.cover_rect;
         if w_char == 0 || h_char == 0 {
             return;
         }
 
         // Cover hidden — clear cache
-        if !state.show_cover_art {
+        if !params.show_cover_art {
             if self.chafa_sixel_cache.is_some() {
                 self.clear_pending = true;
             }
@@ -219,11 +232,11 @@ impl CoverRenderer {
         }
 
         // Regenerate cache when cover art changes
-        let gen = state.cover_gen.get();
+        let gen = params.cover_gen;
         if self.chafa_sixel_cache.is_none() || gen != self.last_cover_gen_chafa {
             self.last_cover_gen_chafa = gen;
 
-            let cover = match state.cover_art {
+            let cover = match params.cover_art {
                 Some(ref c) => c.clone(),
                 None => {
                     self.chafa_sixel_cache = None;

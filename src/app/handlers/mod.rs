@@ -19,8 +19,8 @@ impl App {
                 self.should_quit = true;
             }
             AppEvent::JumpTop => {
-                self.ui_state.selected_index = 0;
-                self.ui_state.scroll_offset = 0;
+                self.ui_state.player.selected_index = 0;
+                self.ui_state.player.scroll_offset = 0;
             }
             AppEvent::RemoveSelected => self.handle_remove_selected(),
             AppEvent::Key(key) => self.handle_key_event(key),
@@ -61,17 +61,17 @@ impl App {
         }
 
         // Help overlay: j/k scroll, 0/Esc to close
-        if self.ui_state.show_help {
+        if self.ui_state.view.show_help {
             match key.code {
                 KeyCode::Char('j') | KeyCode::Down => {
-                    self.ui_state.help_scroll += 1;
+                    self.ui_state.view.help_scroll += 1;
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
-                    self.ui_state.help_scroll = self.ui_state.help_scroll.saturating_sub(1);
+                    self.ui_state.view.help_scroll = self.ui_state.view.help_scroll.saturating_sub(1);
                 }
                 KeyCode::Char('0') | KeyCode::Esc => {
-                    self.ui_state.show_help = false;
-                    self.ui_state.help_scroll = 0;
+                    self.ui_state.view.show_help = false;
+                    self.ui_state.view.help_scroll = 0;
                 }
                 _ => {}
             }
@@ -94,16 +94,17 @@ impl App {
                 let now = std::time::Instant::now();
                 let blocked = self
                     .ui_state
+                    .view
                     .last_help_toggle
                     .is_some_and(|t| now.duration_since(t).as_millis() < 500);
                 if !blocked {
-                    self.ui_state.show_help = !self.ui_state.show_help;
-                    self.ui_state.last_help_toggle = Some(now);
+                    self.ui_state.view.show_help = !self.ui_state.view.show_help;
+                    self.ui_state.view.last_help_toggle = Some(now);
                 }
             }
             KeyCode::Esc => {
-                if self.ui_state.show_help {
-                    self.ui_state.show_help = false;
+                if self.ui_state.view.show_help {
+                    self.ui_state.view.show_help = false;
                 } else {
                     self.search_mode = false;
                     self.ui_state.search_query.clear();
@@ -111,7 +112,7 @@ impl App {
             }
             _ => {
                 // View-specific interception
-                match self.ui_state.active_view {
+                match self.ui_state.view.active_view {
                     ViewMode::Playlists => {
                         self.handle_playlist_key(&key);
                         return;
@@ -134,7 +135,7 @@ impl App {
         }
 
         // Player View: sidebar playlist navigation
-        if self.ui_state.active_view == ViewMode::Player
+        if self.ui_state.view.active_view == ViewMode::Player
             && self.handle_player_view_sidebar_key(&key)
         {
             return;
@@ -246,12 +247,12 @@ impl App {
         let is_up = key.code == KeyCode::Up || self.key_matches(&key, &self.key_bindings.up);
 
         if is_play_pause {
-            if self.engine.is_playing() || self.ui_state.is_playing {
+            if self.engine.is_playing() || self.ui_state.player.is_playing {
                 self.engine.pause();
-                self.ui_state.is_playing = false;
+                self.ui_state.player.is_playing = false;
             } else {
                 self.engine.resume();
-                self.ui_state.is_playing = true;
+                self.ui_state.player.is_playing = true;
             }
         } else if is_vol_down {
             let new_vol = (self.ui_state.volume - runtime::VOLUME_STEP).max(0.0);
@@ -290,9 +291,9 @@ impl App {
                 }
                 // Navigation
                 KeyCode::Char('G') => {
-                    let len = self.ui_state.tracks.len();
+                    let len = self.ui_state.player.tracks.len();
                     if len > 0 {
-                        self.ui_state.selected_index = len.saturating_sub(1);
+                        self.ui_state.player.selected_index = len.saturating_sub(1);
                     }
                 }
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -307,7 +308,7 @@ impl App {
                 }
                 // Modes
                 KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.ui_state.lyrics_offset_ms = 0;
+                    self.ui_state.lyrics.lyrics_offset_ms = 0;
                 }
                 KeyCode::Char('r') => {
                     self.ui_state.repeat_mode = match self.ui_state.repeat_mode {
@@ -320,10 +321,10 @@ impl App {
                 }
                 KeyCode::Enter => self.play_selected(),
                 // Lyrics offset
-                KeyCode::Char('[') => self.ui_state.lyrics_offset_ms -= 500,
-                KeyCode::Char(']') => self.ui_state.lyrics_offset_ms += 500,
-                KeyCode::Char('{') => self.ui_state.lyrics_offset_ms -= 2000,
-                KeyCode::Char('}') => self.ui_state.lyrics_offset_ms += 2000,
+                KeyCode::Char('[') => self.ui_state.lyrics.lyrics_offset_ms -= 500,
+                KeyCode::Char(']') => self.ui_state.lyrics.lyrics_offset_ms += 500,
+                KeyCode::Char('{') => self.ui_state.lyrics.lyrics_offset_ms -= 2000,
+                KeyCode::Char('}') => self.ui_state.lyrics.lyrics_offset_ms += 2000,
                 // Search
                 KeyCode::Char('/') => {
                     self.search_mode = true;
@@ -383,7 +384,7 @@ impl App {
                 self.should_quit = true;
             }
             crate::input::command::Command::Help => {
-                self.ui_state.show_help = true;
+                self.ui_state.view.show_help = true;
             }
             crate::input::command::Command::Version => {
                 self.ui_state.notification =
@@ -435,7 +436,7 @@ impl App {
                 if view == crate::ui::ViewMode::Library {
                     self.ensure_library_loaded();
                 }
-                self.ui_state.active_view = view;
+                self.ui_state.view.active_view = view;
             }
             crate::input::command::Command::Import(path) => {
                 let import_path = std::path::PathBuf::from(&path);
@@ -512,7 +513,7 @@ impl App {
     }
 
     fn handle_remove_selected(&mut self) {
-        if self.ui_state.active_view == ViewMode::Playlists {
+        if self.ui_state.view.active_view == ViewMode::Playlists {
             let state = &mut self.ui_state.playlist_state;
             if state.selected_playlist > 0 {
                 let model = PlaylistFlatModel::new(&state.playlists, state.expanded_playlist);
@@ -525,21 +526,21 @@ impl App {
             }
             return;
         }
-        let idx = self.ui_state.selected_index;
-        if idx < self.ui_state.tracks.len() {
-            if self.ui_state.playing_index == Some(idx) {
-                self.ui_state.is_playing = false;
+        let idx = self.ui_state.player.selected_index;
+        if idx < self.ui_state.player.tracks.len() {
+            if self.ui_state.player.playing_index == Some(idx) {
+                self.ui_state.player.is_playing = false;
                 self.engine.stop();
-                self.ui_state.playing_index = None;
-                self.ui_state.lyric_track = None;
+                self.ui_state.player.playing_index = None;
+                self.ui_state.lyrics.lyric_track = None;
             }
-            self.ui_state.tracks.remove(idx);
-            if self.ui_state.selected_index >= self.ui_state.tracks.len() {
-                self.ui_state.selected_index = self.ui_state.tracks.len().saturating_sub(1);
+            self.ui_state.player.tracks.remove(idx);
+            if self.ui_state.player.selected_index >= self.ui_state.player.tracks.len() {
+                self.ui_state.player.selected_index = self.ui_state.player.tracks.len().saturating_sub(1);
             }
-            if let Some(pi) = self.ui_state.playing_index {
+            if let Some(pi) = self.ui_state.player.playing_index {
                 if pi > idx {
-                    self.ui_state.playing_index = Some(pi - 1);
+                    self.ui_state.player.playing_index = Some(pi - 1);
                 }
             }
         }
@@ -560,17 +561,17 @@ impl App {
         }
 
         let pos = self.engine.position_secs();
-        self.ui_state.position = pos;
+        self.ui_state.player.position = pos;
 
         if let Some(dur) = self.engine.duration_secs() {
-            self.ui_state.duration = dur;
+            self.ui_state.player.duration = dur;
         }
 
         // Read FFT data
         if let Ok(data) = self.fft_data.lock() {
             if !data.is_empty() {
                 self.ui_state.visualizer_data = data.clone();
-            } else if !self.ui_state.is_playing {
+            } else if !self.ui_state.player.is_playing {
                 let mut bars = self.ui_state.visualizer_data.clone();
                 for v in bars.iter_mut() {
                     *v *= 0.9;
@@ -584,21 +585,21 @@ impl App {
 
         self.sync_lyrics(pos);
 
-        if self.ui_state.is_playing && self.ui_state.duration > 0.0 && pos >= self.ui_state.duration
+        if self.ui_state.player.is_playing && self.ui_state.player.duration > 0.0 && pos >= self.ui_state.player.duration
         {
             self.on_track_ended();
         }
 
         // Sync config flag to UI state (user may have toggled in settings)
-        self.ui_state.show_cover_art = self.config.ui.show_cover_art;
+        self.ui_state.player.show_cover_art = self.config.ui.show_cover_art;
     }
 
     /// Switch to `target` view. If already on that view, toggle back to Player.
     /// Runs view-specific initialization before the switch.
     fn switch_view(&mut self, target: ViewMode) {
         // Always toggle back to Player if already on the target view
-        if self.ui_state.active_view == target {
-            self.ui_state.active_view = ViewMode::Player;
+        if self.ui_state.view.active_view == target {
+            self.ui_state.view.active_view = ViewMode::Player;
             return;
         }
 
@@ -617,7 +618,7 @@ impl App {
             _ => {}
         }
 
-        self.ui_state.active_view = target;
+        self.ui_state.view.active_view = target;
     }
 
     // ── Helpers ──

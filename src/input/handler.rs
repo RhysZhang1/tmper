@@ -20,6 +20,18 @@ impl KeyHandler {
     }
 
     pub fn process(&mut self, event: KeyEvent) -> Option<AppEvent> {
+        // Filter non-standard ASCII control characters.
+        // These can arise from terminal escape-sequence interference
+        // (e.g. SIXEL/Kitty protocol data misinterpreted as stdin).
+        // Real Tab, Enter, and Esc are reported as their own KeyCode
+        // variants by crossterm, so filtering KeyCode::Char of control
+        // chars is safe.
+        if let KeyCode::Char(c) = event.code {
+            if c.is_ascii_control() {
+                return None;
+            }
+        }
+
         // Direct quit (configurable via keybindings)
         if event.code == self.quit_key.code && event.modifiers == self.quit_key.modifiers {
             self.last_key = None;

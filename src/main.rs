@@ -27,10 +27,25 @@ async fn main() -> error::AppResult<()> {
     let log_file = std::fs::File::create(data.join("tmper.log"))
         .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
 
-    tracing_subscriber::fmt()
+    let env_filter = std::env::var("RUST_LOG").unwrap_or_default();
+    let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::sync::Mutex::new(log_file))
-        .with_target(false)
-        .init();
+        .with_target(false);
+
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    if env_filter.is_empty() {
+        tracing_subscriber::registry().with(file_layer).init();
+    } else {
+        let stderr_layer = tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .with_target(false);
+        tracing_subscriber::registry()
+            .with(file_layer)
+            .with(stderr_layer)
+            .init();
+    }
 
     tracing::info!("tmper starting...");
 

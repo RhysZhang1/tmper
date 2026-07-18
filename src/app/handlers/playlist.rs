@@ -234,6 +234,7 @@ impl App {
     pub(super) fn enter_playlist_view(&mut self) {
         self.ui_state.playlist_state.library_paths = self
             .ui_state
+            .player
             .tracks
             .iter()
             .map(|t| t.path.clone())

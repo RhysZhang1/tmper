@@ -38,7 +38,7 @@ impl App {
                 if state.cursor == last {
                     // Confirm row
                     Self::write_config(config);
-                    self.ui_state.active_view = ViewMode::Player;
+                    self.ui_state.view.active_view = ViewMode::Player;
                     return;
                 }
                 // M3U: export all playlists
