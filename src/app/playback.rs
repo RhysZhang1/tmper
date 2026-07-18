@@ -104,7 +104,7 @@ impl App {
         // Suppress direct-to-stdout cover rendering for a few frames so
         // SIXEL/Kitty escape sequences don't produce spurious stdin events
         // while the terminal is processing the track switch.
-        self.cover_renderer.suppress_frames(5);
+        self.cover_renderer.suppress_frames(runtime::COVER_SUPPRESS_FRAMES);
 
         // Try playlist-scoped first
         if let Some(pl_idx) = self.ui_state.active_playlist {

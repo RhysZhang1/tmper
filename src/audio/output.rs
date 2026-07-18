@@ -62,4 +62,9 @@ impl AudioOutput {
     pub fn empty(&self) -> bool {
         self.sink.empty()
     }
+
+    /// Clone of the output stream handle, for creating additional sinks.
+    pub fn handle(&self) -> OutputStreamHandle {
+        self.stream_handle.clone()
+    }
 }

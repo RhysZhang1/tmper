@@ -70,14 +70,13 @@ pub struct AudioEngine {
     decoder: Option<AudioDecoder>,
     sample_rate: u32,
     channels: u8,
-    /// Cached volume (0.0–1.0), reapplied after sink replacement.
     current_volume: f32,
     duration_secs: Arc<Mutex<Option<f64>>>,
     pub pcm_buffer: Arc<Mutex<VecDeque<f32>>>,
-    /// Real-time position tracking (wall-clock based, adjusted for pauses).
     position: Mutex<PositionState>,
-    /// Path of the currently loaded file (used for seeking).
     current_path: Option<PathBuf>,
+    /// Handle for in-progress async decode, aborted on stop/seek.
+    decode_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl AudioEngine {
@@ -100,11 +99,20 @@ impl AudioEngine {
                 base_offset: 0.0,
             }),
             current_path: None,
+            decode_handle: None,
         })
     }
 
+    /// Cancel any in-progress async decode.
+    fn cancel_decode(&mut self) {
+        if let Some(h) = self.decode_handle.take() {
+            h.abort();
+        }
+    }
+
+    /// Sync decode — blocks until the entire file is decoded and queued.
     pub fn play_file(&mut self, path: &Path) -> AppResult<()> {
-        // Stop current decoder and clear state
+        self.cancel_decode();
         self.decoder = None;
         *self.duration_secs.lock().unwrap() = None;
         *self.position.lock().unwrap() = PositionState {
@@ -114,8 +122,6 @@ impl AudioEngine {
             base_offset: 0.0,
         };
 
-        // Replace sink entirely — this creates a fresh playing sink
-        // and avoids rodio's permanent-detach-on-stop() issue.
         self.output.stop_and_replace();
         self.output.set_volume(self.current_volume);
         self.pcm_buffer.lock().unwrap().clear();
@@ -141,12 +147,76 @@ impl AudioEngine {
         self.decoder = Some(decoder);
         self.current_path = Some(path.to_path_buf());
 
-        // Start wall-clock position tracking
         let mut pos = self.position.lock().unwrap();
         pos.start = Some(Instant::now());
         pos.total_paused = Duration::ZERO;
         pos.pause_start = None;
         pos.base_offset = 0.0;
+
+        Ok(())
+    }
+
+    /// Async decode — spawns a background task, returns immediately.
+    /// The event loop stays responsive. Suitable for long files.
+    pub fn play_file_async(&mut self, path: &Path) -> AppResult<()> {
+        self.cancel_decode();
+        self.output.stop_and_replace();
+        self.output.set_volume(self.current_volume);
+        self.pcm_buffer.lock().unwrap().clear();
+        *self.duration_secs.lock().unwrap() = None;
+
+        let path_buf = path.to_path_buf();
+        let handle = self.output.handle();
+        let pcm_buf = self.pcm_buffer.clone();
+        let duration = self.duration_secs.clone();
+        let volume = self.current_volume;
+
+        let decode_path = path_buf.clone();
+        let h = tokio::task::spawn_blocking(move || {
+            let mut decoder = match AudioDecoder::open(&decode_path) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::error!("Async decode open failed: {e}");
+                    return;
+                }
+            };
+            *duration.lock().unwrap() = Some(decoder.duration_secs());
+
+            let sink = match rodio::Sink::try_new(&handle) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("Async sink create failed: {e}");
+                    return;
+                }
+            };
+            sink.set_volume(volume);
+
+            let sample_rate = decoder.sample_rate;
+            let channels = decoder.channels;
+
+            while let Ok(Some(samples)) = decoder.read_packet() {
+                let source =
+                    rodio::buffer::SamplesBuffer::new(channels as u16, sample_rate, samples);
+                let instrumented = InstrumentedSource::new(
+                    source,
+                    pcm_buf.clone(),
+                    runtime::PCM_BUFFER_CAPACITY,
+                );
+                sink.append(instrumented);
+            }
+            sink.sleep_until_end();
+        });
+
+        self.decode_handle = Some(h);
+        self.current_path = Some(path_buf);
+
+        let mut pos = self.position.lock().unwrap();
+        *pos = PositionState {
+            start: Some(Instant::now()),
+            total_paused: Duration::ZERO,
+            pause_start: None,
+            base_offset: 0.0,
+        };
 
         Ok(())
     }
@@ -165,6 +235,7 @@ impl AudioEngine {
     }
 
     pub fn stop(&mut self) {
+        self.cancel_decode();
         self.output.stop_and_replace();
         self.decoder = None;
         self.current_path = None;
@@ -180,6 +251,7 @@ impl AudioEngine {
     /// Seek by a relative delta (seconds). Positive = forward, negative = backward.
     /// Re-decodes the file from the new position (true audio seek).
     pub fn seek_relative(&mut self, delta_secs: f64) -> AppResult<()> {
+        self.cancel_decode();
         let path = match &self.current_path {
             Some(p) => p.clone(),
             None => return Ok(()),
