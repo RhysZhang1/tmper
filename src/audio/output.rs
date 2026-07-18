@@ -1,9 +1,11 @@
+use std::sync::Arc;
+
 use rodio::{OutputStream, OutputStreamHandle, Sink};
 
 use crate::error::AppResult;
 
 pub struct AudioOutput {
-    sink: Sink,
+    sink: Arc<Sink>,
     stream_handle: OutputStreamHandle,
     _stream: OutputStream,
 }
@@ -19,7 +21,7 @@ impl AudioOutput {
         })?;
 
         Ok(Self {
-            sink,
+            sink: Arc::new(sink),
             stream_handle,
             _stream: stream,
         })
@@ -37,16 +39,16 @@ impl AudioOutput {
         self.sink.play();
     }
 
-    /// Stop current playback and create a brand-new sink.
-    /// This avoids rodio's permanent-detach-on-stop() issue.
+    /// Stop current sink and create a brand-new one.
+    /// The old `Arc<Sink>` is dropped if no background task holds a reference;
+    /// otherwise the background task sees `stop()` and its `sleep_until_end()`
+    /// wakes up, allowing the task to exit cleanly.
     pub fn stop_and_replace(&mut self) {
         self.sink.stop();
         match Sink::try_new(&self.stream_handle) {
-            Ok(new_sink) => self.sink = new_sink,
+            Ok(new_sink) => self.sink = Arc::new(new_sink),
             Err(e) => {
                 tracing::error!("Failed to create new sink (audio may be unavailable): {e}");
-                // Keep the old (stopped) sink — won't produce audio in this state
-                // but avoids a dangling handle. User will see the error in logs.
             }
         }
     }
@@ -63,9 +65,11 @@ impl AudioOutput {
         self.sink.empty()
     }
 
-    /// Clone of the output stream handle, for creating additional sinks.
-    #[allow(dead_code)]
-    pub fn handle(&self) -> OutputStreamHandle {
-        self.stream_handle.clone()
+    /// Clone of the shared `Arc<Sink>` for use in background decode tasks.
+    /// Both the main thread and background task reference the same sink,
+    /// so `set_volume` and `stop` work correctly regardless of which path
+    /// is feeding audio.
+    pub fn sink_arc(&self) -> Arc<Sink> {
+        Arc::clone(&self.sink)
     }
 }

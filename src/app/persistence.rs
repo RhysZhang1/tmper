@@ -166,7 +166,15 @@ impl App {
                     self.ui_state.player.selected_index = idx;
                 }
 
-                match self.engine.play_file(path) {
+                let is_large = std::fs::metadata(path)
+                    .map(|m| m.len() > 50_000_000)
+                    .unwrap_or(false);
+                let result = if is_large {
+                    self.engine.play_file_async(path)
+                } else {
+                    self.engine.play_file(path)
+                };
+                match result {
                     Ok(()) => {
                         self.ui_state.player.title = title;
                         self.ui_state.player.artist = artist;

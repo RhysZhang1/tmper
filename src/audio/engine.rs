@@ -104,9 +104,16 @@ impl AudioEngine {
     }
 
     /// Cancel any in-progress async decode.
+    /// Stops the shared sink (waking `sleep_until_end` in the background
+    /// task), replaces it with a fresh one, and drops the JoinHandle.
     fn cancel_decode(&mut self) {
-        if let Some(h) = self.decode_handle.take() {
-            h.abort();
+        if self.decode_handle.take().is_some() {
+            // stop_and_replace stops the old Arc<Sink> and creates a new one.
+            // The background task still holds an Arc to the old sink, but
+            // sink.stop() clears its queue and wakes sleep_until_end(),
+            // so the task exits cleanly without abort().
+            self.output.stop_and_replace();
+            self.output.set_volume(self.current_volume);
         }
     }
 
@@ -157,22 +164,19 @@ impl AudioEngine {
     }
 
     /// Async decode — spawns a background task, returns immediately.
-    /// The event loop stays responsive. Suitable for long files.
-    /// NOTE: currently unused; kept for future opt-in. Background sink
-    /// volume control and abort-on-drop require additional wiring.
-    #[allow(dead_code)]
+    /// Uses the same `Arc<Sink>` as the main thread so `set_volume` and
+    /// `stop` work correctly regardless of which path feeds audio.
     pub fn play_file_async(&mut self, path: &Path) -> AppResult<()> {
         self.cancel_decode();
-        self.output.stop_and_replace();
-        self.output.set_volume(self.current_volume);
         self.pcm_buffer.lock().unwrap().clear();
         *self.duration_secs.lock().unwrap() = None;
 
         let path_buf = path.to_path_buf();
-        let handle = self.output.handle();
+        let sink = self.output.sink_arc();
         let pcm_buf = self.pcm_buffer.clone();
         let duration = self.duration_secs.clone();
         let volume = self.current_volume;
+        sink.set_volume(volume);
 
         let decode_path = path_buf.clone();
         let h = tokio::task::spawn_blocking(move || {
@@ -184,15 +188,6 @@ impl AudioEngine {
                 }
             };
             *duration.lock().unwrap() = Some(decoder.duration_secs());
-
-            let sink = match rodio::Sink::try_new(&handle) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!("Async sink create failed: {e}");
-                    return;
-                }
-            };
-            sink.set_volume(volume);
 
             let sample_rate = decoder.sample_rate;
             let channels = decoder.channels;
@@ -207,6 +202,7 @@ impl AudioEngine {
                 );
                 sink.append(instrumented);
             }
+            // Blocks until the shared sink drains or is stopped externally.
             sink.sleep_until_end();
         });
 
