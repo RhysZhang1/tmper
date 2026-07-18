@@ -163,11 +163,6 @@ impl App {
             self.cover_renderer.render_kitty(&cover_params);
             // SIXEL graphics via chafa subprocess (Konsole, etc.)
             self.cover_renderer.render_chafa(&cover_params);
-            // Drain spurious stdin events caused by terminal escape-sequence
-            // interference (bytes from Kitty/SIXEL output misinterpreted as
-            // key events). Uses a short non-blocking poll — real keypresses
-            // from a human won't arrive within this micro-window.
-            self.drain_spurious_events();
         }
 
         // Stop FFT
@@ -178,20 +173,4 @@ impl App {
         Ok(())
     }
 
-    /// Drain any stdin events that arrived during cover art rendering.
-    /// These are typically spurious — bytes from terminal escape sequences
-    /// (Kitty/SIXEL) misinterpreted as keyboard input by the PTY layer.
-    /// A very short poll timeout (2ms) ensures real human keypresses
-    /// (inter-event gap > 50ms) are never discarded.
-    fn drain_spurious_events(&self) {
-        use crossterm::event;
-        use std::time::Duration;
-        // Drain up to 16 events within a 2ms window each
-        for _ in 0..16 {
-            if !event::poll(Duration::from_millis(2)).unwrap_or(false) {
-                break;
-            }
-            let _ = event::read();
-        }
-    }
 }
