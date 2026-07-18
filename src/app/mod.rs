@@ -173,5 +173,217 @@ impl App {
 
         Ok(())
     }
+}
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::event::AppEvent;
+    use crate::ui::RepeatMode;
+    use crate::ui::ViewMode;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::path::PathBuf;
+
+    struct TestApp {
+        app: App,
+    }
+
+    impl TestApp {
+        fn new() -> Self {
+            let config = Config::default();
+            let app = App::new(&config).expect("Failed to create App");
+            Self { app }
+        }
+
+        fn press_key(&mut self, code: KeyCode) {
+            self.app
+                .handle_event(AppEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        }
+
+        fn press_char(&mut self, c: char) {
+            self.press_key(KeyCode::Char(c));
+        }
+
+        fn tick(&mut self) {
+            self.app.handle_event(AppEvent::Tick);
+        }
+
+        fn active_view(&self) -> ViewMode {
+            self.app.ui_state.view.active_view
+        }
+
+        fn volume(&self) -> f32 {
+            self.app.ui_state.volume
+        }
+
+        fn show_help(&self) -> bool {
+            self.app.ui_state.view.show_help
+        }
+
+        fn repeat_mode(&self) -> RepeatMode {
+            self.app.ui_state.repeat_mode
+        }
+
+        fn load_and_play(&mut self, path: &std::path::Path) {
+            self.app.load_and_play(&path.to_path_buf());
+        }
+    }
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from("tests/fixtures").join(name)
+    }
+
+    // ── P0: View switching ──
+
+    #[test]
+    fn test_view_toggle_returns_to_player() {
+        let mut ta = TestApp::new();
+        assert_eq!(ta.active_view(), ViewMode::Player);
+        ta.press_char('3');
+        assert_eq!(ta.active_view(), ViewMode::Lyrics);
+        ta.press_char('3');
+        assert_eq!(ta.active_view(), ViewMode::Player);
+    }
+
+    #[test]
+    fn test_view_switch_all_seven_views() {
+        let mut ta = TestApp::new();
+        let keys = ['1', '2', '3', '4', '5', '6', '7'];
+        let expected = [
+            ViewMode::Player,
+            ViewMode::Library,
+            ViewMode::Lyrics,
+            ViewMode::Visualizer,
+            ViewMode::Playlists,
+            ViewMode::Browser,
+            ViewMode::Settings,
+        ];
+        for (&key, &exp) in keys.iter().zip(expected.iter()) {
+            ta.press_char(key);
+            assert_eq!(ta.active_view(), exp, "Key '{key}'");
+            ta.press_char(key); // toggle back
+            assert_eq!(ta.active_view(), ViewMode::Player);
+        }
+    }
+
+    // ── P0: Volume after seek ──
+
+    #[tokio::test]
+    async fn test_volume_unchanged_after_seek() {
+        let mut ta = TestApp::new();
+        ta.load_and_play(&fixture("test.wav"));
+        ta.tick();
+        let before = ta.volume();
+        assert!(before > 0.0);
+        ta.press_key(KeyCode::Right);
+        ta.tick();
+        let after = ta.volume();
+        assert!((before - after).abs() < 0.01,
+            "Volume changed: {before} → {after}");
+    }
+
+    #[test]
+    fn test_volume_up_down_keys() {
+        let mut ta = TestApp::new();
+        let before = ta.volume();
+        ta.press_char('=');
+        assert!(ta.volume() > before);
+        let mid = ta.volume();
+        ta.press_char('-');
+        assert!(ta.volume() < mid);
+    }
+
+    #[test]
+    fn test_volume_clamped() {
+        let mut ta = TestApp::new();
+        for _ in 0..50 { ta.press_char('-'); }
+        assert!((ta.volume() - 0.0).abs() < 0.001);
+        for _ in 0..50 { ta.press_char('='); }
+        assert!((ta.volume() - 1.0).abs() < 0.001);
+    }
+
+    // ── P1: Repeat mode ──
+
+    #[test]
+    fn test_repeat_mode_cycles() {
+        let mut ta = TestApp::new();
+        assert_eq!(ta.repeat_mode(), RepeatMode::Sequential);
+        ta.press_char('r');
+        assert_eq!(ta.repeat_mode(), RepeatMode::Shuffle);
+        ta.press_char('r');
+        assert_eq!(ta.repeat_mode(), RepeatMode::SingleTrack);
+        ta.press_char('r');
+        assert_eq!(ta.repeat_mode(), RepeatMode::Sequential);
+    }
+
+    // ── P1: Help toggle + cooldown ──
+
+    #[test]
+    fn test_help_toggle() {
+        let mut ta = TestApp::new();
+        assert!(!ta.show_help());
+        ta.press_char('0');
+        assert!(ta.show_help());
+        ta.press_char('0');
+        assert!(!ta.show_help());
+    }
+
+    #[test]
+    fn test_help_cooldown_blocks_reopen() {
+        let mut ta = TestApp::new();
+        ta.press_char('0');
+        assert!(ta.show_help());
+        ta.press_char('0');
+        assert!(!ta.show_help());
+        // Rapid reopen blocked by 500ms cooldown
+        ta.press_char('0');
+        assert!(!ta.show_help());
+    }
+
+    // ── P1: Load and play ──
+
+    #[tokio::test]
+    async fn test_load_and_play_sets_state() {
+        let mut ta = TestApp::new();
+        ta.load_and_play(&fixture("test.wav"));
+        ta.tick();
+        assert!(!ta.app.ui_state.player.title.is_empty());
+        assert!(ta.app.ui_state.player.duration > 0.0);
+        assert!(ta.app.ui_state.player.is_playing);
+    }
+
+    #[tokio::test]
+    async fn test_tagless_file_uses_filename() {
+        let mut ta = TestApp::new();
+        ta.load_and_play(&fixture("test_notags.wav"));
+        assert_eq!(ta.app.ui_state.player.title, "test_notags");
+        assert_eq!(ta.app.ui_state.player.artist, "Unknown Artist");
+    }
+
+    // ── P2: Stop clears state ──
+
+    #[tokio::test]
+    async fn test_stop_clears_engine_state() {
+        let mut ta = TestApp::new();
+        ta.load_and_play(&fixture("test.wav"));
+        ta.tick();
+        assert!(ta.app.ui_state.player.is_playing);
+        ta.app.engine.stop();
+        // Engine-level stop clears engine state; UI state updates in handle_tick
+        assert!(!ta.app.engine.is_playing());
+        assert!(ta.app.engine.duration_secs().is_none());
+    }
+
+    // ── P2: Command mode ──
+
+    #[test]
+    fn test_command_mode_enter_exit() {
+        let mut ta = TestApp::new();
+        assert!(!ta.app.ui_state.command_mode);
+        ta.press_char(':');
+        assert!(ta.app.ui_state.command_mode);
+        ta.press_key(KeyCode::Esc);
+        assert!(!ta.app.ui_state.command_mode);
+    }
 }

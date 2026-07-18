@@ -799,4 +799,4 @@ tmper/
 | UiState 上帝结构体 | 🔴 | 30+ 字段 → 13 分组 + 3 Cell | ✅ v3.3 完成 |
 | stdout 直接写入 | 🔴 | 4 层防御：suppress + drain + control-char filter + cooldown | ✅ v3.3 完成 |
 | play_file 同步解码 | 🟡 | spawn_blocking + 独立 Sink，>50MB 自动异步 | ✅ v3.3 完成 |
-| 无集成测试 | 🟡 | 42 个测试全为单元测试 | 📋 待 Session E |
+| 无集成测试 | 🟡 | 42 → 54（+12 集成测试） | ✅ v3.3 完成 |
