@@ -135,6 +135,7 @@ impl App {
             }
 
             if self.should_quit {
+                self.engine.stop();
                 break;
             }
 

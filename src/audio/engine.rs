@@ -158,6 +158,9 @@ impl AudioEngine {
 
     /// Async decode — spawns a background task, returns immediately.
     /// The event loop stays responsive. Suitable for long files.
+    /// NOTE: currently unused; kept for future opt-in. Background sink
+    /// volume control and abort-on-drop require additional wiring.
+    #[allow(dead_code)]
     pub fn play_file_async(&mut self, path: &Path) -> AppResult<()> {
         self.cancel_decode();
         self.output.stop_and_replace();

@@ -64,6 +64,7 @@ impl AudioOutput {
     }
 
     /// Clone of the output stream handle, for creating additional sinks.
+    #[allow(dead_code)]
     pub fn handle(&self) -> OutputStreamHandle {
         self.stream_handle.clone()
     }
