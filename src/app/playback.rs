@@ -105,7 +105,7 @@ impl App {
         // SIXEL/Kitty escape sequences don't produce spurious stdin events
         // while the terminal is processing the track switch.
         self.cover_renderer.suppress_frames(runtime::COVER_SUPPRESS_FRAMES);
-        // Block spurious '0' key events from cover-art escape sequences
+        // Block spurious '8' key events from cover-art escape sequences
         // for 800ms after the track transition.
         self.cover_guard_until =
             Some(std::time::Instant::now() + Duration::from_millis(800));

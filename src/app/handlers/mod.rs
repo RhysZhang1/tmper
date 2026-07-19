@@ -69,7 +69,7 @@ impl App {
                 KeyCode::Char('k') | KeyCode::Up => {
                     self.ui_state.view.help_scroll = self.ui_state.view.help_scroll.saturating_sub(1);
                 }
-                KeyCode::Char('0') | KeyCode::Esc => {
+                KeyCode::Char('8') | KeyCode::Esc => {
                     self.ui_state.view.show_help = false;
                     self.ui_state.view.help_scroll = 0;
                 }
@@ -87,11 +87,11 @@ impl App {
             KeyCode::Char('5') => self.switch_view(ViewMode::Playlists),
             KeyCode::Char('6') => self.switch_view(ViewMode::Browser),
             KeyCode::Char('7') => self.switch_view(ViewMode::Settings),
-            KeyCode::Char('0') => {
+            KeyCode::Char('8') => {
                 let now = std::time::Instant::now();
                 // Post-track-change guard: SIXEL/Kitty cover-art escape
                 // sequences on stdout can be misinterpreted by the terminal
-                // as stdin '0' events (0x30).  Block for 800ms after a
+                // as stdin '8' events (0x38).  Block for 800ms after a
                 // track transition.
                 let cover_blocked = self
                     .cover_guard_until

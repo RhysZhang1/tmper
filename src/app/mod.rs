@@ -385,21 +385,21 @@ mod tests {
     fn test_help_toggle() {
         let mut ta = TestApp::new();
         assert!(!ta.show_help());
-        ta.press_char('0');
+        ta.press_char('8');
         assert!(ta.show_help());
-        ta.press_char('0');
+        ta.press_char('8');
         assert!(!ta.show_help());
     }
 
     #[test]
     fn test_help_cooldown_blocks_reopen() {
         let mut ta = TestApp::new();
-        ta.press_char('0');
+        ta.press_char('8');
         assert!(ta.show_help());
-        ta.press_char('0');
+        ta.press_char('8');
         assert!(!ta.show_help());
         // Rapid reopen blocked by 500ms cooldown
-        ta.press_char('0');
+        ta.press_char('8');
         assert!(!ta.show_help());
     }
 
