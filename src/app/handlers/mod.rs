@@ -150,28 +150,23 @@ impl App {
         let down = key.code == KeyCode::Down || self.key_matches(key, &self.key_bindings.down);
         let up = key.code == KeyCode::Up || self.key_matches(key, &self.key_bindings.up);
 
+        let sidebar_total = self.sidebar_line_count();
+
         if down {
             let ps = &mut self.ui_state.playlist_state;
-            let model = PlaylistFlatModel::new(&ps.playlists, ps.expanded_playlist);
-            // Max reachable index = last item (total - 1, since "..." at 0)
-            let max_idx = model.total_lines().saturating_sub(1);
-            if ps.selected_playlist < max_idx {
-                ps.selected_playlist += 1;
+            if sidebar_total > 0 && ps.sidebar_selected < sidebar_total.saturating_sub(1) {
+                ps.sidebar_selected += 1;
             }
-            // Mini playlist occupies bottom half of left panel
-            let vis = self.ui_state.visible_rows.get() / 2;
-            Self::clamp_playlist_scroll(ps, vis);
+            self.clamp_sidebar_scroll(sidebar_total);
             return true;
         }
         if up {
             let ps = &mut self.ui_state.playlist_state;
-            // Index 0 is the "..." row in the model — not selectable.
-            // The first playlist starts at index 1.
-            if ps.selected_playlist > 1 {
-                ps.selected_playlist -= 1;
+            if ps.sidebar_selected > 0 {
+                ps.sidebar_selected -= 1;
             }
-            if ps.selected_playlist < ps.scroll_playlists {
-                ps.scroll_playlists = ps.selected_playlist;
+            if ps.sidebar_selected < ps.sidebar_scroll {
+                ps.sidebar_scroll = ps.sidebar_selected;
             }
             return true;
         }
@@ -179,7 +174,8 @@ impl App {
             KeyCode::Enter => {
                 let ps = &self.ui_state.playlist_state;
                 let model = PlaylistFlatModel::new(&ps.playlists, ps.expanded_playlist);
-                match model.resolve(ps.selected_playlist) {
+                let full_cursor = ps.sidebar_selected + 1; // +1 for skipped "…"
+                match model.resolve(full_cursor) {
                     LineTarget::Song {
                         playlist,
                         song_index,
@@ -189,10 +185,8 @@ impl App {
                             && song_index < ps.playlists[pl_idx].songs.len()
                         {
                             let path = ps.playlists[pl_idx].songs[song_index].clone();
-                            // Set this as the active playlist for scoped playback
                             self.ui_state.active_playlist = Some(pl_idx);
                             self.ui_state.active_playlist_song = Some(song_index);
-                            // Update playlist_name for display
                             self.ui_state.playlist_name = ps.playlists[pl_idx].name.clone();
                             let _ = ps;
                             let _ = model;
@@ -202,27 +196,69 @@ impl App {
                     }
                     LineTarget::PlaylistName(i) => {
                         let _ = model;
-                        let ps = &mut self.ui_state.playlist_state;
-                        // Toggle expand
-                        if ps.expanded_playlist == Some(i) {
-                            ps.expanded_playlist = None;
-                        } else {
-                            ps.expanded_playlist = Some(i);
-                            // Set as active playlist on expand
-                            self.ui_state.active_playlist = Some(i);
-                            self.ui_state.playlist_name = ps.playlists[i].name.clone();
+                        let new_sel = self.sidebar_line_index_of_playlist(i);
+                        {
+                            let ps = &mut self.ui_state.playlist_state;
+                            if ps.expanded_playlist == Some(i) {
+                                ps.expanded_playlist = None;
+                            } else {
+                                ps.expanded_playlist = Some(i);
+                                self.ui_state.active_playlist = Some(i);
+                                self.ui_state.playlist_name = ps.playlists[i].name.clone();
+                            }
+                            ps.sidebar_selected = new_sel;
                         }
-                        let new_model = PlaylistFlatModel::new(&ps.playlists, ps.expanded_playlist);
-                        if let Some(new_line) = new_model.line_of_playlist(i) {
-                            ps.selected_playlist = new_line;
-                        }
-                        Self::clamp_playlist_scroll(ps, self.ui_state.visible_rows.get() / 2);
+                        let sidebar_total = self.sidebar_line_count();
+                        self.clamp_sidebar_scroll(sidebar_total);
                     }
                     _ => {}
                 }
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Number of visible lines in the player-view sidebar (no "…" row).
+    fn sidebar_line_count(&self) -> usize {
+        let ps = &self.ui_state.playlist_state;
+        let mut count = 0usize;
+        for (i, pl) in ps.playlists.iter().enumerate() {
+            count += 1; // playlist name
+            if Some(i) == ps.expanded_playlist {
+                count += pl.songs.len().max(1); // songs or "(empty)"
+            }
+        }
+        count
+    }
+
+    /// 0-based flat-line index of a playlist name in the sidebar.
+    fn sidebar_line_index_of_playlist(&self, playlist_idx: usize) -> usize {
+        let ps = &self.ui_state.playlist_state;
+        let mut line = 0usize;
+        for i in 0..playlist_idx {
+            if i >= ps.playlists.len() {
+                return line;
+            }
+            line += 1;
+            if Some(i) == ps.expanded_playlist {
+                line += ps.playlists[i].songs.len().max(1);
+            }
+        }
+        line
+    }
+
+    fn clamp_sidebar_scroll(&mut self, sidebar_total: usize) {
+        let ps = &mut self.ui_state.playlist_state;
+        let vis = self.ui_state.visible_rows.get() / 2;
+        if ps.sidebar_selected >= sidebar_total {
+            ps.sidebar_selected = sidebar_total.saturating_sub(1);
+        }
+        if ps.sidebar_selected < ps.sidebar_scroll {
+            ps.sidebar_scroll = ps.sidebar_selected;
+        }
+        if ps.sidebar_selected >= ps.sidebar_scroll + vis {
+            ps.sidebar_scroll = ps.sidebar_selected.saturating_sub(vis) + 1;
         }
     }
 

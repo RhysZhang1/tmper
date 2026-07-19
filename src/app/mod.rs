@@ -26,6 +26,14 @@ pub(crate) mod handlers;
 pub(crate) mod persistence;
 pub(crate) mod playback;
 
+/// Tracks which branch of the event loop fired, used for draw throttling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventKind {
+    Key,
+    Tick,
+    Resize,
+}
+
 pub struct App {
     config: Config,
     ui_state: UiState,
@@ -104,22 +112,32 @@ impl App {
             (1000 / self.config.visualizer.frame_rate.max(1)) as u64,
         ));
 
+        // Draw throttling: key events always trigger an immediate redraw;
+        // tick-triggered draws are throttled to ~20 fps (50ms) to reduce
+        // CPU contention with the FFT thread and audio pipeline.
+        let min_draw_interval = Duration::from_millis(50);
+        let mut last_draw = std::time::Instant::now();
+        let mut needs_draw = true;
+
         loop {
+            let mut event_kind: Option<EventKind> = None;
             tokio::select! {
                 crossterm_event = reader.next() => {
                     match crossterm_event {
                         Some(Ok(event)) => {
                             match event {
                                 CrosstermEvent::Key(key) => {
-                                    // Bypass KeyHandler delay in insert/typing modes
                                     let needs_bypass = matches!(self.ui_state.playlist_state.insert_mode, crate::ui::views::playlist_view::InsertMode::Typing(_));
                                     if needs_bypass {
                                         self.handle_event(crate::event::AppEvent::Key(key));
                                     } else if let Some(app_event) = self.key_handler.process(key) {
                                         self.handle_event(app_event);
                                     }
+                                    event_kind = Some(EventKind::Key);
                                 }
-                                CrosstermEvent::Resize(_, _) => {}
+                                CrosstermEvent::Resize(_, _) => {
+                                    event_kind = Some(EventKind::Resize);
+                                }
                                 _ => {}
                             }
                         }
@@ -131,6 +149,7 @@ impl App {
                 }
                 _ = tick_interval.tick() => {
                     self.handle_event(AppEvent::Tick);
+                    event_kind = Some(EventKind::Tick);
                 }
             }
 
@@ -139,31 +158,42 @@ impl App {
                 break;
             }
 
-            // Clear SIXEL ghost when leaving player view.
-            // Uses terminal.clear() so ratatui resets its internal buffer
-            // and the next draw() sends ALL cells (not just diffs).
-            if self.cover_renderer.needs_clear() {
-                let _ = terminal.clear();
-                self.cover_renderer.clear_done();
+            // Key events always trigger an immediate redraw.
+            // Tick events are throttled to min_draw_interval to reduce
+            // render contention during playback.
+            let now = std::time::Instant::now();
+            let is_key = matches!(event_kind, Some(EventKind::Key | EventKind::Resize));
+            let is_tick = matches!(event_kind, Some(EventKind::Tick))
+                && now.duration_since(last_draw) >= min_draw_interval;
+            if is_key || is_tick {
+                needs_draw = true;
             }
 
-            if let Err(e) = terminal.draw(|f| ui::render(f, &self.ui_state)) {
-                tracing::error!("Render error: {e}");
-            }
+            if needs_draw {
+                if self.cover_renderer.needs_clear() {
+                    let _ = terminal.clear();
+                    self.cover_renderer.clear_done();
+                }
 
-            // Kitty graphics: native pixel rendering (Kitty-compatible terminals)
-            let cover_params = CoverParams {
-                active_view: self.ui_state.view.active_view,
-                show_help: self.ui_state.view.show_help,
-                command_mode: self.ui_state.command_mode,
-                show_cover_art: self.ui_state.player.show_cover_art,
-                cover_gen: self.ui_state.player.cover_gen.get(),
-                cover_art: self.ui_state.player.cover_art.clone(),
-                cover_rect: self.ui_state.cover_rect.get(),
-            };
-            self.cover_renderer.render_kitty(&cover_params);
-            // SIXEL graphics via chafa subprocess (Konsole, etc.)
-            self.cover_renderer.render_chafa(&cover_params);
+                if let Err(e) = terminal.draw(|f| ui::render(f, &self.ui_state)) {
+                    tracing::error!("Render error: {e}");
+                }
+
+                let cover_params = CoverParams {
+                    active_view: self.ui_state.view.active_view,
+                    show_help: self.ui_state.view.show_help,
+                    command_mode: self.ui_state.command_mode,
+                    show_cover_art: self.ui_state.player.show_cover_art,
+                    cover_gen: self.ui_state.player.cover_gen.get(),
+                    cover_art: self.ui_state.player.cover_art.clone(),
+                    cover_rect: self.ui_state.cover_rect.get(),
+                };
+                self.cover_renderer.render_kitty(&cover_params);
+                self.cover_renderer.render_chafa(&cover_params);
+
+                last_draw = now;
+                needs_draw = false;
+            }
         }
 
         // Stop FFT

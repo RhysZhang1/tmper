@@ -10,7 +10,7 @@ gapless = true
 crossfade_seconds = 2
 resume_on_startup = true
 seek_step_small_secs = 5
-seek_step_large_secs = 30
+
 
 [visualizer]
 enabled = true

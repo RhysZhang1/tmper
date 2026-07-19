@@ -223,7 +223,7 @@ scan_on_startup = false
 default_volume = 0.8
 gapless = true
 seek_step_small_secs = 5
-seek_step_large_secs = 30
+
 
 [visualizer]
 enabled = true

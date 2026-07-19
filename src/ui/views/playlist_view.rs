@@ -210,6 +210,7 @@ pub enum InsertMode {
 pub struct PlaylistManagerState {
     pub playlists: Vec<PlaylistData>,
     pub library_paths: Vec<PathBuf>,
+    /// Key 5 (full playlist manager) — cursor in flat-model coordinates (0 = "…").
     pub selected_playlist: usize,
     pub selected_library_song: usize,
     pub focused: PlaylistPanel,
@@ -218,6 +219,9 @@ pub struct PlaylistManagerState {
     pub expanded_playlist: Option<usize>,
     pub scroll_library: usize,
     pub scroll_playlists: usize,
+    /// Key 1 (player sidebar) — independent cursor, no "…" row, 0-based.
+    pub sidebar_selected: usize,
+    pub sidebar_scroll: usize,
 }
 
 impl Default for PlaylistManagerState {
@@ -233,6 +237,8 @@ impl Default for PlaylistManagerState {
             expanded_playlist: None,
             scroll_library: 0,
             scroll_playlists: 0,
+            sidebar_selected: 0,
+            sidebar_scroll: 0,
         }
     }
 }

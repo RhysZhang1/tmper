@@ -24,8 +24,7 @@ pub struct PlaybackConfig {
     pub resume_on_startup: bool,
     #[serde(default = "default_seek_step_small")]
     pub seek_step_small_secs: u32,
-    #[serde(default = "default_seek_step_large")]
-    pub seek_step_large_secs: u32,
+
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -97,9 +96,6 @@ fn default_crossfade() -> u32 {
 }
 fn default_seek_step_small() -> u32 {
     5
-}
-fn default_seek_step_large() -> u32 {
-    30
 }
 fn default_music_dirs() -> Vec<String> {
     vec!["~/Music".to_string()]
@@ -202,7 +198,6 @@ impl Default for PlaybackConfig {
             crossfade_seconds: default_crossfade(),
             resume_on_startup: default_true(),
             seek_step_small_secs: default_seek_step_small(),
-            seek_step_large_secs: default_seek_step_large(),
         }
     }
 }

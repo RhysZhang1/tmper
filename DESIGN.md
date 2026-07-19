@@ -3,8 +3,8 @@
 > **项目名称**: tmper — 终端音乐播放器
 > **语言**: Rust
 > **平台**: Arch Linux + KDE Plasma
-> **文档版本**: v3.3（实现文档）
-> **最后更新**: 2026-07-18
+> **文档版本**: v3.4（实现文档）
+> **最后更新**: 2026-07-19
 
 ---
 
@@ -789,14 +789,17 @@ tmper/
 | v3.1 | 2026-07-17 | 重构：提取 constants.rs、覆盖渲染模块化、统一视图切换 |
 | v3.2 | 2026-07-18 | 代码质量改进：PCM 缓冲增大、消除 clippy allow、render() 改 match、Config 默认值去重、RUST_LOG 支持、KeyHandler 控制字符过滤 |
 | v3.3 | 2026-07-18 | Session A–D：UiState 视图参数抽取 + 状态分组 (PlayerCore/LyricsState/ViewState)、play_file 异步化解码、stdout 防护增强 (4 层防御) |
+| v3.4 | 2026-07-19 | 回滚长按快进快退；事件循环绘制节流（~20fps）修复播放时滚动卡顿；键1迷你歌单独立滚动状态修复末行消失 |
 
-### 已知技术债（v3.3 记录）
-
-> 详细计划见 `progress/2026-07-18-deferred-issues-plan.md`
+### 已知技术债（v3.4 更新）
 
 | 问题 | 严重度 | 说明 | 状态 |
 |------|--------|------|------|
 | UiState 上帝结构体 | 🔴 | 30+ 字段 → 13 分组 + 3 Cell | ✅ v3.3 完成 |
-| stdout 直接写入 | 🔴 | 4 层防御：suppress + drain + control-char filter + cooldown | ✅ v3.3 完成 |
-| play_file 同步解码 | 🟡 | spawn_blocking + 独立 Sink，>50MB 自动异步 | ✅ v3.3 完成 |
-| 无集成测试 | 🟡 | 42 → 54（+12 集成测试） | ✅ v3.3 完成 |
+| stdout 直接写入 | 🔴 | 4 层防御；ratatui-image 集成待调研 | 🟡 缓解 |
+| play_file 同步解码 | 🟡 | 异步路径对 >50MB 启用；seek_relative 仍同步 | 🟡 部分 |
+| 无集成测试 | 🟡 | 54 测试（42 单元 + 12 集成） | ✅ v3.3 完成 |
+| 长按快进快退 | 🟡 | 已回滚（crossterm 无按键释放检测） | ✅ v3.4 回滚 |
+| 播放时滚动卡顿 | 🟡 | 事件循环绘制节流至 ~20fps | ✅ v3.4 修复 |
+| 键1 迷你歌单末行消失 | 🟡 | 侧边栏独立滚动状态 | ✅ v3.4 修复 |
+| seek_relative 同步解码 | 🟡 | 跳转时阻塞事件循环 | ⏳ 待处理 |

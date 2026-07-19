@@ -319,20 +319,22 @@ fn render_mini_playlist(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
     use crate::ui::views::playlist_view::{InsertMode, PlaylistFlatModel};
 
     let model = PlaylistFlatModel::new(&ps.playlists, ps.expanded_playlist);
+    // Convert sidebar cursor (0-based) to full-model cursor (+1 for "…").
+    let full_cursor = ps.sidebar_selected + 1;
     let all_lines =
-        model.build_styled_lines(true, &InsertMode::Off, ps.selected_playlist, |song| {
+        model.build_styled_lines(true, &InsertMode::Off, full_cursor, |song| {
             params
                 .playing_index
                 .and_then(|pi| params.tracks.get(pi).map(|t| t.path == *song))
                 .unwrap_or(false)
         });
 
-    // Skip the "..." row (index 0) for Player View sidebar
+    // Sidebar: skip "…" row (index 0), use sidebar_scroll.
     let flat_lines: Vec<_> = all_lines.into_iter().skip(1).collect();
 
     let vis_h = inner.height as usize;
     let max_scroll = flat_lines.len().saturating_sub(vis_h);
-    let scroll = ps.scroll_playlists.min(max_scroll);
+    let scroll = ps.sidebar_scroll.min(max_scroll);
     let end = (scroll + vis_h).min(flat_lines.len());
     let visible: Vec<Line> = flat_lines[scroll..end]
         .iter()
