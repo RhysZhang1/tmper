@@ -118,6 +118,13 @@ impl App {
             tokio::sync::mpsc::unbounded_channel::<Vec<CrosstermEvent>>();
 
         tokio::task::spawn_blocking(move || loop {
+            // Check whether the main loop has exited before blocking
+            // on poll().  Without this the thread would spin in the
+            // poll→timeout→poll loop forever, never reaching send()
+            // to discover the channel is closed.
+            if event_tx.is_closed() {
+                break;
+            }
             // Wait up to 80ms for the first event.  During hold, terminal
             // repeats at ~33ms so we catch 2–3 repeats per batch.
             if crossterm::event::poll(Duration::from_millis(80)).unwrap_or(false) {
