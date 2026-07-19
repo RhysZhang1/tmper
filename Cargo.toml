@@ -27,7 +27,7 @@ tracing-subscriber = "0.3"
 anyhow = "1"
 thiserror = "2"
 dirs = "6"
-futures-util = "0.3"
+
 rand = "0.8"
 walkdir = "2"
 regex = "1"

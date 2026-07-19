@@ -1,12 +1,11 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crossterm::event::{Event as CrosstermEvent, EventStream};
+use crossterm::event::{Event as CrosstermEvent};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use futures_util::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
@@ -25,14 +24,6 @@ use serde::{Deserialize, Serialize};
 pub(crate) mod handlers;
 pub(crate) mod persistence;
 pub(crate) mod playback;
-
-/// Tracks which branch of the event loop fired, used for draw throttling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EventKind {
-    Key,
-    Tick,
-    Resize,
-}
 
 pub struct App {
     config: Config,
@@ -115,66 +106,82 @@ impl App {
             self.start_fft();
         }
 
-        let mut reader = EventStream::new();
+        // ── Burst-mode input ──
+        // Instead of EventStream (one event → one draw), use a background
+        // thread that batch-reads events with poll(). When the user holds a
+        // key, terminal auto-repeat piles events into the PTY buffer. We
+        // drain them all at once, process the batch, then draw ONCE — no
+        // more « released the key but it kept scrolling ».
+        let (event_tx, mut event_rx) =
+            tokio::sync::mpsc::unbounded_channel::<Vec<CrosstermEvent>>();
+
+        tokio::task::spawn_blocking(move || loop {
+            // Wait up to 80ms for the first event.  During hold, terminal
+            // repeats at ~33ms so we catch 2–3 repeats per batch.
+            if crossterm::event::poll(Duration::from_millis(80)).unwrap_or(false) {
+                let mut batch = Vec::with_capacity(8);
+                if let Ok(e) = crossterm::event::read() {
+                    batch.push(e);
+                }
+                // Drain whatever is already waiting — this catches events
+                // the PTY buffered while we were reading the first one.
+                while crossterm::event::poll(Duration::ZERO).unwrap_or(false) {
+                    if let Ok(e) = crossterm::event::read() {
+                        batch.push(e);
+                    }
+                }
+                if event_tx.send(batch).is_err() {
+                    break; // receiver dropped (main loop exited)
+                }
+            }
+        });
+
         let mut tick_interval = tokio::time::interval(Duration::from_millis(
             (1000 / self.config.visualizer.frame_rate.max(1)) as u64,
         ));
 
-        // Draw throttling: key events always trigger an immediate redraw;
-        // tick-triggered draws are throttled to ~20 fps (50ms) to reduce
-        // CPU contention with the FFT thread and audio pipeline.
+        // Tick-only draw throttling: don't redraw faster than every 50ms
+        // on tick events (key batches always draw).
         let min_draw_interval = Duration::from_millis(50);
         let mut last_draw = std::time::Instant::now();
         let mut needs_draw = true;
 
         loop {
-            let mut event_kind: Option<EventKind> = None;
             tokio::select! {
-                crossterm_event = reader.next() => {
-                    match crossterm_event {
-                        Some(Ok(event)) => {
-                            match event {
-                                CrosstermEvent::Key(key) => {
-                                    let needs_bypass = matches!(self.ui_state.playlist_state.insert_mode, crate::ui::views::playlist_view::InsertMode::Typing(_));
-                                    if needs_bypass {
-                                        self.handle_event(crate::event::AppEvent::Key(key));
-                                    } else if let Some(app_event) = self.key_handler.process(key) {
-                                        self.handle_event(app_event);
+                batch = event_rx.recv() => {
+                    match batch {
+                        Some(events) => {
+                            for event in events {
+                                match event {
+                                    CrosstermEvent::Key(key) => {
+                                        let needs_bypass = matches!(self.ui_state.playlist_state.insert_mode, crate::ui::views::playlist_view::InsertMode::Typing(_));
+                                        if needs_bypass {
+                                            self.handle_event(crate::event::AppEvent::Key(key));
+                                        } else if let Some(app_event) = self.key_handler.process(key) {
+                                            self.handle_event(app_event);
+                                        }
                                     }
-                                    event_kind = Some(EventKind::Key);
+                                    CrosstermEvent::Resize(_, _) => {}
+                                    _ => {}
                                 }
-                                CrosstermEvent::Resize(_, _) => {
-                                    event_kind = Some(EventKind::Resize);
-                                }
-                                _ => {}
                             }
+                            needs_draw = true;
                         }
-                        Some(Err(e)) => {
-                            tracing::error!("Crossterm event error: {e}");
-                        }
-                        None => break,
+                        None => break, // channel closed
                     }
                 }
                 _ = tick_interval.tick() => {
                     self.handle_event(AppEvent::Tick);
-                    event_kind = Some(EventKind::Tick);
+                    let now = std::time::Instant::now();
+                    if now.duration_since(last_draw) >= min_draw_interval {
+                        needs_draw = true;
+                    }
                 }
             }
 
             if self.should_quit {
                 self.engine.stop();
                 break;
-            }
-
-            // Key events always trigger an immediate redraw.
-            // Tick events are throttled to min_draw_interval to reduce
-            // render contention during playback.
-            let now = std::time::Instant::now();
-            let is_key = matches!(event_kind, Some(EventKind::Key | EventKind::Resize));
-            let is_tick = matches!(event_kind, Some(EventKind::Tick))
-                && now.duration_since(last_draw) >= min_draw_interval;
-            if is_key || is_tick {
-                needs_draw = true;
             }
 
             if needs_draw {
@@ -199,7 +206,7 @@ impl App {
                 self.cover_renderer.render_kitty(&cover_params);
                 self.cover_renderer.render_chafa(&cover_params);
 
-                last_draw = now;
+                last_draw = std::time::Instant::now();
                 needs_draw = false;
             }
         }
