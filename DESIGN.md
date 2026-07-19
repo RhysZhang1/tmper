@@ -73,8 +73,7 @@ tmper 是一个运行在终端中的全功能音乐播放器。核心特性：
 │  │  ├─ file_browser_view.rs — 文件浏览器               │
 │  │  └─ settings_view.rs — 设置编辑器                   │
 │  └─ widgets/     — 可复用组件                          │
-│     ├─ help_popup.rs       — 帮助面板（键 0）           │
-│     ├─ lyrics_panel.rs     — 播放器内歌词面板           │
+│     ├─ help_popup.rs       — 帮助面板（键 8）           │
 │     └─ visualizer_panel.rs — 频谱渲染                   │
 └────────────────────────┬─────────────────────────────┘
                          │
@@ -585,8 +584,10 @@ pub struct Config {
 
 ```
 crossterm KeyEvent → KeyHandler (双键序列检测: gg, dd)
-    → handle_key_event() → 分发:
-        ├─ 视图切换键 (1-7, 0)
+    → handle_key_event():
+        ├─ [Cover-Escape Guard] 最近 200ms 内输出过封面数据?
+        │    └─ Yes & Key is Char → 丢弃 (防终端转义干扰)
+        ├─ 视图切换键 (1-7, 8)
         ├─ Esc (清除搜索/帮助)
         ├─ 搜索模式 (累积字符)
         ├─ 视图专用按键 (Playlists/Browser/Library/Settings)
@@ -597,7 +598,20 @@ crossterm KeyEvent → KeyHandler (双键序列检测: gg, dd)
 
 `KeyHandler` 记录上一个按键 + 时间戳。200ms 内收到第二个键 → 匹配序列（`gg` → JumpTop, `dd` → RemoveSelected）。超时 → 丢弃第一个键。
 
-### 9.3 全局快捷键
+### 9.3 Cover-Escape Guard
+
+SIXEL/Kitty 封面数据写入 stdout 后，部分终端（如 Konsole）可能将此转义序列中的字节误解释为 stdin 输入，产生虚假按键事件。处理机制：
+1. `CoverRenderer` 记录 `last_output_at`：仅在**实际向 stdout 输出封面数据**时更新（Kitty 协议 flush 后 / SIXEL flush 后）。
+2. 在 `handle_key_event()` 中：如果当前时间在 `last_output_at` 之后 200ms 内，屏蔽所有 `Char` 类型事件。
+3. `suppress_countdown` 在切歌后阻止封面渲染 10 帧（~330ms），避免转切期间触发 guard。
+4. 无封面、封面禁用、或被 `suppress_countdown` 阻止时不启动 guard。
+
+相比旧的固定 800ms 盲拦方案，改进为：
+- **精确触发**：仅在真正写封面数据时才启动计时窗口，而非切歌就盲等
+- **窗口更短**：200ms vs 800ms，仅为应对终端回显的延迟
+- **零误伤**：无封面时不阻拦任何按键
+
+### 9.4 全局快捷键
 
 | 键 | 事件 | 说明 |
 |----|------|------|
@@ -740,7 +754,6 @@ tmper/
 │   │   │   └── settings_view.rs#       设置编辑器
 │   │   └── widgets/            #     可复用组件
 │   │       ├── help_popup.rs   #       帮助面板
-│   │       ├── lyrics_panel.rs #       播放器内歌词
 │   │       └── visualizer_panel.rs #   频谱渲染组件
 │   │
 │   └── input/                  #   键盘输入

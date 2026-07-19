@@ -13,6 +13,7 @@ pub struct TrackInfo {
     pub album: Option<String>,
     pub album_artist: Option<String>,
     pub track_number: Option<u32>,
+    /// Reserved for future track-list display columns.
     #[allow(dead_code)]
     pub track_total: Option<u32>,
     pub disc_number: Option<u32>,

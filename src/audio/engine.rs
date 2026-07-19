@@ -122,7 +122,7 @@ impl AudioEngine {
     }
 
     /// Sync decode — blocks until the entire file is decoded and queued.
-    #[allow(dead_code)] // used by engine unit tests
+    #[cfg(test)]
     pub fn play_file(&mut self, path: &Path) -> AppResult<()> {
         self.cancel_decode();
         self.decoder = None;

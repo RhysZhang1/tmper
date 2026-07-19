@@ -78,17 +78,19 @@ impl App {
             return;
         }
 
-        // ── Cover-escape guard: block ALL printable-char events during ──
-        // the 800ms post-track-change window.  SIXEL/Kitty data can
-        // contain any ASCII byte, any of which the terminal may
-        // misinterpret as stdin input.  Restricting to a single key
-        // (like "8") is whack-a-mole — the next spurious byte will
-        // trigger something else.  Non-char keys (arrows, Esc, Enter,
-        // etc.) still pass through.
-        if let Some(until) = self.cover_guard_until {
-            if std::time::Instant::now() < until && matches!(key.code, KeyCode::Char(_)) {
-                return;
-            }
+        // ── Cover-escape guard: SIXEL/Kitty data written to stdout may be
+        // misinterpreted by the terminal as stdin input.  Block Char events
+        // for COVER_GUARD_MS after each actual cover-data write (not from
+        // track change — the window is proportional to real output activity).
+        // When cover art is disabled or no data was written, no guard fires.
+        const COVER_GUARD_MS: u64 = 200;
+        if matches!(key.code, KeyCode::Char(_))
+            && self
+                .cover_renderer
+                .last_output()
+                .is_some_and(|t| t.elapsed().as_millis() < COVER_GUARD_MS as u128)
+        {
+            return;
         }
 
         // View switching (works in all views)
@@ -102,19 +104,15 @@ impl App {
             KeyCode::Char('7') => self.switch_view(ViewMode::Settings),
             KeyCode::Char('8') => {
                 let now = std::time::Instant::now();
-                // Post-track-change guard: SIXEL/Kitty cover-art escape
-                // sequences on stdout can be misinterpreted by the terminal
-                // as stdin '8' events (0x38).  Block for 800ms after a
-                // track transition.
-                let cover_blocked = self
-                    .cover_guard_until
-                    .is_some_and(|t| now < t);
+                // 500ms cooldown prevents rapid reopen.
+                // (The blanket cover-escape guard above already blocks
+                // spurious '8' events from SIXEL/Kitty data.)
                 let cooldown_blocked = self
                     .ui_state
                     .view
                     .last_help_toggle
                     .is_some_and(|t| now.duration_since(t).as_millis() < 500);
-                if !cover_blocked && !cooldown_blocked {
+                if !cooldown_blocked {
                     self.ui_state.view.show_help = !self.ui_state.view.show_help;
                     self.ui_state.view.last_help_toggle = Some(now);
                 }

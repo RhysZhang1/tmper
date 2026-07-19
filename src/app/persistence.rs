@@ -186,13 +186,6 @@ impl App {
                         self.engine.set_volume(self.ui_state.volume);
                         self.load_lyrics_for_current();
                         self.start_fft();
-                        // Reset the cover-escape guard so the 800ms window
-                        // starts NOW (right before the event loop resumes),
-                        // not when on_track_ended() first set it (potentially
-                        // seconds ago if the sync decode path was used).
-                        self.cover_guard_until = Some(
-                            std::time::Instant::now() + std::time::Duration::from_millis(800),
-                        );
                         tracing::info!("Now playing: {:?}", path);
                     }
                     Err(e) => {

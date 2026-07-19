@@ -9,6 +9,7 @@ pub struct LyricLine {
 
 #[derive(Debug, Clone)]
 pub struct LyricTrack {
+    /// Reserved for future UI features (title/artist display, offset pre-apply).
     #[allow(dead_code)]
     pub metadata: LyricMetadata,
     pub lines: Vec<LyricLine>,

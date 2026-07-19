@@ -43,6 +43,10 @@ pub struct CoverRenderer {
     /// Decrements each frame. Set after track transitions to prevent
     /// terminal escape-sequence interference during state changes.
     suppress_countdown: u8,
+    /// Timestamp of the last actual write to stdout (Kitty or SIXEL).
+    /// Used by the event loop to guard against spurious stdin events
+    /// that the terminal may produce from escape-sequence data.
+    last_output_at: Option<std::time::Instant>,
 }
 
 impl CoverRenderer {
@@ -56,6 +60,7 @@ impl CoverRenderer {
             chafa_sixel_cache: None,
             clear_pending: false,
             suppress_countdown: 0,
+            last_output_at: None,
         }
     }
 
@@ -175,6 +180,7 @@ impl CoverRenderer {
                 }
                 let _ = std::io::stdout().flush();
                 self.kitty_rendered = true;
+                self.last_output_at = Some(std::time::Instant::now());
             }
             Err(e) => {
                 tracing::warn!("Failed to decode cover for Kitty protocol: {e}");
@@ -304,7 +310,16 @@ impl CoverRenderer {
             let _ = std::io::stdout().write_all(data);
             let _ = write!(std::io::stdout(), "\x1b[?25l");
             let _ = std::io::stdout().flush();
+            self.last_output_at = Some(std::time::Instant::now());
         }
+    }
+
+    /// Timestamp of the last stdout cover output, if any.
+    /// Used by the event loop to briefly suppress Char events after a
+    /// cover-data write, preventing terminal echo from producing
+    /// spurious key events.
+    pub fn last_output(&self) -> Option<std::time::Instant> {
+        self.last_output_at
     }
 }
 

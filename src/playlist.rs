@@ -35,31 +35,29 @@ impl Playlist {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
-        self.tracks.len()
-    }
-
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.tracks.is_empty()
-    }
-
     pub fn push(&mut self, entry: TrackEntry) {
         self.tracks.push(entry);
         if self.current_index.is_none() && !self.tracks.is_empty() {
             self.current_index = Some(0);
         }
     }
+}
 
-    #[allow(dead_code)]
+#[cfg(test)]
+impl Playlist {
+    pub fn len(&self) -> usize {
+        self.tracks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tracks.is_empty()
+    }
+
     pub fn remove(&mut self, index: usize) {
         if index >= self.tracks.len() {
             return;
         }
-
         self.tracks.remove(index);
-
         match self.current_index {
             Some(cur) if cur == index => {
                 if self.tracks.is_empty() {
@@ -76,7 +74,6 @@ impl Playlist {
         }
     }
 
-    #[allow(dead_code)]
     pub fn next(&mut self) -> Option<usize> {
         match self.current_index {
             Some(idx) if idx + 1 < self.tracks.len() => {
@@ -86,11 +83,7 @@ impl Playlist {
             _ => None,
         }
     }
-}
 
-#[cfg(test)]
-#[allow(dead_code)]
-impl Playlist {
     pub fn prev(&mut self) -> Option<usize> {
         match self.current_index {
             Some(idx) if idx > 0 => {
@@ -136,9 +129,6 @@ impl Playlist {
         }
     }
 
-    pub fn titles(&self) -> Vec<&str> {
-        self.tracks.iter().map(|t| t.title.as_str()).collect()
-    }
 }
 
 #[cfg(test)]

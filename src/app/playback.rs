@@ -101,14 +101,11 @@ impl App {
         // Reset transient playback and view state before loading next track.
         self.ui_state.player.reset_on_track_change();
         self.ui_state.view.reset_on_track_change();
-        // Suppress direct-to-stdout cover rendering for a few frames so
-        // SIXEL/Kitty escape sequences don't produce spurious stdin events
-        // while the terminal is processing the track switch.
+        // Suppress cover output for a few frames so the terminal finishes
+        // processing the track switch before we write SIXEL/Kitty data.
+        // The cover-escape Char guard (in handle_key_event) fires
+        // automatically for 200ms after each actual cover-data write.
         self.cover_renderer.suppress_frames(runtime::COVER_SUPPRESS_FRAMES);
-        // Block spurious '8' key events from cover-art escape sequences
-        // for 800ms after the track transition.
-        self.cover_guard_until =
-            Some(std::time::Instant::now() + Duration::from_millis(800));
 
         // Try playlist-scoped first
         if let Some(pl_idx) = self.ui_state.active_playlist {

@@ -5,7 +5,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::error::{AppError, AppResult};
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+/// Database row — stores ALL columns even though only `path`/`title`/`artist`
+/// are consumed in the current UI.  The rest are reserved for future features
+/// (sorting by year, filtering by genre/bitrate, etc.).
+#[expect(dead_code, reason = "DB schema — most fields reserved for future queries")]
 pub struct TrackRow {
     pub id: i64,
     pub path: String,
@@ -187,24 +190,6 @@ impl LibraryDb {
         Ok(row)
     }
 
-    #[allow(dead_code)]
-    pub fn query_all(&self) -> AppResult<Vec<TrackRow>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT * FROM tracks ORDER BY artist, album, track_num")
-            .map_err(|e| AppError::Config(format!("Failed to prepare query: {e}")))?;
-
-        let rows = stmt
-            .query_map([], row_from_db)
-            .map_err(|e| AppError::Config(format!("Failed to query: {e}")))?;
-
-        let mut result = Vec::new();
-        for row in rows {
-            result.push(row.map_err(|e| AppError::Config(format!("Failed to read row: {e}")))?);
-        }
-        Ok(result)
-    }
-
     pub fn search(&self, query: &str) -> AppResult<Vec<TrackRow>> {
         let pattern = format!("%{query}%");
         let mut stmt = self
@@ -279,26 +264,7 @@ impl LibraryDb {
         Ok(result)
     }
 
-    #[allow(dead_code)]
-    pub fn get_paths_in_dir(&self, dir_prefix: &str) -> AppResult<Vec<String>> {
-        let pattern = format!("{dir_prefix}%");
-        let mut stmt = self
-            .conn
-            .prepare("SELECT path FROM tracks WHERE path LIKE ?1")
-            .map_err(|e| AppError::Config(format!("Failed to prepare query: {e}")))?;
-
-        let rows = stmt
-            .query_map(params![pattern], |row| row.get(0))
-            .map_err(|e| AppError::Config(format!("Failed to query paths: {e}")))?;
-
-        let mut result = Vec::new();
-        for row in rows {
-            result.push(row.map_err(|e| AppError::Config(format!("Failed to read path: {e}")))?);
-        }
-        Ok(result)
-    }
-
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn delete_by_path(&self, path: &str) -> AppResult<()> {
         self.conn
             .execute("DELETE FROM tracks WHERE path = ?1", params![path])
@@ -306,7 +272,7 @@ impl LibraryDb {
         Ok(())
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn count(&self) -> AppResult<usize> {
         let count: usize = self
             .conn

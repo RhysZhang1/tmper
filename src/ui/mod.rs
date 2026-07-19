@@ -43,6 +43,8 @@ pub enum ViewMode {
 }
 
 #[derive(Debug, Clone)]
+/// Per-track display data stored in `PlayerCore.tracks`.
+/// `title`, `artist`, `duration_secs` reserved for sidebar info display.
 #[allow(dead_code)]
 pub struct TrackDisplay {
     pub path: std::path::PathBuf,

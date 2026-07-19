@@ -1,8 +1,8 @@
+#[cfg(test)]
 use std::path::PathBuf;
 
 /// Scan a directory for audio files matching the given extensions.
-/// Used by library view to populate file browser.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn scan_directory(dir: &std::path::Path, extensions: &[String]) -> Vec<PathBuf> {
     walkdir::WalkDir::new(dir)
         .follow_links(true)
