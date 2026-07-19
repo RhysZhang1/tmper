@@ -8,10 +8,6 @@ pub struct KeyHandler {
     last_key: Option<(KeyEvent, Instant)>,
     timeout_ms: u64,
     quit_key: KeyEvent,
-    /// Suppress terminal auto-repeat: same key arriving faster than this
-    /// threshold is assumed to be the terminal repeating, not the user.
-    last_debounce: Option<(KeyEvent, Instant)>,
-    debounce_ms: u64,
 }
 
 impl KeyHandler {
@@ -20,8 +16,6 @@ impl KeyHandler {
             last_key: None,
             timeout_ms,
             quit_key,
-            last_debounce: None,
-            debounce_ms: 80,
         }
     }
 
@@ -32,25 +26,6 @@ impl KeyHandler {
                 return None;
             }
         }
-
-        // ── Terminal auto-repeat dedup ──
-        // When the user holds a key, the terminal sends repeated KeyEvents
-        // at ~30 Hz. Without a release event we can't know for sure whether
-        // the user is holding or tapping, but we can rate-limit: same key
-        // arriving faster than debounce_ms is treated as a held key and
-        // suppressed. The first event is always processed for instant
-        // feedback; subsequent repeats must wait for the cooldown to expire.
-        let now = Instant::now();
-        if let Some((ref prev, ref mut last_time)) = self.last_debounce {
-            if prev.code == event.code
-                && prev.modifiers == event.modifiers
-                && now.duration_since(*last_time).as_millis() < self.debounce_ms as u128
-            {
-                *last_time = now;
-                return None;
-            }
-        }
-        self.last_debounce = Some((event, now));
 
         // Direct quit (configurable via keybindings)
         if event.code == self.quit_key.code && event.modifiers == self.quit_key.modifiers {

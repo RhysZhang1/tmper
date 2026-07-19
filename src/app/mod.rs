@@ -46,6 +46,7 @@ pub struct App {
     library_db: LibraryDb,
     fft_data: Arc<Mutex<Vec<f32>>>,
     cover_renderer: CoverRenderer,
+    last_seek_time: Option<std::time::Instant>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -82,6 +83,7 @@ impl App {
             fft_cancel_tx: None,
             fft_data: Arc::new(Mutex::new(Vec::new())),
             cover_renderer: CoverRenderer::new(),
+            last_seek_time: None,
         })
     }
 

@@ -311,21 +311,25 @@ impl App {
             self.move_selection(-1, visible_h);
         } else {
             match key.code {
-                // Seeking
-                KeyCode::Left => {
-                    if let Err(e) = self
-                        .engine
-                        .seek_relative(-(self.config.playback.seek_step_small_secs as f64))
-                    {
-                        tracing::error!("Seek error: {e}");
-                    }
-                }
-                KeyCode::Right => {
-                    if let Err(e) = self
-                        .engine
-                        .seek_relative(self.config.playback.seek_step_small_secs as f64)
-                    {
-                        tracing::error!("Seek error: {e}");
+                // Seeking — cooldown-protected because seek_relative()
+                // does a full sync re-decode, which freezes the UI at
+                // terminal auto-repeat rate (~30 Hz).  Skip seeks that
+                // arrive within 150ms of the last one.
+                KeyCode::Left | KeyCode::Right => {
+                    let now = std::time::Instant::now();
+                    let cooled_down = self
+                        .last_seek_time
+                        .is_none_or(|t| now.duration_since(t).as_millis() >= 150);
+                    if cooled_down {
+                        let delta = if key.code == KeyCode::Left {
+                            -(self.config.playback.seek_step_small_secs as f64)
+                        } else {
+                            self.config.playback.seek_step_small_secs as f64
+                        };
+                        if let Err(e) = self.engine.seek_relative(delta) {
+                            tracing::error!("Seek error: {e}");
+                        }
+                        self.last_seek_time = Some(now);
                     }
                 }
                 // Navigation
