@@ -78,6 +78,19 @@ impl App {
             return;
         }
 
+        // ── Cover-escape guard: block ALL printable-char events during ──
+        // the 800ms post-track-change window.  SIXEL/Kitty data can
+        // contain any ASCII byte, any of which the terminal may
+        // misinterpret as stdin input.  Restricting to a single key
+        // (like "8") is whack-a-mole — the next spurious byte will
+        // trigger something else.  Non-char keys (arrows, Esc, Enter,
+        // etc.) still pass through.
+        if let Some(until) = self.cover_guard_until {
+            if std::time::Instant::now() < until && matches!(key.code, KeyCode::Char(_)) {
+                return;
+            }
+        }
+
         // View switching (works in all views)
         match key.code {
             KeyCode::Char('1') => self.switch_view(ViewMode::Player),
