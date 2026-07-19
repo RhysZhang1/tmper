@@ -250,7 +250,10 @@ impl App {
 
     fn clamp_sidebar_scroll(&mut self, sidebar_total: usize) {
         let ps = &mut self.ui_state.playlist_state;
-        let vis = self.ui_state.visible_rows.get() / 2;
+        // visible_rows/2 ≈ terminal_height/2, but actual inner widget area is
+        // (terminal_height/2)-2 (50% of height minus block borders). Subtract 1
+        // for border offset so vis matches the real vis_h in render_mini_playlist.
+        let vis = (self.ui_state.visible_rows.get() / 2).saturating_sub(1);
         if ps.sidebar_selected >= sidebar_total {
             ps.sidebar_selected = sidebar_total.saturating_sub(1);
         }

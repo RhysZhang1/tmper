@@ -100,6 +100,12 @@ impl App {
             crate::error::AppError::Config(format!("Failed to create terminal: {e}"))
         })?;
 
+        // Seed visible_rows from actual terminal size so the first keypress
+        // uses the correct value instead of the hardcoded default (20).
+        if let Ok((_, rows)) = crossterm::terminal::size() {
+            self.ui_state.visible_rows.set(rows.saturating_sub(2) as usize);
+        }
+
         self.load_library_paths();
         self.load_playlists();
         if let Some(Command::Play { file }) = cli.command {

@@ -156,17 +156,7 @@ impl App {
                     if state.selected_playlist > 0 {
                         state.selected_playlist -= 1;
                     }
-                    if state.selected_playlist < state.scroll_playlists {
-                        state.scroll_playlists = state.selected_playlist;
-                    }
-                    if state.selected_playlist
-                        >= state.scroll_playlists + self.ui_state.visible_rows.get()
-                    {
-                        state.scroll_playlists = state
-                            .selected_playlist
-                            .saturating_sub(self.ui_state.visible_rows.get())
-                            + 1;
-                    }
+                    Self::clamp_playlist_scroll(state, self.ui_state.visible_rows.get());
                 }
             },
             KeyCode::Enter => match state.focused {
@@ -219,6 +209,10 @@ impl App {
                                 let total = new_model.total_lines();
                                 state.selected_playlist =
                                     state.selected_playlist.min(total.saturating_sub(1));
+                                Self::clamp_playlist_scroll(
+                                    state,
+                                    self.ui_state.visible_rows.get(),
+                                );
                             }
                         }
                         LineTarget::Empty(_) => { /* "(empty)" — no-op */ }
