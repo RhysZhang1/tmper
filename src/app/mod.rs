@@ -243,6 +243,14 @@ mod tests {
         app: App,
     }
 
+    impl Drop for TestApp {
+        fn drop(&mut self) {
+            // Cancel any background decode task so the tokio runtime
+            // can shut down cleanly.
+            self.app.engine.stop();
+        }
+    }
+
     impl TestApp {
         fn new() -> Self {
             let config = Config::default();

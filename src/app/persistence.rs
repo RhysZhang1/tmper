@@ -166,14 +166,7 @@ impl App {
                     self.ui_state.player.selected_index = idx;
                 }
 
-                let is_large = std::fs::metadata(path)
-                    .map(|m| m.len() > 50_000_000)
-                    .unwrap_or(false);
-                let result = if is_large {
-                    self.engine.play_file_async(path)
-                } else {
-                    self.engine.play_file(path)
-                };
+                let result = self.engine.play_file_async(path);
                 match result {
                     Ok(()) => {
                         self.ui_state.player.title = title;
@@ -193,6 +186,13 @@ impl App {
                         self.engine.set_volume(self.ui_state.volume);
                         self.load_lyrics_for_current();
                         self.start_fft();
+                        // Reset the cover-escape guard so the 800ms window
+                        // starts NOW (right before the event loop resumes),
+                        // not when on_track_ended() first set it (potentially
+                        // seconds ago if the sync decode path was used).
+                        self.cover_guard_until = Some(
+                            std::time::Instant::now() + std::time::Duration::from_millis(800),
+                        );
                         tracing::info!("Now playing: {:?}", path);
                     }
                     Err(e) => {
