@@ -296,6 +296,7 @@ impl CoverRenderer {
 
             // Cache the FULL output including any terminal setup sequences
             self.chafa_sixel_cache = Some(output.clone());
+            self.last_output_at = Some(std::time::Instant::now());
             tracing::info!(
                 "chafa SIXEL: {} bytes cached (area {}x{})",
                 output.len(),
@@ -304,13 +305,16 @@ impl CoverRenderer {
             );
         }
 
-        // Re-send FULL cached data every frame
+        // Re-send FULL cached data every frame (required because ratatui
+        // redraws clear the terminal and SIXEL does not persist).
+        // We do NOT record last_output_at here — only on content change
+        // above — because the every-frame re-send would permanently re-arm
+        // the cover-escape guard and block all Char input on Player view.
         if let Some(ref data) = self.chafa_sixel_cache {
             let _ = write!(std::io::stdout(), "\x1b[{};{}H", y_char + 1, x_char + 1);
             let _ = std::io::stdout().write_all(data);
             let _ = write!(std::io::stdout(), "\x1b[?25l");
             let _ = std::io::stdout().flush();
-            self.last_output_at = Some(std::time::Instant::now());
         }
     }
 
