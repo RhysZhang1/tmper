@@ -7,11 +7,9 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
-#[derive(Debug, Clone)]
-pub struct PlaylistData {
-    pub name: String,
-    pub songs: Vec<PathBuf>,
-}
+/// Playlist data model lives in `crate::playlist` — single model shared by
+/// UI, persistence, and M3U I/O. Re-exported here for UI call sites.
+pub use crate::playlist::PlaylistData;
 
 // ═══════════════════════════════════════════════════════════════════════
 // PlaylistFlatModel — single source of truth for flat-line playlist layout

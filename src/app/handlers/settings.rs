@@ -80,22 +80,8 @@ impl App {
         }
         let mut count = 0usize;
         for pl_data in &playlists {
-            let mut playlist = crate::playlist::Playlist::new(&pl_data.name);
-            for song in &pl_data.songs {
-                let title = song
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("Unknown")
-                    .to_string();
-                playlist.push(crate::playlist::TrackEntry::new(
-                    song.clone(),
-                    title,
-                    String::new(),
-                    0.0,
-                ));
-            }
             let export_path = crate::paths::data_dir().join(format!("{}.m3u", pl_data.name));
-            if crate::library::playlist_manager::export_m3u(&playlist, &export_path).is_ok() {
+            if crate::library::playlist_manager::export_m3u(pl_data, &export_path).is_ok() {
                 count += 1;
             }
         }

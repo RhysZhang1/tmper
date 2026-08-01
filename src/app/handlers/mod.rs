@@ -540,15 +540,9 @@ impl App {
             crate::input::command::Command::Import(path) => {
                 let import_path = std::path::PathBuf::from(&path);
                 match crate::library::playlist_manager::import_m3u(&import_path) {
-                    Ok(playlist) => {
-                        let songs: Vec<std::path::PathBuf> =
-                            playlist.tracks.iter().map(|t| t.path.clone()).collect();
-                        let name = playlist.name.clone();
-                        let count = playlist.tracks.len();
-                        self.ui_state
-                            .playlist_state
-                            .playlists
-                            .push(crate::ui::views::playlist_view::PlaylistData { name, songs });
+                    Ok(playlist_data) => {
+                        let count = playlist_data.songs.len();
+                        self.ui_state.playlist_state.playlists.push(playlist_data);
                         self.save_playlists();
                         self.ui_state.notification = Some((
                             format!("Imported: {count} tracks"),
@@ -569,23 +563,9 @@ impl App {
                     .enumerate()
                     .find(|(_, p)| p.name.to_lowercase() == name.to_lowercase())
                 {
-                    let mut playlist = crate::playlist::Playlist::new(&pl_data.name);
-                    for song in &pl_data.songs {
-                        let title = song
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("Unknown")
-                            .to_string();
-                        playlist.push(crate::playlist::TrackEntry::new(
-                            song.clone(),
-                            title,
-                            String::new(),
-                            0.0,
-                        ));
-                    }
                     let export_path =
                         crate::paths::data_dir().join(format!("{}.m3u", pl_data.name));
-                    match crate::library::playlist_manager::export_m3u(&playlist, &export_path) {
+                    match crate::library::playlist_manager::export_m3u(pl_data, &export_path) {
                         Ok(()) => {
                             self.ui_state.notification = Some((
                                 format!("Exported to {}", export_path.display()),

@@ -35,6 +35,10 @@
 - **实现**：`search_mode` 迁入 `UiState`；`/`（仅 Player 视图）实时过滤播放器队列（title/artist/path 不区分大小写子串），左上面板显示 `Search: <query>` 结果列表；j/k 导航、Enter 播放退出、Esc/空退格退出；切视图清空
 - `search_matches()` 辅助函数 + `test_search_enter_filter_navigate_exit`（56 total）
 
+### 6. Playlist 模型合并（消除双模型）
+- **根因**：`crate::playlist::{Playlist, TrackEntry}` 仅是 M3U 中转——导出时元数据是合成的假数据（file_stem 标题），导入后又被丢弃；3 处导出站点重复同样的转换
+- **实现**：`PlaylistData { name, songs: Vec<PathBuf> }` 成为唯一模型（移入 `crate::playlist`，`playlist_view` re-export）；`import_m3u` 返回 `PlaylistData`、`export_m3u` 接受 `&PlaylistData`；删除 `Playlist`/`TrackEntry` 及 7 个死代码测试（49 total）；3 处导出站点各减 ~15 行
+
 ## 验证
 
 ```
@@ -46,7 +50,6 @@ cargo test                        ✅ 55 passed（54 + 1 新增）
 ## 已知遗留
 
 - 封面渲染架构债（stdout 直接写终端协议）——另行专项
-- 两个 playlist 模型（`crate::playlist::Playlist` vs `playlist_view::PlaylistData`）可合并
 - FFT 数据每 tick `data.clone()` 全量拷贝（~30fps，32 浮点，量级可忽略）
 - seek 时若处于暂停状态会恢复播放时钟（既有行为，未在本次改动）
 - 无 git remote（备份风险，等用户定托管位置）

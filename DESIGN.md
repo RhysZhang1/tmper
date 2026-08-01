@@ -646,9 +646,9 @@ SIXEL/Kitty 封面数据写入 stdout 后，部分终端（如 Konsole）可能�
 | library/playlist_manager.rs | 2 | M3U 往返、相对路径 |
 | metadata/reader.rs | 3 | FLAC、WAV（无标签）、不存在的文件 |
 | input/command.rs | 4 | quit、theme、volume、unknown |
-| playlist.rs | 7 | push、next/prev、remove、shuffle、insert、边界条件 |
-| app/mod.rs | 12 | 视图切换、音量、循环模式、加载播放、停止、命令模式（集成式） |
-| **总计** | **54** | **42 单元 + 12 集成** |
+| playlist.rs | — | （v3.5 后仅存 `PlaylistData` 数据模型，逻辑并入 playlist_view） |
+| app/mod.rs | 12 | 视图切换、音量、循环、加载播放、停止、命令模式、搜索（集成式） |
+| **总计** | **49** | **37 单元 + 12 集成** |
 
 ### 10.2 运行测试
 
@@ -702,7 +702,7 @@ tmper/
 │   ├── constants.rs            #   运行时调优常量（集中管理 magic numbers）
 │   ├── error.rs                #   AppError + AppResult<T>
 │   ├── event.rs                #   AppEvent 枚举
-│   ├── playlist.rs             #   TrackEntry + Playlist 数据结构
+│   ├── playlist.rs             #   PlaylistData 数据结构（唯一歌单模型）
 │   ├── paths.rs                #   项目内路径工具（config_dir, data_dir）
 │   │
 │   ├── app/                    #   应用核心
