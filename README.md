@@ -43,7 +43,7 @@
 - 播放器两栏布局：左侧封面+歌单 / 右侧歌词+频谱+控制栏
 - Vim 风格模态键盘、`gg`/`dd` 双键序列、`/` 搜索
 - 命令模式（`:` 进入，类似 Vim 底栏）
-- 帮助面板（按 `0`）
+- 帮助面板（按 `8`）
 
 ### 配置与持久化
 - 5 套内置主题：Tokyo Night、Dracula、Nord、Solarized Dark、Catppuccin Mocha
@@ -182,7 +182,7 @@ theme = "dracula"
 | `r` | 切换循环模式（顺序 / 随机 / 单曲） |
 | `/` | 搜索过滤 |
 | `1`–`7` | 切换视图 |
-| `0` | 帮助面板 |
+| `8` | 帮助面板 |
 | `[` `]` `{` `}` | 歌词偏移微调 |
 | `Ctrl+r` | 重置歌词偏移 |
 | `q` | 退出 |
@@ -364,7 +364,7 @@ tmper/
 ```bash
 cargo build                        # 调试编译
 cargo build --release              # 发布编译（单文件 ~7MB）
-cargo test                         # 全部测试（41 个）
+cargo test                         # 全部测试（54 个）
 cargo clippy -- -D warnings        # 代码检查
 cargo fmt --all                    # 格式化
 

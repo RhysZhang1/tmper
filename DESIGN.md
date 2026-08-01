@@ -123,7 +123,7 @@ tmper 是一个运行在终端中的全功能音乐播放器。核心特性：
 │      从 pcm_buffer 读取 PCM 采样                      │
 │      → FftAnalyzer.process()                         │
 │      → SpectrumProcessor.process()                   │
-│      → 通过 AppEvent::VisualizerData 发送回主线程      │
+│      → 写入共享 fft_data（Arc<Mutex<Vec<f32>>>），主循环 tick 读取      │
 │      sleep(32ms)  // ~31 FPS                         │
 │    }                                                 │
 │                                                      │
@@ -395,7 +395,7 @@ pub type AppResult<T> = anyhow::Result<T>;
 4. 主循环 Tick (每 ~33ms):
       │
       ├─ engine.position_secs() → 更新 UI 进度条
-      ├─ 读取 pcm_buffer → 通过 FFT 线程 → VisualizerData 事件 → 更新频谱
+      ├─ 读取共享 fft_data（Arc<Mutex>）→ 更新频谱
       ├─ LyricEngine::sync(position) → 更新当前歌词行
       └─ 检测 is_playing() && sink.empty() → on_track_ended()
             └─ 根据 RepeatMode 自动切歌 / 停止
@@ -482,9 +482,7 @@ pub enum AppEvent {
     Tick,                      // 定时触发（~30 FPS）
     Quit,                      // 退出
     JumpTop,                   // gg 跳到顶部
-    JumpBottom,                // G 跳到底部
     RemoveSelected,            // dd 删除选中
-    VisualizerData(Vec<f32>),  // FFT 频谱数据
 }
 ```
 
@@ -637,7 +635,7 @@ SIXEL/Kitty 封面数据写入 stdout 后，部分终端（如 Konsole）可能�
 
 | 模块 | 测试数 | 覆盖内容 |
 |------|--------|----------|
-| audio/decoder.rs | 2 | 解码 WAV、不存在的文件 |
+| audio/decoder.rs | 3 | 解码 WAV、不存在的文件、seek |
 | audio/engine.rs | 4 | 生命周期、位置追踪、停止、排队 |
 | lyrics/parser.rs | 7 | 标准 LRC、元数据、多时间戳、逐字、空文件、损坏行、排序 |
 | visualizer/fft.rs | 1 | 440Hz 峰值检测 |
@@ -648,8 +646,9 @@ SIXEL/Kitty 封面数据写入 stdout 后，部分终端（如 Konsole）可能�
 | library/playlist_manager.rs | 2 | M3U 往返、相对路径 |
 | metadata/reader.rs | 3 | FLAC、WAV（无标签）、不存在的文件 |
 | input/command.rs | 4 | quit、theme、volume、unknown |
-| playlist.rs | 9 | push、next/prev、remove、shuffle、insert、边界条件 |
-| **总计** | **41** | **全部通过** |
+| playlist.rs | 7 | push、next/prev、remove、shuffle、insert、边界条件 |
+| app/mod.rs | 12 | 视图切换、音量、循环模式、加载播放、停止、命令模式（集成式） |
+| **总计** | **54** | **42 单元 + 12 集成** |
 
 ### 10.2 运行测试
 
@@ -790,7 +789,6 @@ tmper/
 | 编码 | encoding_rs | 0.8 | GBK/Shift-JIS 歌词编码检测 |
 | 日志 | tracing + tracing-subscriber | 0.1/0.3 | 结构化日志 |
 | 错误 | thiserror + anyhow | 2/1 | 错误类型 + 传播 |
-| 终端流 | futures-util | 0.3 | crossterm EventStream |
 
 ---
 
