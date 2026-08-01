@@ -35,6 +35,9 @@ pub struct CoverRenderer {
     chafa_available: bool,
     last_cover_gen_chafa: u64,
     chafa_sixel_cache: Option<Vec<u8>>,
+    /// Last area (x,y,w,h) the SIXEL payload was rendered for. Re-send when it
+    /// changes (terminal resize) since a one-time send won't reposition.
+    last_chafa_rect: Option<(u16, u16, u16, u16)>,
     /// Set to `true` when leaving the player view — the event loop calls
     /// `terminal.clear()` before the next ratatui draw so the internal diff
     /// buffer covers all cells and overwrites any SIXEL residue.
@@ -58,6 +61,7 @@ impl CoverRenderer {
             chafa_available,
             last_cover_gen_chafa: 0,
             chafa_sixel_cache: None,
+            last_chafa_rect: None,
             clear_pending: false,
             suppress_countdown: 0,
             last_output_at: None,
@@ -206,6 +210,7 @@ impl CoverRenderer {
             }
             self.chafa_sixel_cache = None;
             self.last_cover_gen_chafa = 0;
+            self.last_chafa_rect = None;
             return;
         }
         // Hide cover when overlays (help, command input) are on top
@@ -215,6 +220,7 @@ impl CoverRenderer {
             }
             self.chafa_sixel_cache = None;
             self.last_cover_gen_chafa = 0;
+            self.last_chafa_rect = None;
             return;
         }
 
@@ -234,13 +240,21 @@ impl CoverRenderer {
             }
             self.chafa_sixel_cache = None;
             self.last_cover_gen_chafa = 0;
+            self.last_chafa_rect = None;
             return;
         }
 
-        // Regenerate cache when cover art changes
+        // Regenerate AND send the SIXEL payload when the cover art changes,
+        // the render area changes (terminal resize), or we've switched back to
+        // the player view. SIXEL is a persistent graphics layer on Konsole, so
+        // a single send per change is enough — the old every-frame re-send was
+        // the source of spurious stdin events (phantom keys) and UI lag.
         let gen = params.cover_gen;
-        if self.chafa_sixel_cache.is_none() || gen != self.last_cover_gen_chafa {
+        let rect = (x_char, y_char, w_char, h_char);
+        let rect_changed = self.last_chafa_rect != Some(rect);
+        if self.chafa_sixel_cache.is_none() || gen != self.last_cover_gen_chafa || rect_changed {
             self.last_cover_gen_chafa = gen;
+            self.last_chafa_rect = Some(rect);
 
             let cover = match params.cover_art {
                 Some(ref c) => c.clone(),
@@ -303,18 +317,17 @@ impl CoverRenderer {
                 w_char,
                 h_char
             );
-        }
 
-        // Re-send FULL cached data every frame (required because ratatui
-        // redraws clear the terminal and SIXEL does not persist).
-        // We do NOT record last_output_at here — only on content change
-        // above — because the every-frame re-send would permanently re-arm
-        // the cover-escape guard and block all Char input on Player view.
-        if let Some(ref data) = self.chafa_sixel_cache {
-            let _ = write!(std::io::stdout(), "\x1b[{};{}H", y_char + 1, x_char + 1);
-            let _ = std::io::stdout().write_all(data);
-            let _ = write!(std::io::stdout(), "\x1b[?25l");
-            let _ = std::io::stdout().flush();
+            // Send the payload once. `last_output_at` is recorded above so the
+            // cover-escape guard suppresses phantom input only around this
+            // single write, not permanently (the old every-frame re-send never
+            // re-armed the guard, leaving it ineffective).
+            if let Some(ref data) = self.chafa_sixel_cache {
+                let _ = write!(std::io::stdout(), "\x1b[{};{}H", y_char + 1, x_char + 1);
+                let _ = std::io::stdout().write_all(data);
+                let _ = write!(std::io::stdout(), "\x1b[?25l");
+                let _ = std::io::stdout().flush();
+            }
         }
     }
 
