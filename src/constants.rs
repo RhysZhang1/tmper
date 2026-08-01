@@ -21,6 +21,10 @@ pub mod runtime {
     /// Single-step volume delta used by the global up/down keybindings.
     pub const VOLUME_STEP: f32 = 0.05;
 
+    /// Rows treated as the visible page height for scroll/navigation
+    /// (Ctrl+d / Ctrl+u move by half of this).
+    pub const VISIBLE_ROWS: u16 = 10;
+
     // ── Notifications ──
 
     /// How long a mode-change / action notification stays visible (seconds).

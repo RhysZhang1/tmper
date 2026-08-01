@@ -281,7 +281,7 @@ impl App {
     }
 
     fn handle_global_key(&mut self, key: KeyEvent) {
-        let visible_h = 10u16;
+        let visible_h = runtime::VISIBLE_ROWS;
 
         // `:` enters command mode (like Vim)
         if key.code == KeyCode::Char(':') && key.modifiers.is_empty() {
