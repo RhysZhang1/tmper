@@ -48,7 +48,7 @@
 ### 配置与持久化
 - 5 套内置主题：Tokyo Night、Dracula、Nord、Solarized Dark、Catppuccin Mocha
 - 自定义快捷键（`config/keybindings.toml`）
-- 退出自动保存状态，下次启动恢复
+- 退出自动保存状态，下次启动恢复音量、循环模式与歌词偏移（不自动恢复上次曲目）
 
 ---
 
@@ -134,8 +134,7 @@ tmper play ~/Music/歌曲.flac  # 播放指定文件
 ### 播放音乐
 
 ```bash
-tmper play ~/Music/song.flac   # 播放单曲
-tmper play ~/Music/Queen/      # 播放整个目录
+tmper play ~/Music/song.flac   # 播放单曲（目录播放暂未实现，请传入单个文件）
 ```
 
 `j`/`k` 移动光标，`Enter` 播放选中曲目，`Space` 暂停/恢复。
@@ -213,27 +212,17 @@ theme = "dracula"
 
 ### config/config.toml
 
-```toml
-[library]
-music_dirs = ["~/Music"]
-extensions = ["mp3", "flac", "ogg", "opus", "wav", "aac", "m4a", "ape", "wv", "aiff", "wma"]
-scan_on_startup = false
+首次运行时由 `config/default.toml` 自动复制生成，之后修改 `config/config.toml` 生效。
 
+```toml
 [playback]
 default_volume = 0.8
-gapless = true
 seek_step_small_secs = 5
 
-
 [visualizer]
-enabled = true
 num_bars = 32
 frame_rate = 30
 smoothing = 0.35
-
-[lyrics]
-auto_load = true
-encoding_fallbacks = ["utf-8", "gbk", "shift-jis"]
 
 [ui]
 theme = "tokyo-night"
@@ -278,7 +267,7 @@ down = "j"
 
 ### Q: 如何添加更多音乐？
 
-编辑 `config/config.toml` 的 `music_dirs`，或使用 `:import <path.m3u>` 导入 M3U 歌单。
+使用文件浏览器（键 `6`）浏览本地音乐，或使用 `:import <path.m3u>` 导入 M3U 歌单。
 
 ### Q: 支持哪些音频格式？
 
@@ -300,7 +289,8 @@ tmper/
 ├── README.md                     # 本文件
 │
 ├── config/                       # 配置文件（自包含）
-│   ├── config.toml               #   主配置
+│   ├── default.toml              #   默认配置模板
+│   ├── config.toml               #   主配置（首次运行由 default.toml 自动生成）
 │   └── keybindings.toml          #   快捷键
 │
 ├── data/                         # 运行时数据（自动生成）
@@ -309,7 +299,7 @@ tmper/
 │   ├── playlists.json            #   歌单
 │   └── library.db                #   SQLite 曲库
 │
-├── src/                          # 源代码 (~7,400 行 Rust)
+├── src/                          # 源代码 (~8,000 行 Rust)
 │   ├── main.rs                   #   入口
 │   ├── constants.rs              #   运行时调优常量
 │   ├── config.rs                 #   配置加载
@@ -354,7 +344,9 @@ tmper/
 │       └── command.rs            #     命令解析
 │
 └── tests/fixtures/               # 测试音频
-    └── test.wav                  #   440Hz 正弦波
+    ├── test.wav                  #   440Hz 正弦波
+    ├── test.flac                 #   带完整标签的 FLAC
+    └── test_notags.wav           #   无标签 WAV（验证回退）
 ```
 
 ---
@@ -364,7 +356,7 @@ tmper/
 ```bash
 cargo build                        # 调试编译
 cargo build --release              # 发布编译（单文件 ~7MB）
-cargo test                         # 全部测试（54 个）
+cargo test                         # 全部测试（53 个）
 cargo clippy -- -D warnings        # 代码检查
 cargo fmt --all                    # 格式化
 

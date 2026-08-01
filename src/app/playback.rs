@@ -105,7 +105,8 @@ impl App {
         // processing the track switch before we write SIXEL/Kitty data.
         // The cover-escape Char guard (in handle_key_event) fires
         // automatically for 200ms after each actual cover-data write.
-        self.cover_renderer.suppress_frames(runtime::COVER_SUPPRESS_FRAMES);
+        self.cover_renderer
+            .suppress_frames(runtime::COVER_SUPPRESS_FRAMES);
 
         // Try playlist-scoped first
         if let Some(pl_idx) = self.ui_state.active_playlist {
@@ -259,7 +260,8 @@ impl App {
             if track.lines.is_empty() {
                 return;
             }
-            let adjusted_pos = position_secs + self.ui_state.lyrics.lyrics_offset_ms as f64 / 1000.0;
+            let adjusted_pos =
+                position_secs + self.ui_state.lyrics.lyrics_offset_ms as f64 / 1000.0;
             let idx = LyricEngine::sync(
                 track,
                 adjusted_pos.max(0.0),

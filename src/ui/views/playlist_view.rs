@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
@@ -10,6 +10,8 @@ use unicode_width::UnicodeWidthStr;
 /// Playlist data model lives in `crate::playlist` — single model shared by
 /// UI, persistence, and M3U I/O. Re-exported here for UI call sites.
 pub use crate::playlist::PlaylistData;
+
+use crate::ui::theme::Theme;
 
 // ═══════════════════════════════════════════════════════════════════════
 // PlaylistFlatModel — single source of truth for flat-line playlist layout
@@ -107,6 +109,7 @@ impl<'a> PlaylistFlatModel<'a> {
         &self,
         is_focused: bool,
         insert_mode: &InsertMode,
+        theme: &Theme,
         cursor: usize,
         playing_song_check: impl Fn(&PathBuf) -> bool,
     ) -> Vec<(String, ratatui::style::Style)> {
@@ -118,7 +121,7 @@ impl<'a> PlaylistFlatModel<'a> {
             (
                 format!("... {}", s),
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(theme.warning)
                     .add_modifier(Modifier::BOLD),
             )
         } else {
@@ -126,11 +129,11 @@ impl<'a> PlaylistFlatModel<'a> {
                 "...".to_string(),
                 if is_cursor {
                     Style::default()
-                        .fg(Color::White)
-                        .bg(Color::Yellow)
+                        .fg(theme.text)
+                        .bg(theme.warning)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::Yellow)
+                    Style::default().fg(theme.warning)
                 },
             )
         };
@@ -145,11 +148,11 @@ impl<'a> PlaylistFlatModel<'a> {
                 format!("{} {}", icon, pl.name),
                 if is_cursor {
                     Style::default()
-                        .fg(Color::White)
-                        .bg(Color::DarkGray)
+                        .fg(theme.text)
+                        .bg(theme.muted)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::Gray)
+                    Style::default().fg(theme.secondary)
                 },
             ));
             line_idx += 1;
@@ -160,9 +163,9 @@ impl<'a> PlaylistFlatModel<'a> {
                     lines.push((
                         "  (empty)".to_string(),
                         if is_cursor {
-                            Style::default().fg(Color::White).bg(Color::Cyan)
+                            Style::default().fg(theme.text).bg(theme.primary)
                         } else {
-                            Style::default().fg(Color::DarkGray)
+                            Style::default().fg(theme.muted)
                         },
                     ));
                     line_idx += 1;
@@ -175,13 +178,13 @@ impl<'a> PlaylistFlatModel<'a> {
                         lines.push((
                             format!("{}{}", prefix, name),
                             if is_cursor {
-                                Style::default().fg(Color::White).bg(Color::Cyan)
+                                Style::default().fg(theme.text).bg(theme.primary)
                             } else if is_playing {
                                 Style::default()
-                                    .fg(Color::Green)
+                                    .fg(theme.success)
                                     .add_modifier(Modifier::BOLD)
                             } else {
-                                Style::default().fg(Color::DarkGray)
+                                Style::default().fg(theme.muted)
                             },
                         ));
                         line_idx += 1;
@@ -241,14 +244,19 @@ impl Default for PlaylistManagerState {
     }
 }
 
-pub fn render_playlist_view(f: &mut Frame, area: Rect, state: &PlaylistManagerState) {
+pub fn render_playlist_view(
+    f: &mut Frame,
+    area: Rect,
+    theme: &Theme,
+    state: &PlaylistManagerState,
+) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
         .split(area);
 
-    render_library_panel(f, cols[0], state);
-    render_playlists_panel(f, cols[1], state);
+    render_library_panel(f, cols[0], theme, state);
+    render_playlists_panel(f, cols[1], theme, state);
 
     // Notification overlay
     if let Some((ref msg, _)) = state.notification {
@@ -261,18 +269,18 @@ pub fn render_playlist_view(f: &mut Frame, area: Rect, state: &PlaylistManagerSt
         let para = Paragraph::new(msg.as_str()).block(
             Block::default()
                 .borders(Borders::ALL)
-                .style(Style::default().fg(Color::Yellow)),
+                .style(Style::default().fg(theme.warning)),
         );
         f.render_widget(para, popup);
     }
 }
 
-fn render_library_panel(f: &mut Frame, area: Rect, state: &PlaylistManagerState) {
+fn render_library_panel(f: &mut Frame, area: Rect, theme: &Theme, state: &PlaylistManagerState) {
     let is_focused = state.focused == PlaylistPanel::Library;
     let border_style = if is_focused {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(theme.primary)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme.muted)
     };
 
     // ISSUE 4: cursor always visible
@@ -286,11 +294,11 @@ fn render_library_panel(f: &mut Frame, area: Rect, state: &PlaylistManagerState)
             let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
             let style = if (start + i) == state.selected_library_song && is_focused {
                 Style::default()
-                    .fg(Color::White)
-                    .bg(Color::DarkGray)
+                    .fg(theme.text)
+                    .bg(theme.muted)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Gray)
+                Style::default().fg(theme.secondary)
             };
             ListItem::new(Line::from(Span::styled(name, style)))
         })
@@ -305,18 +313,19 @@ fn render_library_panel(f: &mut Frame, area: Rect, state: &PlaylistManagerState)
     f.render_widget(list, area);
 }
 
-fn render_playlists_panel(f: &mut Frame, area: Rect, state: &PlaylistManagerState) {
+fn render_playlists_panel(f: &mut Frame, area: Rect, theme: &Theme, state: &PlaylistManagerState) {
     let is_focused = state.focused == PlaylistPanel::Playlists;
     let border_style = if is_focused {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(theme.primary)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme.muted)
     };
 
     let model = PlaylistFlatModel::new(&state.playlists, state.expanded_playlist);
     let lines = model.build_styled_lines(
         is_focused,
         &state.insert_mode,
+        theme,
         state.selected_playlist,
         |_| false,
     );

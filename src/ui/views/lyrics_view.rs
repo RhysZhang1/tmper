@@ -5,12 +5,14 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::lyrics::types::LyricTrack;
+use crate::ui::theme::Theme;
 
 pub fn render_lyrics_view(
     f: &mut Frame,
     area: Rect,
+    theme: &Theme,
     track: &LyricTrack,
-    current_line_index: usize,
+    current_index: usize,
     offset_ms: i64,
 ) {
     let visible_lines = area.height.saturating_sub(2) as usize; // borders
@@ -30,8 +32,8 @@ pub fn render_lyrics_view(
     let half = visible_lines / 2;
     let total = track.lines.len();
 
-    let start = if current_line_index > half {
-        current_line_index.saturating_sub(half)
+    let start = if current_index > half {
+        current_index.saturating_sub(half)
     } else {
         0
     };
@@ -40,15 +42,15 @@ pub fn render_lyrics_view(
     let lines: Vec<Line> = (start..end)
         .map(|i| {
             let lyric = &track.lines[i];
-            let is_current = i == current_line_index;
-            let is_past = i < current_line_index;
+            let is_current = i == current_index;
+            let is_past = i < current_index;
 
             let style = if is_current {
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(theme.primary)
                     .add_modifier(Modifier::BOLD)
             } else if is_past {
-                let dist = current_line_index.saturating_sub(i) as f32;
+                let dist = current_index.saturating_sub(i) as f32;
                 let fade = (dist / half.max(1) as f32).min(1.0);
                 let gray = (200.0 * (1.0 - fade * 0.6)) as u8;
                 Style::default().fg(Color::Rgb(gray, gray, gray))

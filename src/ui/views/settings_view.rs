@@ -6,6 +6,7 @@ use ratatui::Frame;
 
 use crate::config::Config;
 use crate::input::keymap::KeyBindings;
+use crate::ui::theme::Theme;
 
 /// One row in the settings list.
 pub struct SettingItem {
@@ -36,32 +37,12 @@ pub fn rebuild_settings(state: &mut SettingsState, config: &Config, key_bindings
             value: format!("{:.2}", config.visualizer.smoothing),
         },
         SettingItem {
-            name: "频谱色彩".into(),
-            value: config.visualizer.color_scheme.clone(),
-        },
-        SettingItem {
             name: "默认音量".into(),
             value: format!("{:.0}%", config.playback.default_volume * 100.0),
         },
         SettingItem {
             name: "快进退步长".into(),
             value: format!("{} 秒", config.playback.seek_step_small_secs),
-        },
-        SettingItem {
-            name: "启动扫描".into(),
-            value: if config.library.scan_on_startup {
-                "是".into()
-            } else {
-                "否".into()
-            },
-        },
-        SettingItem {
-            name: "无缝播放".into(),
-            value: if config.playback.gapless {
-                "开启".into()
-            } else {
-                "关闭".into()
-            },
         },
         SettingItem {
             name: "显示封面图".into(),
@@ -129,7 +110,7 @@ pub fn rebuild_settings(state: &mut SettingsState, config: &Config, key_bindings
     state.items = items;
 }
 
-pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsState) {
+pub fn render_settings_view(f: &mut Frame, area: Rect, theme: &Theme, state: &SettingsState) {
     let vis_h = area.height.saturating_sub(2) as usize;
     let total = state.items.len();
     let start = state.scroll.min(total.saturating_sub(1));
@@ -147,11 +128,11 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsState) {
                 let style = if is_cursor {
                     Style::default()
                         .fg(Color::Black)
-                        .bg(Color::Green)
+                        .bg(theme.success)
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
-                        .fg(Color::Green)
+                        .fg(theme.success)
                         .add_modifier(Modifier::BOLD)
                 };
                 ListItem::new(Line::from(Span::styled(
@@ -161,18 +142,18 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsState) {
             } else {
                 let val_style = if is_cursor {
                     Style::default()
-                        .fg(Color::White)
-                        .bg(Color::DarkGray)
+                        .fg(theme.text)
+                        .bg(theme.muted)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::Green)
+                    Style::default().fg(theme.success)
                 };
 
                 let line = Line::from(vec![
                     Span::styled(
                         format!("  {:<24}", item.name),
                         Style::default()
-                            .fg(Color::Cyan)
+                            .fg(theme.primary)
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(&item.value, val_style),
@@ -186,7 +167,7 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsState) {
         Block::default()
             .borders(Borders::ALL)
             .title(" 设置 -- j/k 导航  Enter/←→ 修改  q/7 返回 ")
-            .border_style(Style::default().fg(Color::Yellow)),
+            .border_style(Style::default().fg(theme.warning)),
     );
     f.render_widget(list, area);
 }

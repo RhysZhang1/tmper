@@ -99,9 +99,7 @@ mod tests {
         let playlist = import_m3u(&m3u_path).expect("import failed");
         assert_eq!(playlist.songs.len(), 2);
         // Relative paths should be resolved relative to M3U location
-        assert!(playlist.songs[0]
-            .to_string_lossy()
-            .contains("song.mp3"));
+        assert!(playlist.songs[0].to_string_lossy().contains("song.mp3"));
 
         fs::remove_dir_all(&tmp).unwrap();
     }

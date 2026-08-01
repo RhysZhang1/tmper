@@ -50,6 +50,7 @@ async fn main() -> error::AppResult<()> {
     tracing::info!("tmper starting...");
 
     let cli = Cli::parse();
+    Config::ensure_config_file();
     let config = Config::load_or_default();
 
     let mut app = app::App::new(&config)?;

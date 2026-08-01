@@ -8,6 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::app::App;
 use crate::constants::runtime;
 use crate::event::AppEvent;
+use crate::ui::theme::Theme;
 use crate::ui::views::playlist_view::{InsertMode, LineTarget, PlaylistFlatModel};
 use crate::ui::{RepeatMode, ViewMode};
 
@@ -79,7 +80,8 @@ impl App {
                     self.ui_state.view.help_scroll += 1;
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
-                    self.ui_state.view.help_scroll = self.ui_state.view.help_scroll.saturating_sub(1);
+                    self.ui_state.view.help_scroll =
+                        self.ui_state.view.help_scroll.saturating_sub(1);
                 }
                 KeyCode::Char('8') | KeyCode::Esc => {
                     self.ui_state.view.show_help = false;
@@ -433,10 +435,8 @@ impl App {
 
     /// Move the selection within the `/` search result set (player view).
     fn search_move(&mut self, delta: i32) {
-        let matches = crate::ui::search_matches(
-            &self.ui_state.player.tracks,
-            &self.ui_state.search_query,
-        );
+        let matches =
+            crate::ui::search_matches(&self.ui_state.player.tracks, &self.ui_state.search_query);
         if matches.is_empty() {
             return;
         }
@@ -490,7 +490,8 @@ impl App {
                     Some(("tmper v0.1.0".to_string(), std::time::Instant::now()));
             }
             crate::input::command::Command::Theme(name) => {
-                self.config.ui.theme = name;
+                self.config.ui.theme = name.clone();
+                self.ui_state.theme = Theme::load(&name);
                 Self::write_config(&self.config);
             }
             crate::input::command::Command::Seek(arg) => {
@@ -615,7 +616,8 @@ impl App {
             }
             self.ui_state.player.tracks.remove(idx);
             if self.ui_state.player.selected_index >= self.ui_state.player.tracks.len() {
-                self.ui_state.player.selected_index = self.ui_state.player.tracks.len().saturating_sub(1);
+                self.ui_state.player.selected_index =
+                    self.ui_state.player.tracks.len().saturating_sub(1);
             }
             if let Some(pi) = self.ui_state.player.playing_index {
                 if pi > idx {
@@ -664,7 +666,9 @@ impl App {
 
         self.sync_lyrics(pos);
 
-        if self.ui_state.player.is_playing && self.ui_state.player.duration > 0.0 && pos >= self.ui_state.player.duration
+        if self.ui_state.player.is_playing
+            && self.ui_state.player.duration > 0.0
+            && pos >= self.ui_state.player.duration
         {
             self.on_track_ended();
         }

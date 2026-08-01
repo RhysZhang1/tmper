@@ -1,6 +1,7 @@
 use crossterm::event::KeyEvent;
 
 use crate::app::App;
+use crate::ui::theme::Theme;
 use crate::ui::views::settings_view::SettingsState;
 use crate::ui::ViewMode;
 
@@ -42,12 +43,12 @@ impl App {
                     return;
                 }
                 // M3U: export all playlists
-                if state.cursor == 20 {
+                if state.cursor == 17 {
                     self.export_all_playlists_m3u();
                     return;
                 }
                 // M3U import / keybinding items: show notification
-                if (10..=17).contains(&state.cursor) || state.cursor == 19 {
+                if (7..=14).contains(&state.cursor) || state.cursor == 16 {
                     self.ui_state.notification = Some((
                         "编辑 config/keybindings.toml 或使用 :import/:export 命令".into(),
                         std::time::Instant::now(),
@@ -55,16 +56,19 @@ impl App {
                     return;
                 }
                 // Section headers: skip
-                if state.cursor == 9 || state.cursor == 18 {
+                if state.cursor == 6 || state.cursor == 15 {
                     return;
                 }
                 Self::cycle_setting(config, state, &self.key_bindings);
+                self.sync_theme_from_config();
             }
             KeyCode::Char('l') | KeyCode::Right => {
                 Self::cycle_setting(config, state, &self.key_bindings);
+                self.sync_theme_from_config();
             }
             KeyCode::Char('h') | KeyCode::Left => {
                 Self::cycle_setting_reverse(config, state, &self.key_bindings);
+                self.sync_theme_from_config();
             }
             _ => {}
         }
@@ -98,12 +102,7 @@ impl App {
     ) {
         let idx = state.cursor;
         let last = state.items.len().saturating_sub(1);
-        if idx >= last
-            || idx == 9
-            || idx == 18
-            || (10..=17).contains(&idx)
-            || idx == 19
-            || idx == 20
+        if idx >= last || idx == 6 || idx == 15 || (7..=14).contains(&idx) || idx == 16 || idx == 17
         {
             return; // section headers, keybinding display, M3U actions
         }
@@ -143,19 +142,11 @@ impl App {
                 config.visualizer.smoothing = smooths[next];
             }
             3 => {
-                // Color scheme
-                let schemes = ["gradient", "solid", "fire", "ice"];
-                let cur = &config.visualizer.color_scheme;
-                let pos = schemes.iter().position(|s| *s == cur.as_str()).unwrap_or(0);
-                let next = (pos + 1) % schemes.len();
-                config.visualizer.color_scheme = schemes[next].to_string();
-            }
-            4 => {
                 // Default volume (cycles 0..1 in 0.05 steps, wraps at 1.0)
                 let new_vol = ((config.playback.default_volume + 0.05) * 100.0).round() / 100.0;
                 config.playback.default_volume = if new_vol >= 1.0 { 0.0 } else { new_vol };
             }
-            5 => {
+            4 => {
                 // Seek step
                 let steps = [5, 10, 15, 30];
                 let cur = config.playback.seek_step_small_secs;
@@ -163,15 +154,7 @@ impl App {
                 let next = (pos + 1) % steps.len();
                 config.playback.seek_step_small_secs = steps[next];
             }
-            6 => {
-                // Scan on startup
-                config.library.scan_on_startup = !config.library.scan_on_startup;
-            }
-            7 => {
-                // Gapless
-                config.playback.gapless = !config.playback.gapless;
-            }
-            8 => {
+            5 => {
                 // Show cover art
                 config.ui.show_cover_art = !config.ui.show_cover_art;
             }
@@ -192,12 +175,7 @@ impl App {
     ) {
         let idx = state.cursor;
         let last = state.items.len().saturating_sub(1);
-        if idx >= last
-            || idx == 9
-            || idx == 18
-            || (10..=17).contains(&idx)
-            || idx == 19
-            || idx == 20
+        if idx >= last || idx == 6 || idx == 15 || (7..=14).contains(&idx) || idx == 16 || idx == 17
         {
             return; // section headers, keybinding display, M3U actions
         }
@@ -233,13 +211,6 @@ impl App {
                 let prev = if pos == 0 { smooths.len() - 1 } else { pos - 1 };
                 config.visualizer.smoothing = smooths[prev];
             }
-            3 => {
-                let schemes = ["gradient", "solid", "fire", "ice"];
-                let cur = &config.visualizer.color_scheme;
-                let pos = schemes.iter().position(|s| *s == cur.as_str()).unwrap_or(0);
-                let prev = if pos == 0 { schemes.len() - 1 } else { pos - 1 };
-                config.visualizer.color_scheme = schemes[prev].to_string();
-            }
             _ => {
                 // For booleans and others, just cycle forward (simpler)
                 Self::cycle_setting(config, state, key_bindings);
@@ -248,6 +219,14 @@ impl App {
 
         crate::ui::views::settings_view::rebuild_settings(state, config, key_bindings);
         Self::write_config(config);
+    }
+
+    /// Reload the active theme into UiState if the config theme changed.
+    /// Called after any settings cycle that may have switched themes.
+    fn sync_theme_from_config(&mut self) {
+        if self.ui_state.theme.name != self.config.ui.theme {
+            self.ui_state.theme = Theme::load(&self.config.ui.theme);
+        }
     }
 
     pub(crate) fn write_config(config: &crate::config::Config) {

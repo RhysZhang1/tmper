@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crossterm::event::{Event as CrosstermEvent};
+use crossterm::event::Event as CrosstermEvent;
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -18,6 +18,7 @@ use crate::input::handler::KeyHandler;
 use crate::input::keymap::{self, KeyBindings};
 use crate::library::database::LibraryDb;
 use crate::ui::cover::{CoverParams, CoverRenderer};
+use crate::ui::theme::Theme;
 use crate::ui::{self, PlayerCore, UiState};
 use serde::{Deserialize, Serialize};
 
@@ -54,9 +55,10 @@ impl App {
             .unwrap_or_else(|_| LibraryDb::open_memory().expect("in-memory db"));
         let key_bindings = KeyBindings::load();
         let quit_key = keymap::parse_key_str(&key_bindings.quit);
-        Ok(Self {
+        let mut app = Self {
             config: config.clone(),
             ui_state: UiState {
+                theme: Theme::load(&config.ui.theme),
                 volume: config.playback.default_volume,
                 player: PlayerCore {
                     show_cover_art: config.ui.show_cover_art,
@@ -73,7 +75,9 @@ impl App {
             fft_data: Arc::new(Mutex::new(Vec::new())),
             cover_renderer: CoverRenderer::new(),
             last_seek_time: None,
-        })
+        };
+        app.load_state();
+        Ok(app)
     }
 
     pub async fn run(&mut self, cli: Cli) -> crate::error::AppResult<()> {
@@ -94,7 +98,9 @@ impl App {
         // Seed visible_rows from actual terminal size so the first keypress
         // uses the correct value instead of the hardcoded default (20).
         if let Ok((_, rows)) = crossterm::terminal::size() {
-            self.ui_state.visible_rows.set(rows.saturating_sub(2) as usize);
+            self.ui_state
+                .visible_rows
+                .set(rows.saturating_sub(2) as usize);
         }
 
         self.load_library_paths();
@@ -337,8 +343,10 @@ mod tests {
         ta.press_key(KeyCode::Right);
         ta.tick();
         let after = ta.volume();
-        assert!((before - after).abs() < 0.01,
-            "Volume changed: {before} → {after}");
+        assert!(
+            (before - after).abs() < 0.01,
+            "Volume changed: {before} → {after}"
+        );
     }
 
     #[test]
@@ -355,9 +363,13 @@ mod tests {
     #[test]
     fn test_volume_clamped() {
         let mut ta = TestApp::new();
-        for _ in 0..50 { ta.press_char('-'); }
+        for _ in 0..50 {
+            ta.press_char('-');
+        }
         assert!((ta.volume() - 0.0).abs() < 0.001);
-        for _ in 0..50 { ta.press_char('='); }
+        for _ in 0..50 {
+            ta.press_char('=');
+        }
         assert!((ta.volume() - 1.0).abs() < 0.001);
     }
 

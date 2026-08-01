@@ -8,7 +8,10 @@ use crate::error::{AppError, AppResult};
 /// Database row — stores ALL columns even though only `path`/`title`/`artist`
 /// are consumed in the current UI.  The rest are reserved for future features
 /// (sorting by year, filtering by genre/bitrate, etc.).
-#[expect(dead_code, reason = "DB schema — most fields reserved for future queries")]
+#[expect(
+    dead_code,
+    reason = "DB schema — most fields reserved for future queries"
+)]
 pub struct TrackRow {
     pub id: i64,
     pub path: String,

@@ -1,8 +1,10 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::Frame;
+
+use crate::ui::theme::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LibraryPanel {
@@ -49,7 +51,7 @@ impl Default for LibraryState {
     }
 }
 
-pub fn render_library_view(f: &mut Frame, area: Rect, state: &LibraryState) {
+pub fn render_library_view(f: &mut Frame, area: Rect, theme: &Theme, state: &LibraryState) {
     // Split area: main content + optional search bar
     let has_search = state.search_mode;
     let (main_area, search_area) = if has_search {
@@ -74,6 +76,7 @@ pub fn render_library_view(f: &mut Frame, area: Rect, state: &LibraryState) {
     render_panel(
         f,
         columns[0],
+        theme,
         "Artists",
         &state.artists,
         state.artist_index,
@@ -82,6 +85,7 @@ pub fn render_library_view(f: &mut Frame, area: Rect, state: &LibraryState) {
     render_panel(
         f,
         columns[1],
+        theme,
         "Albums",
         &state.albums,
         state.album_index,
@@ -90,6 +94,7 @@ pub fn render_library_view(f: &mut Frame, area: Rect, state: &LibraryState) {
     render_panel(
         f,
         columns[2],
+        theme,
         "Tracks",
         &state.track_titles,
         state.track_index,
@@ -110,13 +115,13 @@ pub fn render_library_view(f: &mut Frame, area: Rect, state: &LibraryState) {
         let para = Paragraph::new(Line::from(Span::styled(
             label,
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme.warning)
                 .add_modifier(Modifier::BOLD),
         )))
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow)),
+                .border_style(Style::default().fg(theme.warning)),
         );
         f.render_widget(para, sa);
     }
@@ -125,15 +130,16 @@ pub fn render_library_view(f: &mut Frame, area: Rect, state: &LibraryState) {
 fn render_panel(
     f: &mut Frame,
     area: Rect,
+    theme: &Theme,
     title: &str,
     items: &[String],
     selected: usize,
     is_focused: bool,
 ) {
     let border_style = if is_focused {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(theme.primary)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme.muted)
     };
 
     let list_items: Vec<ListItem> = items
@@ -142,11 +148,11 @@ fn render_panel(
         .map(|(i, item)| {
             let style = if i == selected && is_focused {
                 Style::default()
-                    .fg(Color::White)
-                    .bg(Color::DarkGray)
+                    .fg(theme.text)
+                    .bg(theme.muted)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Gray)
+                Style::default().fg(theme.secondary)
             };
             ListItem::new(Line::from(Span::styled(item.clone(), style)))
         })

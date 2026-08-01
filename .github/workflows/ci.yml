@@ -26,6 +26,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+      # Headless runners have no sound card; cpal's ALSA "default" must
+      # resolve to the null plugin or the 18 audio-dependent tests panic
+      # during AudioEngine construction.
+      - name: Provide null audio device
+        run: printf 'pcm.!default { type null }\nctl.!default { type null }\n' > ~/.asoundrc
       - run: cargo test --workspace --all-features
 
   fmt:

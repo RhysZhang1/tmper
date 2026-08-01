@@ -1,11 +1,12 @@
 pub mod cover;
+pub mod theme;
 pub mod views;
 pub mod widgets;
 use std::cell::Cell;
 use std::sync::Arc;
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
@@ -13,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants::runtime;
 use crate::lyrics::types::LyricTrack;
+use crate::ui::theme::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepeatMode {
@@ -141,6 +143,7 @@ impl ViewState {
 }
 
 pub struct UiState {
+    pub theme: Theme,
     pub player: PlayerCore,
     pub volume: f32,
     pub repeat_mode: RepeatMode,
@@ -169,6 +172,7 @@ pub struct UiState {
 impl Default for UiState {
     fn default() -> Self {
         Self {
+            theme: Theme::default(),
             player: PlayerCore::default(),
             volume: 0.8,
             repeat_mode: RepeatMode::Sequential,
@@ -201,7 +205,7 @@ pub fn render(f: &mut Frame, state: &UiState) {
 
     // Help overlay — highest priority, always on top
     if state.view.show_help {
-        crate::ui::widgets::help_popup::render_help(f, state.view.help_scroll);
+        crate::ui::widgets::help_popup::render_help(f, &state.theme, state.view.help_scroll);
         return;
     }
 
@@ -224,7 +228,7 @@ pub fn render(f: &mut Frame, state: &UiState) {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .style(Style::default().fg(Color::Green)),
+                        .style(Style::default().fg(state.theme.success)),
                 )
                 .alignment(ratatui::layout::Alignment::Center);
             f.render_widget(para, popup);
@@ -250,52 +254,52 @@ pub fn render(f: &mut Frame, state: &UiState) {
         lines.push(Line::from(Span::styled(
             format!(":{} {}", state.command_buffer, cursor),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(state.theme.warning)
                 .add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "  Commands:",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(state.theme.primary)
                 .add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(Span::styled(
             "  q quit  |  help  |  version  |  theme <name>",
-            Style::default().fg(Color::Gray),
+            Style::default().fg(state.theme.secondary),
         )));
         lines.push(Line::from(Span::styled(
             "  seek <secs>  |  volume <0-100>  |  repeat <mode>",
-            Style::default().fg(Color::Gray),
+            Style::default().fg(state.theme.secondary),
         )));
         lines.push(Line::from(Span::styled(
             "  view <name>  |  import <path>  |  export <name>",
-            Style::default().fg(Color::Gray),
+            Style::default().fg(state.theme.secondary),
         )));
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "  view names: player library lyrics visualizer",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(state.theme.muted),
         )));
         lines.push(Line::from(Span::styled(
             "               playlists browser settings",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(state.theme.muted),
         )));
         lines.push(Line::from(Span::styled(
             "  repeat: sequential shuffle single",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(state.theme.muted),
         )));
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "  Enter=执行  Esc=取消",
-            Style::default().fg(Color::Green),
+            Style::default().fg(state.theme.success),
         )));
 
         let para = Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::ALL)
                 .title(" Command ")
-                .border_style(Style::default().fg(Color::Yellow)),
+                .border_style(Style::default().fg(state.theme.warning)),
         );
         f.render_widget(para, popup);
         return;
@@ -304,6 +308,7 @@ pub fn render(f: &mut Frame, state: &UiState) {
     match state.view.active_view {
         ViewMode::Player => {
             let params = crate::ui::views::player_view::PlayerViewParams {
+                theme: &state.theme,
                 title: &state.player.title,
                 artist: &state.player.artist,
                 position: state.player.position,
@@ -336,6 +341,7 @@ pub fn render(f: &mut Frame, state: &UiState) {
                 crate::ui::views::lyrics_view::render_lyrics_view(
                     f,
                     f.area(),
+                    &state.theme,
                     track,
                     state.lyrics.current_lyric_index,
                     state.lyrics.lyrics_offset_ms,
@@ -346,6 +352,7 @@ pub fn render(f: &mut Frame, state: &UiState) {
             crate::ui::widgets::visualizer_panel::render_visualizer(
                 f,
                 f.area(),
+                &state.theme,
                 &state.visualizer_data,
             );
         }
@@ -353,6 +360,7 @@ pub fn render(f: &mut Frame, state: &UiState) {
             crate::ui::views::playlist_view::render_playlist_view(
                 f,
                 f.area(),
+                &state.theme,
                 &state.playlist_state,
             );
         }
@@ -360,6 +368,7 @@ pub fn render(f: &mut Frame, state: &UiState) {
             crate::ui::views::file_browser_view::render_file_browser(
                 f,
                 f.area(),
+                &state.theme,
                 &state.file_browser_state,
             );
         }
@@ -367,6 +376,7 @@ pub fn render(f: &mut Frame, state: &UiState) {
             crate::ui::views::settings_view::render_settings_view(
                 f,
                 f.area(),
+                &state.theme,
                 &state.settings_state,
             );
         }
@@ -374,6 +384,7 @@ pub fn render(f: &mut Frame, state: &UiState) {
             crate::ui::views::library_view::render_library_view(
                 f,
                 f.area(),
+                &state.theme,
                 &state.library_state,
             );
         }

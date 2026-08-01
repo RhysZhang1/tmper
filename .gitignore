@@ -7,5 +7,8 @@
 # Runtime data (created at startup)
 /data/
 
+# Local config (auto-generated from config/default.toml on first run)
+/config/config.toml
+
 # Build snapshots / archives
 *.tar.gz

@@ -1,10 +1,12 @@
 use std::path::PathBuf;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem};
 use ratatui::Frame;
+
+use crate::ui::theme::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserPanel {
@@ -51,25 +53,25 @@ impl Default for FileBrowserState {
     }
 }
 
-pub fn render_file_browser(f: &mut Frame, area: Rect, state: &FileBrowserState) {
+pub fn render_file_browser(f: &mut Frame, area: Rect, theme: &Theme, state: &FileBrowserState) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
         .split(area);
 
-    render_library_panel(f, cols[0], state);
-    render_filesystem_panel(f, cols[1], state);
+    render_library_panel(f, cols[0], theme, state);
+    render_filesystem_panel(f, cols[1], theme, state);
 }
 
-fn render_library_panel(f: &mut Frame, area: Rect, state: &FileBrowserState) {
+fn render_library_panel(f: &mut Frame, area: Rect, theme: &Theme, state: &FileBrowserState) {
     let vis_h = area.height.saturating_sub(2) as usize;
     let start = state.scroll_library;
 
     let is_focused = state.focused == BrowserPanel::Library;
     let border_style = if is_focused {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(theme.primary)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme.muted)
     };
 
     let end = (start + vis_h).min(state.library_paths.len());
@@ -79,11 +81,11 @@ fn render_library_panel(f: &mut Frame, area: Rect, state: &FileBrowserState) {
             let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
             let style = if i == state.selected_library_index && is_focused {
                 Style::default()
-                    .fg(Color::White)
-                    .bg(Color::DarkGray)
+                    .fg(theme.text)
+                    .bg(theme.muted)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Gray)
+                Style::default().fg(theme.secondary)
             };
             ListItem::new(Line::from(Span::styled(name, style)))
         })
@@ -98,12 +100,12 @@ fn render_library_panel(f: &mut Frame, area: Rect, state: &FileBrowserState) {
     f.render_widget(list, area);
 }
 
-fn render_filesystem_panel(f: &mut Frame, area: Rect, state: &FileBrowserState) {
+fn render_filesystem_panel(f: &mut Frame, area: Rect, theme: &Theme, state: &FileBrowserState) {
     let is_focused = state.focused == BrowserPanel::Filesystem;
     let border_style = if is_focused {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(theme.primary)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme.muted)
     };
 
     let dir_str = state.current_dir.to_string_lossy().to_string();
@@ -123,13 +125,13 @@ fn render_filesystem_panel(f: &mut Frame, area: Rect, state: &FileBrowserState) 
     {
         let style = if is_focused && state.selected_fs_index == i {
             Style::default()
-                .fg(Color::White)
-                .bg(Color::DarkGray)
+                .fg(theme.text)
+                .bg(theme.muted)
                 .add_modifier(Modifier::BOLD)
         } else {
             match item {
-                FsItem::Dir(_) => Style::default().fg(Color::Cyan),
-                FsItem::Audio(_) => Style::default().fg(Color::Green),
+                FsItem::Dir(_) => Style::default().fg(theme.primary),
+                FsItem::Audio(_) => Style::default().fg(theme.success),
             }
         };
         let prefix = match item {

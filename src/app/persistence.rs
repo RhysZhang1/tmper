@@ -35,6 +35,25 @@ impl App {
         }
     }
 
+    /// Restore persisted playback settings (volume, repeat mode, lyrics
+    /// offset) from `data/state.json` on startup. Silently ignores missing
+    /// or corrupt state — a fresh install must not error out.
+    pub(super) fn load_state(&mut self) {
+        let state_path = crate::paths::data_dir().join("state.json");
+        let Ok(content) = std::fs::read_to_string(&state_path) else {
+            return;
+        };
+        let Ok(saved) = serde_json::from_str::<super::SavedState>(&content) else {
+            tracing::warn!("Ignoring unreadable state.json");
+            return;
+        };
+        self.ui_state.volume = saved.volume;
+        self.engine.set_volume(saved.volume);
+        self.ui_state.repeat_mode = saved.repeat_mode;
+        self.ui_state.lyrics.lyrics_offset_ms = saved.lyrics_offset_ms;
+        tracing::info!("Restored saved state (volume={:.2})", saved.volume);
+    }
+
     pub(super) fn save_playlists(&self) {
         #[derive(Serialize)]
         struct SavePlaylist {
@@ -125,7 +144,13 @@ impl App {
                 .clone()
                 .unwrap_or_else(|| "Unknown Artist".into());
             let duration = info.duration.as_secs_f64();
-            if !self.ui_state.player.tracks.iter().any(|t| t.path == info.path) {
+            if !self
+                .ui_state
+                .player
+                .tracks
+                .iter()
+                .any(|t| t.path == info.path)
+            {
                 self.ui_state.player.tracks.push(TrackDisplay {
                     path: info.path.clone(),
                     title,
@@ -146,7 +171,13 @@ impl App {
                     .unwrap_or_else(|| "Unknown Artist".into());
                 let duration = info.duration.as_secs_f64();
 
-                if !self.ui_state.player.tracks.iter().any(|t| t.path == info.path) {
+                if !self
+                    .ui_state
+                    .player
+                    .tracks
+                    .iter()
+                    .any(|t| t.path == info.path)
+                {
                     self.ui_state.player.tracks.push(TrackDisplay {
                         path: info.path.clone(),
                         title: title.clone(),
@@ -173,7 +204,8 @@ impl App {
                         self.ui_state.player.artist = artist;
                         self.ui_state.player.album = info.album.unwrap_or_default();
                         self.ui_state.player.genre = info.genre.unwrap_or_default();
-                        self.ui_state.player.year = info.year.map(|y| y.to_string()).unwrap_or_default();
+                        self.ui_state.player.year =
+                            info.year.map(|y| y.to_string()).unwrap_or_default();
                         self.ui_state.player.codec = info.codec.clone();
                         self.ui_state.player.position = 0.0;
                         self.ui_state.player.duration = duration;

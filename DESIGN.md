@@ -3,8 +3,8 @@
 > **项目名称**: tmper — 终端音乐播放器
 > **语言**: Rust
 > **平台**: Arch Linux + KDE Plasma
-> **文档版本**: v3.4（实现文档）
-> **最后更新**: 2026-07-19
+> **文档版本**: v3.6（实现文档）
+> **最后更新**: 2026-08-02
 
 ---
 
@@ -64,7 +64,7 @@ tmper 是一个运行在终端中的全功能音乐播放器。核心特性：
 ┌────────────────────────▼─────────────────────────────┐
 │  UI (src/ui/) — 渲染层（只读 &AppState）               │
 │  ├─ mod.rs       — UiState, ViewMode, render()       │
-│  ├─ theme.rs     — 5 套预设主题                       │
+│  ├─ theme.rs     — 13 色槽语义主题（themes/*.toml）  │
 │  ├─ views/       — 7 个视图                           │
 │  │  ├─ player_view.rs  — 播放器（封面+频谱+歌词+列表） │
 │  │  ├─ library_view.rs — 曲库（三栏浏览+搜索）         │
@@ -83,7 +83,7 @@ tmper 是一个运行在终端中的全功能音乐播放器。核心特性：
 │  │  ├─ decoder.rs — Symphonia 解码适配                │
 │  │  └─ output.rs  — Rodio Sink 封装                   │
 │  ├─ LibraryDb (src/library/database.rs)               │
-│  │  ├─ scanner.rs        — 目录扫描                   │
+│  │  ├─ scanner.rs        — 测试辅助（仅 cfg(test)）   │
 │  │  └─ playlist_manager.rs — M3U 导入/导出             │
 │  ├─ LyricEngine (src/lyrics/engine.rs)                │
 │  │  ├─ parser.rs — LRC 解析 + 编码检测                │
@@ -103,16 +103,28 @@ tmper 是一个运行在终端中的全功能音乐播放器。核心特性：
 │                    主线程 (tokio)                     │
 │                                                      │
 │  tokio::select! {                                   │
-│      keyboard_event = event_stream.next() => {       │
-│          KeyHandler 处理 → handle_event(event)        │
-│          → 修改 AppState                              │
+│      batch = event_rx.recv() => {                    │
+│          for event in batch {                        │
+│              KeyHandler 处理 → handle_event(event)    │
+│              → 修改 AppState                          │
+│          }                                           │
 │      }                                               │
 │      _ = tick_interval.tick() => {                   │
 │          更新播放位置、FFT 数据、歌词同步              │
 │          检测曲目结束 → 自动切歌                       │
 │      }                                               │
 │  }                                                   │
-│  terminal.draw(|f| ui::render(f, &app))  ← 每次事件后 │
+│  terminal.draw(...)  ← 每批/节流 tick 至多绘制一次     │
+└─────────────────────────────────────────────────────┘
+                         │
+┌────────────────────────▼─────────────────────────────┐
+│         输入线程 (spawn_blocking，burst 模式)           │
+│                                                      │
+│  loop {                                              │
+│    poll(80ms) 等待首个事件                            │
+│    → 批量 read() 排空 PTY 缓冲（终端 auto-repeat）     │
+│    → send(Vec<CrosstermEvent>)                       │
+│  }                                                   │
 └─────────────────────────────────────────────────────┘
                          │
 ┌────────────────────────▼─────────────────────────────┐
@@ -132,6 +144,8 @@ tmper 是一个运行在终端中的全功能音乐播放器。核心特性：
 │    → FFT 线程读取                                     │
 └─────────────────────────────────────────────────────┘
 ```
+
+**输入模型（burst 模式，commit e122084）**：不再使用 crossterm `EventStream`（一个事件 → 一次绘制）。改为后台线程 `crossterm::event::poll(80ms)` 等待首个事件，然后批量 `read()` 一次性排空 PTY 缓冲（长按按键时终端 auto-repeat 约 33ms 一个事件，每批可收集 2–3 个），经 `mpsc::unbounded_channel<Vec<CrosstermEvent>>` 发给主循环。主循环 `event_rx.recv()` 拿到整批事件后统一处理、绘制一次，消除了「松开按键仍持续滚动」的卡顿。
 
 ---
 
@@ -320,12 +334,12 @@ pub struct TrackRow { /* 21 个字段，匹配数据库列 */ }
 
 **测试**：6 个测试覆盖 upsert、重复更新、搜索、get_artists、get_albums、delete。
 
-#### scanner.rs — 目录扫描
+#### scanner.rs — 测试辅助（非生产模块）
 
-- `scan_directory()` — 递归遍历目录，过滤扩展名，mtime 变化检测
-- 支持 `follow_symlinks` 配置
+> 该文件整体 `#[cfg(test)]`，仅作为**测试辅助**存在；项目当前**没有**生产目录扫描器，
+> 也没有基于 mtime 的增量扫描。`follow_symlinks` 配置键已移除。
 
-**测试**：扩展名过滤验证。
+**测试**：扩展名过滤验证（1 个）。
 
 #### playlist_manager.rs — M3U 导入导出
 
@@ -348,11 +362,11 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    Play { files: Vec<PathBuf> },
+    Play { file: PathBuf },
 }
 ```
 
-支持：`tmper`（交互模式）、`tmper play <path>`（播放文件/目录）。
+支持：`tmper`（交互模式）、`tmper play <path>`（播放**单个文件**；目录播放暂未实现）。
 
 ---
 
@@ -409,7 +423,7 @@ pub type AppResult<T> = anyhow::Result<T>;
 
 - **单一写入者**：AppState 只在 `handle_event()` 中修改
 - **只读渲染**：UI 渲染函数接收 `&AppState`，不做修改
-- **通道通信**：FFT 线程通过 `tokio::sync::watch` 发送数据
+- **共享内存**：FFT 数据通过 `Arc<Mutex<Vec<f32>>>`（`fft_data`）写入 `UiState.visualizer_data`；播放位置经 `tokio::sync::watch` 推送
 - **不可变更新**：遵循"创建新值，不修改旧值"原则
 
 ---
@@ -432,43 +446,51 @@ pub type AppResult<T> = anyhow::Result<T>;
 
 ```rust
 pub struct UiState {
-    pub active_view: ViewMode,
-    pub show_help: bool,
-    pub tracks: Vec<TrackDisplay>,
-    pub playing_index: Option<usize>,
-    pub selected_index: usize,
-    pub scroll_offset: usize,
+    pub theme: Theme,                    // 当前主题（UI 颜色统一来自 UiState.theme，不硬编码）
+    pub player: PlayerCore,              // 播放核心：曲目信息、position/duration、tracks、选中、滚动
     pub volume: f32,
     pub repeat_mode: RepeatMode,
-    pub lyrics_offset_ms: i64,
-    pub current_lyric_index: usize,
-    pub lyric_track: Option<LyricTrack>,
-    pub search_query: String,
-    pub position_secs: f64,
-    pub duration_secs: f64,
-    pub fft_bars: Vec<f32>,
-    pub notification: Option<Notification>,
-    pub settings_state: SettingsState,
-    pub library_state: LibraryUiState,
-    pub playlist_state: PlaylistUiState,
+    pub lyrics: LyricsState,             // 歌词：lyric_track、current_lyric_index、lyrics_offset_ms
+    pub visualizer_data: Vec<f32>,       // FFT 共享数据（后台线程写 Arc<Mutex<Vec<f32>>>，主循环读取）
+    pub view: ViewState,                 // 当前视图 + 帮助标志（active_view、show_help）
+    pub playlist_state: PlaylistManagerState,
     pub file_browser_state: FileBrowserState,
+    pub library_state: LibraryState,
+    pub settings_state: SettingsState,
+    pub active_playlist: Option<usize>,  // 跨视图播放上下文
+    pub active_playlist_song: Option<usize>,
+    pub playlist_name: String,
+    pub command_mode: bool,
+    pub command_buffer: String,
+    pub search_mode: bool,               // 全局 / 搜索（播放器队列实时过滤）
+    pub search_query: String,
+    pub notification: Option<(String, std::time::Instant)>,
+    pub visible_rows: Cell<usize>,
+    pub cover_rect: Cell<(u16, u16, u16, u16)>,
 }
 ```
 
 ### 5.3 主题系统
 
-5 套预设主题（`src/ui/theme.rs`），每套定义 12 种颜色：
+`src/ui/theme.rs` 定义了一个 **13 色槽语义化 `Theme` 结构体**（另含 `name` 字段），
+从 `themes/<name>.toml` 加载（5 套真实配色：Tokyo Night、Dracula、Nord、Solarized Dark、Catppuccin Mocha）。
+UI 颜色统一取自 `UiState.theme`，不再硬编码；`ui.theme` 配置键、`:theme <名称>` 命令与设置视图均可实时切换。
 
 | 颜色键 | 用途 |
 |--------|------|
-| `bg` / `fg` | 背景/前景 |
-| `accent` | 标题、选中项高亮 |
-| `highlight` | 当前播放行、进度条 |
-| `dimmed` | 非焦点文字 |
-| `success` | 播放状态指示 |
-| `warning` | 音量警告 |
-| `error` | 错误信息 |
-| `bar_low/mid/high` | 频谱柱低/中/高频颜色 |
+| `primary` | 边框、面板标题、当前歌词、选中项 |
+| `text` | 加粗标题 |
+| `secondary` | 艺术家、次要文字 |
+| `muted` | 边框、标签、提示 |
+| `success` | 播放指示、音量、通知、确认 |
+| `warning` | 命令模式、设置边框 |
+| `control` | 控制栏 |
+| `accent` | 活动歌单名 |
+| `album` | 专辑 |
+| `genre` | 流派 |
+| `year` | 年份 |
+| `codec` | 编码格式 |
+| `bg` | 终端背景 |
 
 ---
 
@@ -492,13 +514,14 @@ pub enum AppEvent {
 pub async fn run(&mut self, cli: Cli) -> AppResult<()> {
     // 1. 启用 raw mode + alternate screen
     // 2. 加载 CLI 指定的文件
-    // 3. 启动 FFT 线程
+    // 3. 启动 FFT 线程 + burst 输入线程（poll/read → unbounded_channel）
     // 4. 事件循环：
     loop {
         tokio::select! {
-            Some(Ok(event)) = reader.next() => {
-                // crossterm EventStream → KeyHandler → handle_key_event()
-                // 搜索模式/插入模式绕过 KeyHandler 双键延迟
+            Some(batch) = event_rx.recv() => {
+                // burst 模式：整批 Vec<CrosstermEvent> 统一处理
+                // 逐事件 → KeyHandler → handle_key_event()
+                // 搜索/插入模式绕过 KeyHandler 双键延迟
             }
             _ = tick_interval.tick() => {
                 self.handle_event(AppEvent::Tick);
@@ -521,7 +544,8 @@ pub async fn run(&mut self, cli: Cli) -> AppResult<()> {
 
 | 文件 | 用途 |
 |------|------|
-| `config/config.toml` | 主配置（设置视图可在线编辑和保存） |
+| `config/default.toml` | 默认配置模板（随仓库分发） |
+| `config/config.toml` | 主配置（首次运行由 `default.toml` 自动复制生成；设置视图可在线编辑和保存） |
 | `config/keybindings.toml` | 自定义快捷键（预留） |
 | `data/state.json` | 退出时保存的状态 |
 | `data/library.db` | 曲库 SQLite 数据库 |
@@ -531,15 +555,15 @@ pub async fn run(&mut self, cli: Cli) -> AppResult<()> {
 
 ```rust
 pub struct Config {
-    pub library: LibraryConfig,
-    pub playback: PlaybackConfig,
-    pub visualizer: VisualizerConfig,
-    pub lyrics: LyricsConfig,
-    pub ui: UiConfig,
+    pub playback: PlaybackConfig,     // default_volume, seek_step_small_secs
+    pub visualizer: VisualizerConfig, // num_bars, frame_rate, smoothing
+    pub ui: UiConfig,                 // theme, show_cover_art
 }
 ```
 
-**加载**：`Config::load_or_default()` — 读取 TOML → `toml::from_str` → 失败则用 `Default::default()`
+> `[library]` / `[lyrics]` 配置段及 `gapless`、`resume_on_startup`、`color_scheme` 等键均已移除，仅保留以上 7 个键。
+
+**加载**：首次运行 `Config::ensure_config_file()` 将 `config/default.toml` 复制为 `config/config.toml`；随后 `Config::load_or_default()` — 读取 `config/config.toml` → `toml::from_str` → 失败则用 `Default::default()`
 
 **保存**：`write_config()` — `toml::to_string_pretty(&config)` → 写入文件（通过设置视图自动触发）
 
@@ -565,6 +589,8 @@ pub struct Config {
   "last_track_path": "/home/user/Music/song.flac"
 }
 ```
+
+> 启动时 `load_state()` 仅恢复 **音量、循环模式、歌词偏移**；`last_track_path` 仅作记录，**不会**自动恢复播放。
 
 ### 8.2 播放列表持久化
 
@@ -618,7 +644,7 @@ SIXEL/Kitty 封面数据写入 stdout 后，部分终端（如 Konsole）可能�
 | `-` / `=` | 音量 | `volume ± 0.05` |
 | `←` / `→` | Seek | `seek_relative(-5)` / `seek_relative(5)` |
 | `j` / `k` | 移动选择 | ±1，边界 clamp |
-| `gg` / `G` | 跳首/尾 | JumpTop / JumpBottom |
+| `gg` / `G` | 跳首/尾 | JumpTop / 直接滚动到末尾（无独立事件） |
 | `Ctrl+d/u` | 翻半页 | 10 行 |
 | `dd` | 删除选中 | RemoveSelected |
 | `r` | 循环模式 | Sequential → Shuffle → SingleTrack |
@@ -636,19 +662,20 @@ SIXEL/Kitty 封面数据写入 stdout 后，部分终端（如 Konsole）可能�
 | 模块 | 测试数 | 覆盖内容 |
 |------|--------|----------|
 | audio/decoder.rs | 3 | 解码 WAV、不存在的文件、seek |
-| audio/engine.rs | 4 | 生命周期、位置追踪、停止、排队 |
+| audio/engine.rs | 5 | 生命周期、位置追踪、停止、排队（含 1 个 tokio 集成式） |
 | lyrics/parser.rs | 7 | 标准 LRC、元数据、多时间戳、逐字、空文件、损坏行、排序 |
 | visualizer/fft.rs | 1 | 440Hz 峰值检测 |
 | visualizer/processor.rs | 2 | 桶数量、平滑收敛 |
 | visualizer/render.rs | 2 | 渲染输出、颜色渐变 |
 | library/database.rs | 6 | upsert、重复更新、搜索、artists、albums、delete |
-| library/scanner.rs | 1 | 扩展名过滤 |
+| library/scanner.rs | 1 | 扩展名过滤（测试辅助） |
 | library/playlist_manager.rs | 2 | M3U 往返、相对路径 |
 | metadata/reader.rs | 3 | FLAC、WAV（无标签）、不存在的文件 |
+| ui/theme.rs | 4 | hex 颜色解析（有效/无效回退）、缺失主题回退默认、真实主题 13 色槽加载 |
 | input/command.rs | 4 | quit、theme、volume、unknown |
 | playlist.rs | — | （v3.5 后仅存 `PlaylistData` 数据模型，逻辑并入 playlist_view） |
-| app/mod.rs | 12 | 视图切换、音量、循环、加载播放、停止、命令模式、搜索（集成式） |
-| **总计** | **49** | **37 单元 + 12 集成** |
+| app/mod.rs | 13 | 视图切换、音量、循环、加载播放、停止、命令模式、搜索（含 4 个 tokio 集成式） |
+| **总计** | **53** | **48 单元 + 5 集成** |
 
 ### 10.2 运行测试
 
@@ -671,7 +698,8 @@ tmper/
 ├── tmper                       # 符号链接 → target/release/tmper
 │
 ├── config/                     # 配置文件（自包含，非 XDG）
-│   ├── config.toml             #   主配置（在线编辑，自动保存）
+│   ├── default.toml            #   默认配置模板
+│   ├── config.toml             #   主配置（首次运行由 default.toml 自动复制生成）
 │   └── keybindings.toml        #   自定义快捷键（预留）
 │
 ├── data/                       # 运行时数据（自动生成）
@@ -736,12 +764,12 @@ tmper/
 │   │
 │   ├── library/                #   音乐库
 │   │   ├── database.rs         #     SQLite CRUD + 搜索
-│   │   ├── scanner.rs          #     目录扫描 + mtime 检测
+│   │   ├── scanner.rs          #     测试辅助（仅 #[cfg(test)]，非生产扫描器）
 │   │   └── playlist_manager.rs #     M3U 导入/导出
 │   │
 │   ├── ui/                     #   用户界面
 │   │   ├── mod.rs              #     UiState、ViewMode、render() 入口
-│   │   ├── theme.rs            #     5 套预设主题
+│   │   ├── theme.rs            #     13 色槽语义主题（themes/*.toml 加载）
 │   │   ├── cover/              #     封面图渲染（终端协议直接输出）
 │   │   │   └── mod.rs          #       CoverRenderer: Kitty / SIXEL 协议
 │   │   ├── views/              #     视图
@@ -762,7 +790,9 @@ tmper/
 │
 └── tests/
     └── fixtures/               #   测试数据
-        └── test.wav            #     440Hz 正弦波 (2s, 44100Hz, stereo)
+        ├── test.wav            #     440Hz 正弦波 (2s, 44100Hz, stereo)
+        ├── test.flac           #     带完整标签的 FLAC
+        └── test_notags.wav     #     无标签 WAV（验证 fallback）
 ```
 
 ---
@@ -801,7 +831,8 @@ tmper/
 | v3.2 | 2026-07-18 | 代码质量改进：PCM 缓冲增大、消除 clippy allow、render() 改 match、Config 默认值去重、RUST_LOG 支持、KeyHandler 控制字符过滤 |
 | v3.3 | 2026-07-18 | Session A–D：UiState 视图参数抽取 + 状态分组 (PlayerCore/LyricsState/ViewState)、play_file 异步化解码、stdout 防护增强 (4 层防御) |
 | v3.4 | 2026-07-19 | 回滚长按快进快退；事件循环绘制节流（~20fps）修复播放时滚动卡顿；键1迷你歌单独立滚动状态修复末行消失 |
-| v3.5 | 2026-07-19 | seek_relative 改为后台线程异步解码（镜像 play_file_async）；git 卫生（分支 rename main、清理 tar.gz、补 gitignore）；文档同步（帮助键 8、测试数 54、事件模型） |
+| v3.5 | 2026-07-19 | seek_relative 改为后台线程异步解码（镜像 play_file_async）；git 卫生（分支 rename main、清理 tar.gz、补 gitignore）；文档同步（帮助键 8、测试数 53、事件模型） |
+| v3.6 | 2026-08-02 | 清理死配置键（`[library]`/`[lyrics]` 段、gapless、crossfade_seconds、resume_on_startup、color_scheme、char_set、show_on_idle、scan_on_startup、follow_symlinks、show_progress_bar、cover_art_max_width、default_view 全部移除）；首运行自动生成 `config/config.toml`；真实主题系统（13 色槽 `Theme`，从 `themes/*.toml` 加载）；输入改为 burst 模式（poll/read 批量读取）；启动恢复音量/循环模式/歌词偏移 |
 
 ### 已知技术债（v3.4 更新）
 
@@ -810,7 +841,7 @@ tmper/
 | UiState 上帝结构体 | 🔴 | 30+ 字段 → 13 分组 + 3 Cell | ✅ v3.3 完成 |
 | stdout 直接写入 | 🔴 | 4 层防御；ratatui-image 集成待调研 | 🟡 缓解 |
 | play_file 同步解码 | 🟡 | 异步路径对 >50MB 启用；seek_relative 仍同步 | 🟡 部分 |
-| 无集成测试 | 🟡 | 54 测试（42 单元 + 12 集成） | ✅ v3.3 完成 |
+| 无集成测试 | 🟡 | 53 测试（48 单元 + 5 集成） | ✅ v3.3 完成 |
 | 长按快进快退 | 🟡 | 已回滚（crossterm 无按键释放检测） | ✅ v3.4 回滚 |
 | 播放时滚动卡顿 | 🟡 | 事件循环绘制节流至 ~20fps | ✅ v3.4 修复 |
 | 键1 迷你歌单末行消失 | 🟡 | 侧边栏独立滚动状态 | ✅ v3.4 修复 |

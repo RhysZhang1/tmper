@@ -4,84 +4,83 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Terminal music player (codename: **tmper**) — a terminal-native music player for Arch Linux/KDE Plasma. Written in Rust with ratatui TUI framework. Supports multi-format audio decoding, metadata display, LRC lyrics syncing, spectrum visualizer, and Vim-style keyboard navigation.
+Terminal music player (codename: **tmper**) — a terminal-native music player for Arch Linux/KDE Plasma. Written in Rust with ratatui TUI framework. Supports multi-format audio decoding, metadata display, cover art, LRC lyrics syncing, spectrum visualizer, playlist management, a SQLite library index, and Vim-style keyboard navigation.
 
-The project is currently at the **design phase** — only `DESIGN.md` exists, with no code written yet.
+The project is **implemented and working** (~8,000 lines of Rust, 50+ tests). The source of truth for the architecture is `DESIGN.md`; per-session change logs live in `progress/`. All docs (CLAUDE.md / README.md / DESIGN.md) were reconciled with the code on 2026-08-02.
 
-## Development Approach
+## Layout
 
-This project uses a **session-based AI development workflow** defined in `DESIGN.md` §13. Each session is a self-contained task:
-
-- Each session includes all context (input files, output files, function signatures, test strategy)
-- Sessions compile and test independently (checkpoint-style)
-- Independent sessions can be parallelized (marked with ✅ in DESIGN.md)
-- Context size is labeled: 🟢 <200 lines, 🟡 200-500 lines, 🔴 >500 lines
-
-### Phase Order
-
-```
-Phase 0 (1 session):  Project scaffold (Cargo.toml, mod.rs stubs, error types, CI)
-Phase 1 (4 sessions): Core playback MVP (decoder → output → engine → event loop + basic UI)
-Phase 2 (6 sessions): Playlist + metadata (lofty reading, playlist data, scanner, player view, vim keys, search)
-Phase 3 (4 sessions): Lyrics system (LRC parser, sync engine, offset tuning, fullscreen view) — parallel with P4
-Phase 4 (4 sessions): Spectrum visualizer (InstrumentedSource, FFT, rendering, integration) — parallel with P3
-Phase 5 (7 sessions): Library index + advanced UI (SQLite, incremental scan, library browser, M3U, themes, keybindings)
-Phase 6 (9 sessions): Extensions (cover art, notifications, MPRIS2, online lyrics, EQ, Last.fm, packaging, macOS)
-```
+- **Config lives in `<project>/config/`** (NOT XDG). On first run the app copies `config/default.toml` → `config/config.toml`; edit `config/config.toml` thereafter. `keybindings.toml` is optional (hardcoded defaults exist).
+- **Runtime data lives in `<project>/data/`** — `tmper.log`, `state.json` (saved volume/repeat/lyrics-offset, restored at startup), `playlists.json`, `library.db` (SQLite). This dir is gitignored.
+- **Themes live in `themes/<name>.toml`** — 5 real palettes (tokyo-night, dracula, nord, solarized-dark, catppuccin-mocha) loaded by `src/ui/theme.rs`. UI colors come from `UiState.theme`, never hardcoded.
 
 ## Key Architecture Decisions
 
 ### Language: Rust
 - ratatui (most mature Rust TUI framework) + crossterm terminal backend
 - rodio + symphonia for audio (pure Rust, no system ffmpeg dependency, single binary distribution)
-- Zero-cost abstraction for real-time audio decoding and FFT
 - Single binary: `cargo build --release`
 
 ### Concurrency Model
-- **tokio** async runtime with `tokio::mpsc` channels for inter-module communication
-- Audio decoding and FFT run on dedicated threads (`tokio::task::spawn_blocking`)
-- UI rendering on main thread at ~30-60 FPS
-- State updates centralized in event loop; UI rendering is read-only (`&AppState`)
+- **tokio** async runtime in `App::run()`; main loop uses `tokio::select!` over an event channel and a tick interval
+- **Burst-mode input thread**: a background thread `poll()`s crossterm and batch-`read()`s events into an `mpsc::unbounded_channel` of `Vec<CrosstermEvent>`; the loop processes the batch and draws ONCE (handles key auto-repeat without scroll-after-release)
+- Audio decode and seek run on background threads (`tokio::task::spawn_blocking`) feeding a shared `Arc<Sink>` — track switches and seeks don't freeze the UI
+- FFT analysis runs on its own thread writing into a shared `Arc<Mutex<VecDeque<f32>>>` ring buffer; the UI reads a `Vec<f32>` snapshot each tick
+- UI rendering is read-only over `&UiState`; all mutation happens in `App::handle_event`
 
 ### Audio Pipeline
 ```
 Audio file → Symphonia (format probe + decoder) → PCM f32 samples
-  ├─ Rodio Sink → sound card
-  └─ Ring buffer → FFT Analyzer → SpectrumProcessor → VisualizerData event
+  ├─ Rodio Sink (shared Arc, fed from background thread) → sound card
+  └─ Ring buffer → FFT thread → SpectrumProcessor → UiState.visualizer_data
 ```
 
-## Project Structure (target)
+## Project Structure
 
 ```
 src/
-├── main.rs             # Entry: tracing init, config load, App::run()
-├── app.rs              # AppState + event loop
-├── event.rs            # AppEvent enum
-├── config.rs           # Config loading from XDG paths
-├── cli.rs              # clap CLI args
-├── playlist.rs         # Playlist + TrackEntry data structures
-├── audio/              # AudioEngine, Symphonia decoder, Rodio output
-├── metadata/           # Lofty tag reader
-├── lyrics/             # LRC parser, sync engine
-├── visualizer/         # FFT analysis, spectrum processing, rendering
-├── library/            # SQLite index, directory scanner, M3U I/O
-├── ui/                 # Full UI: views (player, library, lyrics, visualizer) + widgets
-└── input/              # Keymap, handler (modal), command parser
+├── main.rs             # tracing init, ensure config, App::run()
+├── app/                # App + event loop + playback + persistence + handlers/
+│   ├── mod.rs          #   App struct, run() event loop, burst-mode input
+│   ├── playback.rs     #   move_selection, play_selected, next/prev, on_track_ended, start_fft
+│   ├── persistence.rs  #   save/load state, playlists, library paths
+│   └── handlers/       #   key dispatch (mod/playlist/library/browser/settings)
+├── audio/              # engine.rs (AudioEngine), decoder.rs (Symphonia), output.rs (rodio Sink)
+├── metadata/           # lofty tag reader (title/artist/album/cover art)
+├── lyrics/             # LRC parser + sync engine + types
+├── visualizer/         # fft.rs, processor.rs, render.rs (block-bar rendering)
+├── library/            # database.rs (SQLite), scanner.rs (test-only), playlist_manager.rs (M3U)
+├── ui/                 # theme.rs, mod.rs (UiState + render), cover/, views/ (7), widgets/
+├── input/              # keymap.rs (bindings), handler.rs (double-key gg/dd), command.rs (:cmd)
+├── config.rs           # Config structs + load/ensure + clamps (only ~7 live keys)
+├── event.rs            # AppEvent enum (Key, Tick, Quit, JumpTop, RemoveSelected)
+├── cli.rs              # clap: `tmper play <file>`
+├── playlist.rs         # PlaylistData { name, songs: Vec<PathBuf> } — single playlist model
+├── paths.rs            # project_root (CARGO_MANIFEST_DIR in debug, exe-relative in release)
+├── constants.rs        # runtime tuning constants (timeouts, buffer sizes, FPS)
+└── error.rs            # AppError (thiserror)
 ```
 
 ## Key Design Patterns
 
-- **Single writer, read-only readers**: AppState mutated only in event loop's `handle_event()`, UI reads `&AppState`
-- **Channel-based communication**: Subsystems send results via `tokio::mpsc::unbounded_channel`
-- **Immutable updates**: `update(old, changes) → new` pattern, no mutation of fields
-- **Error handling**: `anyhow::Result<T>` for public APIs, `thiserror` for `AppError` enum in `src/error.rs`
-- **Config priority**: CLI args > env vars > user config file (~/.config/tmper/config.toml) > hardcoded defaults
+- **Single writer, read-only readers**: `App` (event loop) mutates `UiState`; `ui::render` only reads it. Render functions take explicit read-only `Params` structs (e.g. `PlayerViewParams`) rather than the whole state.
+- **Background decode/seek**: heavy work is `spawn_blocking`, results land via shared `Arc` handles; the main thread stays responsive.
+- **Immutable-ish updates**: state structs use `Default` + `..Default::default()`; version counters use `Cell` (`cover_gen`, `visible_rows`).
+- **Error handling**: `AppResult<T>` / `AppError` (thiserror) for public APIs; background-thread errors go to `tracing` logs (never panics).
+- **Config priority**: CLI args > `config/config.toml` > hardcoded defaults. Unknown keys are ignored (no `deny_unknown_fields`).
+- **Config reality check**: only `default_volume`, `seek_step_small_secs`, `num_bars`, `frame_rate`, `smoothing`, `theme`, `show_cover_art` are live. Do not re-add speculative keys without a consuming implementation.
+
+## Known Architectural Debt (do NOT re-litigate without a dedicated plan)
+
+- **Cover art rendering** (`src/ui/cover/mod.rs`): writes Kitty/SIXEL escape sequences directly to stdout outside ratatui's buffer and re-sends SIXEL every frame. This is the source of spurious key presses and UI lag on Konsole. A ratatui-image integration was attempted and rolled back (see `progress/2026-08-01-cover-rollback.md`). A dedicated fix (send SIXEL only on content change) is planned but NOT started.
+- `tmper play <directory>` (directory playback) is NOT implemented — CLI accepts a single file only.
+- MPRIS2, EQ, online lyrics, notifications are not implemented.
 
 ## Dependencies (core)
 
-tokio, ratatui, crossterm, rodio, symphonia, lofty, clap, toml, serde, tracing, tracing-subscriber, anyhow, thiserror, dirs
+tokio, ratatui, crossterm, rodio, symphonia, lofty, clap, toml, serde, serde_json, tracing, tracing-subscriber, anyhow, thiserror, dirs, rand, walkdir, regex, rustfft, rusqlite (bundled), encoding_rs, unicode-width, image (jpeg/png), base64
 
-## Commands (when code exists)
+## Commands
 
 ```bash
 # Build
@@ -92,7 +91,8 @@ cargo build --release
 cargo run -- play <path/to/audio>
 
 # Test
-cargo test                        # all tests
+cargo test                        # all tests (audio tests need an ALSA/Pulse device;
+                                  # CI provides a null device via ~/.asoundrc)
 cargo test <test_name>            # single test
 
 # Lint & Format
@@ -105,7 +105,7 @@ cargo fmt --all && cargo clippy -- -D warnings && cargo test
 
 ## Testing Conventions
 
-- Test audio files go in `tests/fixtures/` (generate with ffmpeg: `ffmpeg -f lavfi -i "sine=frequency=440:duration=2" -ar 44100 -ac 2 tests/fixtures/test.wav`)
+- Test audio files live in `tests/fixtures/` (`test.wav`, `test.flac`, `test_notags.wav`; regenerate with ffmpeg: `ffmpeg -f lavfi -i "sine=frequency=440:duration=2" -ar 44100 -ac 2 tests/fixtures/test.wav`)
+- Decoder/metadata tests are headless-safe (pure file I/O). App/engine tests construct a real `AudioEngine` and need an audio device — on a headless machine they fail at construction unless a null ALSA device is configured
 - Logical modules have `#[cfg(test)] mod tests { ... }` inline
-- Tests follow Arrange-Act-Assert pattern
-- Cover normal paths + boundary conditions (empty lists, corrupt files, missing metadata)
+- Tests follow Arrange-Act-Assert pattern; cover normal paths + boundary conditions

@@ -195,11 +195,8 @@ impl AudioEngine {
             while let Ok(Some(samples)) = decoder.read_packet() {
                 let source =
                     rodio::buffer::SamplesBuffer::new(channels as u16, sample_rate, samples);
-                let instrumented = InstrumentedSource::new(
-                    source,
-                    pcm_buf.clone(),
-                    runtime::PCM_BUFFER_CAPACITY,
-                );
+                let instrumented =
+                    InstrumentedSource::new(source, pcm_buf.clone(), runtime::PCM_BUFFER_CAPACITY);
                 sink.append(instrumented);
             }
             // Cancellable wait loop: polls every 50ms, exits immediately
@@ -311,11 +308,8 @@ impl AudioEngine {
             while let Ok(Some(samples)) = decoder.read_packet() {
                 let source =
                     rodio::buffer::SamplesBuffer::new(channels as u16, sample_rate, samples);
-                let instrumented = InstrumentedSource::new(
-                    source,
-                    pcm_buf.clone(),
-                    runtime::PCM_BUFFER_CAPACITY,
-                );
+                let instrumented =
+                    InstrumentedSource::new(source, pcm_buf.clone(), runtime::PCM_BUFFER_CAPACITY);
                 sink.append(instrumented);
             }
             // Cancellable wait loop: exits when the sink drains naturally
@@ -460,9 +454,7 @@ mod tests {
 
         // Seek forward by 0.5s. The async path must jump position immediately
         // (base_offset), not block while the background task re-decodes.
-        engine
-            .seek_relative(0.5)
-            .expect("seek should not error");
+        engine.seek_relative(0.5).expect("seek should not error");
         let pos = engine.position_secs();
         assert!(
             (0.4..0.7).contains(&pos),

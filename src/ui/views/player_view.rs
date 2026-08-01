@@ -9,12 +9,14 @@ use std::sync::Arc;
 
 use crate::lyrics::types::LyricTrack;
 use crate::ui::format_duration;
+use crate::ui::theme::Theme;
 use crate::ui::views::playlist_view::PlaylistManagerState;
 use crate::ui::{RepeatMode, TrackDisplay};
 
 /// Read-only view parameters for the player view.
 /// Extracted from `UiState` so each render function declares exactly what it needs.
 pub struct PlayerViewParams<'a> {
+    pub theme: &'a Theme,
     pub title: &'a str,
     pub artist: &'a str,
     pub position: f64,
@@ -190,7 +192,7 @@ fn render_cover_art(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Now Playing ")
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(params.theme.primary));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -239,7 +241,7 @@ fn render_cover_art(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
     lines.push(Line::from(vec![Span::styled(
         format!("{:^w$}", title, w = w),
         Style::default()
-            .fg(Color::White)
+            .fg(params.theme.text)
             .add_modifier(Modifier::BOLD),
     )]));
 
@@ -252,7 +254,7 @@ fn render_cover_art(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
     if !artist.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             format!("{:^w$}", artist, w = w),
-            Style::default().fg(Color::Gray),
+            Style::default().fg(params.theme.secondary),
         )]));
     }
 
@@ -261,7 +263,7 @@ fn render_cover_art(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
         let time_str = format!("{} {} / {}", play_icon, pos_str, dur_str);
         lines.push(Line::from(vec![Span::styled(
             format!("{:^w$}", time_str, w = w),
-            Style::default().fg(Color::Green),
+            Style::default().fg(params.theme.success),
         )]));
     }
 
@@ -273,11 +275,8 @@ fn render_cover_art(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
     // Album
     if !params.album.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled(" 专辑: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                params.album,
-                Style::default().fg(Color::Rgb(180, 180, 200)),
-            ),
+            Span::styled(" 专辑: ", Style::default().fg(params.theme.muted)),
+            Span::styled(params.album, Style::default().fg(params.theme.album)),
         ]));
     }
 
@@ -286,19 +285,19 @@ fn render_cover_art(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
     if !params.genre.is_empty() {
         meta_parts.push(Span::styled(
             format!("{} ", params.genre),
-            Style::default().fg(Color::Rgb(160, 200, 160)),
+            Style::default().fg(params.theme.genre),
         ));
     }
     if !params.year.is_empty() {
         meta_parts.push(Span::styled(
             format!("{} ", params.year),
-            Style::default().fg(Color::Rgb(200, 180, 140)),
+            Style::default().fg(params.theme.year),
         ));
     }
     if !params.codec.is_empty() {
         meta_parts.push(Span::styled(
             params.codec.to_uppercase(),
-            Style::default().fg(Color::Rgb(140, 140, 180)),
+            Style::default().fg(params.theme.codec),
         ));
     }
     if !meta_parts.is_empty() {
@@ -314,13 +313,13 @@ fn render_search_results(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(" Search: {} ", params.search_query))
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(params.theme.primary));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     let matches = crate::ui::search_matches(params.tracks, params.search_query);
     if matches.is_empty() {
-        let para = Paragraph::new("(no matches)").style(Style::default().fg(Color::DarkGray));
+        let para = Paragraph::new("(no matches)").style(Style::default().fg(params.theme.muted));
         f.render_widget(para, inner);
         return;
     }
@@ -346,10 +345,10 @@ fn render_search_results(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
         let text = format!("{}{} — {}", label, t.title, t.artist);
         let style = if is_cur {
             Style::default()
-                .fg(Color::Cyan)
+                .fg(params.theme.primary)
                 .add_modifier(Modifier::BOLD)
         } else if is_playing {
-            Style::default().fg(Color::Green)
+            Style::default().fg(params.theme.success)
         } else {
             Style::default()
         };
@@ -364,13 +363,13 @@ fn render_mini_playlist(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Playlists ")
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(Style::default().fg(params.theme.muted));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     let ps = params.playlist_state;
     if ps.playlists.is_empty() {
-        let para = Paragraph::new("(no playlists)").style(Style::default().fg(Color::DarkGray));
+        let para = Paragraph::new("(no playlists)").style(Style::default().fg(params.theme.muted));
         f.render_widget(para, inner);
         return;
     }
@@ -381,7 +380,7 @@ fn render_mini_playlist(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
     // Convert sidebar cursor (0-based) to full-model cursor (+1 for "…").
     let full_cursor = ps.sidebar_selected + 1;
     let all_lines =
-        model.build_styled_lines(true, &InsertMode::Off, full_cursor, |song| {
+        model.build_styled_lines(true, &InsertMode::Off, params.theme, full_cursor, |song| {
             params
                 .playing_index
                 .and_then(|pi| params.tracks.get(pi).map(|t| t.path == *song))
@@ -427,14 +426,14 @@ fn render_lyrics_section(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Lyrics ")
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(params.theme.primary));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     if let Some(track) = params.lyric_track {
         if track.lines.is_empty() {
             let para =
-                Paragraph::new("No lyrics found").style(Style::default().fg(Color::DarkGray));
+                Paragraph::new("No lyrics found").style(Style::default().fg(params.theme.muted));
             f.render_widget(para, inner);
             return;
         }
@@ -462,7 +461,7 @@ fn render_lyrics_section(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
 
                 let style = if is_current {
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(params.theme.primary)
                         .add_modifier(Modifier::BOLD)
                 } else if is_past {
                     let dist = params.current_lyric_index.saturating_sub(i) as f32;
@@ -480,7 +479,8 @@ fn render_lyrics_section(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
         let para = Paragraph::new(lines);
         f.render_widget(para, inner);
     } else {
-        let para = Paragraph::new("No lyrics loaded").style(Style::default().fg(Color::DarkGray));
+        let para =
+            Paragraph::new("No lyrics loaded").style(Style::default().fg(params.theme.muted));
         f.render_widget(para, inner);
     }
 }
@@ -489,17 +489,22 @@ fn render_spectrum_section(f: &mut Frame, area: Rect, params: &PlayerViewParams)
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Spectrum ")
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(Style::default().fg(params.theme.muted));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     if params.visualizer_data.is_empty() {
-        let para = Paragraph::new("No audio data").style(Style::default().fg(Color::DarkGray));
+        let para = Paragraph::new("No audio data").style(Style::default().fg(params.theme.muted));
         f.render_widget(para, inner);
         return;
     }
 
-    crate::ui::widgets::visualizer_panel::render_visualizer(f, inner, params.visualizer_data);
+    crate::ui::widgets::visualizer_panel::render_visualizer(
+        f,
+        inner,
+        params.theme,
+        params.visualizer_data,
+    );
 }
 
 fn render_song_info(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
@@ -511,7 +516,7 @@ fn render_song_info(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
             parts.push(Span::styled(
                 format!(" {} {} ", '🎵', pl_name),
                 Style::default()
-                    .fg(Color::Rgb(255, 200, 100))
+                    .fg(params.theme.accent)
                     .add_modifier(Modifier::BOLD),
             ));
         }
@@ -520,25 +525,25 @@ fn render_song_info(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
     if !params.album.is_empty() {
         parts.push(Span::styled(
             format!(" {} {} ", "\u{1f4bf}", params.album),
-            Style::default().fg(Color::Rgb(180, 180, 200)),
+            Style::default().fg(params.theme.album),
         ));
     }
     if !params.genre.is_empty() {
         parts.push(Span::styled(
             format!(" {} {} ", "\u{266a}", params.genre),
-            Style::default().fg(Color::Rgb(160, 200, 160)),
+            Style::default().fg(params.theme.genre),
         ));
     }
     if !params.year.is_empty() {
         parts.push(Span::styled(
             format!(" {} {} ", "\u{1f4c5}", params.year),
-            Style::default().fg(Color::Rgb(200, 180, 140)),
+            Style::default().fg(params.theme.year),
         ));
     }
     if !params.codec.is_empty() {
         parts.push(Span::styled(
             format!(" {} ", params.codec.to_uppercase()),
-            Style::default().fg(Color::Rgb(140, 140, 180)),
+            Style::default().fg(params.theme.codec),
         ));
     }
 
@@ -572,14 +577,11 @@ fn render_control_bar(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
     let empty = bar_w.saturating_sub(filled);
 
     let bar_progress = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
-    let bar = format!(
-        "{} {} [{}] {}",
-        time_str, vol_str, bar_progress, mode_str
-    );
+    let bar = format!("{} {} [{}] {}", time_str, vol_str, bar_progress, mode_str);
 
     let para = Paragraph::new(Line::from(Span::styled(
         bar,
-        Style::default().fg(Color::Magenta),
+        Style::default().fg(params.theme.control),
     )));
     f.render_widget(para, area);
 }
