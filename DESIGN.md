@@ -622,7 +622,7 @@ SIXEL/Kitty 封面数据写入 stdout 后，部分终端（如 Konsole）可能�
 | `Ctrl+d/u` | 翻半页 | 10 行 |
 | `dd` | 删除选中 | RemoveSelected |
 | `r` | 循环模式 | Sequential → Shuffle → SingleTrack |
-| `/` | 搜索 | 进入搜索模式 |
+| `/` | 搜索 | 播放器队列实时过滤（j/k 选结果，Enter 播放并退出） |
 | `[` `]` `{` `}` | 歌词偏移 | ±500ms / ±2000ms |
 | `Ctrl+r` | 重置偏移 | 0ms |
 | `q` | 退出 | Quit |

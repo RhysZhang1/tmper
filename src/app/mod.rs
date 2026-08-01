@@ -30,7 +30,6 @@ pub struct App {
     ui_state: UiState,
     engine: AudioEngine,
     should_quit: bool,
-    search_mode: bool,
     key_handler: KeyHandler,
     key_bindings: KeyBindings,
     fft_cancel_tx: Option<tokio::sync::watch::Sender<()>>,
@@ -67,7 +66,6 @@ impl App {
             },
             engine,
             should_quit: false,
-            search_mode: false,
             key_handler: KeyHandler::new(runtime::KEY_TIMEOUT_MS, quit_key),
             key_bindings,
             library_db,
@@ -445,5 +443,46 @@ mod tests {
         assert!(ta.app.ui_state.command_mode);
         ta.press_key(KeyCode::Esc);
         assert!(!ta.app.ui_state.command_mode);
+    }
+
+    #[test]
+    fn test_search_enter_filter_navigate_exit() {
+        let mut ta = TestApp::new();
+        // Seed the player queue directly (no audio device needed).
+        let raw = [
+            ("song_a.flac", "Alpha One", "Artist X"),
+            ("song_b.flac", "Beta Two", "Artist Y"),
+            ("song_c.flac", "Alpha Three", "Artist X"),
+        ];
+        ta.app.ui_state.player.tracks = raw
+            .iter()
+            .map(|(p, t, a)| crate::ui::TrackDisplay {
+                path: std::path::PathBuf::from(p),
+                title: t.to_string(),
+                artist: a.to_string(),
+                duration_secs: 1.0,
+            })
+            .collect();
+
+        // Enter search with '/'
+        ta.press_char('/');
+        assert!(ta.app.ui_state.search_mode);
+
+        // Typing filters the queue; 'alpha' matches tracks 0 and 2.
+        for c in "alpha".chars() {
+            ta.press_char(c);
+        }
+        assert_eq!(ta.app.ui_state.search_query, "alpha");
+        let matches = crate::ui::search_matches(&ta.app.ui_state.player.tracks, "alpha");
+        assert_eq!(matches, vec![0, 2]);
+
+        // j/k navigate within matches; Enter plays + exits; Esc cancels.
+        ta.press_char('j');
+        assert_eq!(ta.app.ui_state.player.selected_index, 2);
+        ta.press_char('k');
+        assert_eq!(ta.app.ui_state.player.selected_index, 0);
+        ta.press_key(KeyCode::Esc);
+        assert!(!ta.app.ui_state.search_mode);
+        assert!(ta.app.ui_state.search_query.is_empty());
     }
 }

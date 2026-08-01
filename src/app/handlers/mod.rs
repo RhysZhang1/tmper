@@ -60,7 +60,19 @@ impl App {
             return;
         }
 
-        // Help overlay: j/k scroll, 0/Esc to close
+        // Global `/` search (player view): j/k navigate results, all other
+        // keys edit the query. Caught here so digits/letters can't leak into
+        // view-switching or global keys while searching.
+        if self.ui_state.search_mode {
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => self.search_move(1),
+                KeyCode::Char('k') | KeyCode::Up => self.search_move(-1),
+                _ => self.handle_search_input(key),
+            }
+            return;
+        }
+
+        // Help overlay: j/k scroll, 8/Esc to close
         if self.ui_state.view.show_help {
             match key.code {
                 KeyCode::Char('j') | KeyCode::Down => {
@@ -121,7 +133,7 @@ impl App {
                 if self.ui_state.view.show_help {
                     self.ui_state.view.show_help = false;
                 } else {
-                    self.search_mode = false;
+                    self.ui_state.search_mode = false;
                     self.ui_state.search_query.clear();
                 }
             }
@@ -285,7 +297,7 @@ impl App {
 
         // `:` enters command mode (like Vim)
         if key.code == KeyCode::Char(':') && key.modifiers.is_empty() {
-            if !self.search_mode {
+            if !self.ui_state.search_mode {
                 self.ui_state.command_mode = true;
                 self.ui_state.command_buffer.clear();
             }
@@ -384,15 +396,13 @@ impl App {
                 KeyCode::Char('{') => self.ui_state.lyrics.lyrics_offset_ms -= 2000,
                 KeyCode::Char('}') => self.ui_state.lyrics.lyrics_offset_ms += 2000,
                 // Search
-                KeyCode::Char('/') => {
-                    self.search_mode = true;
+                // `/` filters the player queue — only meaningful in the
+                // player view.
+                KeyCode::Char('/') if self.ui_state.view.active_view == ViewMode::Player => {
+                    self.ui_state.search_mode = true;
                     self.ui_state.search_query.clear();
                 }
-                _ => {
-                    if self.search_mode {
-                        self.handle_search_input(key);
-                    }
-                }
+                _ => {}
             }
         }
     }
@@ -401,14 +411,45 @@ impl App {
         match key.code {
             KeyCode::Char(c) if c != '/' => self.ui_state.search_query.push(c),
             KeyCode::Backspace => {
-                self.ui_state.search_query.pop();
+                if self.ui_state.search_query.is_empty() {
+                    // Backspace on an empty query exits search.
+                    self.ui_state.search_mode = false;
+                } else {
+                    self.ui_state.search_query.pop();
+                }
+            }
+            KeyCode::Enter => {
+                self.play_selected();
+                self.ui_state.search_mode = false;
+                self.ui_state.search_query.clear();
             }
             KeyCode::Esc => {
-                self.search_mode = false;
+                self.ui_state.search_mode = false;
                 self.ui_state.search_query.clear();
             }
             _ => {}
         }
+    }
+
+    /// Move the selection within the `/` search result set (player view).
+    fn search_move(&mut self, delta: i32) {
+        let matches = crate::ui::search_matches(
+            &self.ui_state.player.tracks,
+            &self.ui_state.search_query,
+        );
+        if matches.is_empty() {
+            return;
+        }
+        let cur = matches
+            .iter()
+            .position(|&i| i == self.ui_state.player.selected_index)
+            .unwrap_or(0);
+        let new_pos = if delta > 0 {
+            (cur + 1).min(matches.len() - 1)
+        } else {
+            cur.saturating_sub(1)
+        };
+        self.ui_state.player.selected_index = matches[new_pos];
     }
 
     // ── Command mode ──
@@ -655,6 +696,10 @@ impl App {
     /// Switch to `target` view. If already on that view, toggle back to Player.
     /// Runs view-specific initialization before the switch.
     fn switch_view(&mut self, target: ViewMode) {
+        // Search is player-view scoped — always leave it on a view switch.
+        self.ui_state.search_mode = false;
+        self.ui_state.search_query.clear();
+
         // Always toggle back to Player if already on the target view
         if self.ui_state.view.active_view == target {
             self.ui_state.view.active_view = ViewMode::Player;

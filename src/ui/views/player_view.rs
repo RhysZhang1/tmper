@@ -36,6 +36,10 @@ pub struct PlayerViewParams<'a> {
     pub playing_index: Option<usize>,
     pub tracks: &'a [TrackDisplay],
     pub active_playlist: Option<usize>,
+    /// `/` search is active — left-top panel shows filtered results.
+    pub search_active: bool,
+    pub search_query: &'a str,
+    pub selected_index: usize,
 }
 
 /// Decode cover art bytes and render as colored block characters (chafa-style).
@@ -174,7 +178,11 @@ fn render_left_panel(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
-    render_cover_art(f, split[0], params);
+    if params.search_active {
+        render_search_results(f, split[0], params);
+    } else {
+        render_cover_art(f, split[0], params);
+    }
     render_mini_playlist(f, split[1], params);
 }
 
@@ -295,6 +303,57 @@ fn render_cover_art(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
     }
     if !meta_parts.is_empty() {
         lines.push(Line::from(meta_parts));
+    }
+
+    let para = Paragraph::new(lines);
+    f.render_widget(para, inner);
+}
+
+/// Search results list shown in the left-top panel while `/` search is active.
+fn render_search_results(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" Search: {} ", params.search_query))
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let matches = crate::ui::search_matches(params.tracks, params.search_query);
+    if matches.is_empty() {
+        let para = Paragraph::new("(no matches)").style(Style::default().fg(Color::DarkGray));
+        f.render_widget(para, inner);
+        return;
+    }
+
+    let vis_h = inner.height as usize;
+    if vis_h == 0 {
+        return;
+    }
+
+    let cur_pos = matches
+        .iter()
+        .position(|&i| i == params.selected_index)
+        .unwrap_or(0);
+    let start = cur_pos.saturating_sub(vis_h.saturating_sub(1));
+    let end = (start + vis_h).min(matches.len());
+
+    let mut lines: Vec<Line> = Vec::new();
+    for &tidx in &matches[start..end] {
+        let t = &params.tracks[tidx];
+        let is_cur = tidx == params.selected_index;
+        let is_playing = params.playing_index == Some(tidx);
+        let label = if is_playing { "▶ " } else { "  " };
+        let text = format!("{}{} — {}", label, t.title, t.artist);
+        let style = if is_cur {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else if is_playing {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(text, style)));
     }
 
     let para = Paragraph::new(lines);

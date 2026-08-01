@@ -157,6 +157,9 @@ pub struct UiState {
     pub playlist_name: String,
     pub command_mode: bool,
     pub command_buffer: String,
+    /// Global `/` search mode (player-view track filter). Unlike the
+    /// library's own search, this one lives on the player queue.
+    pub search_mode: bool,
     pub search_query: String,
     pub notification: Option<(String, std::time::Instant)>,
     pub visible_rows: Cell<usize>,
@@ -181,6 +184,7 @@ impl Default for UiState {
             playlist_name: "Default".into(),
             command_mode: false,
             command_buffer: String::new(),
+            search_mode: false,
             search_query: String::new(),
             notification: None,
             visible_rows: Cell::new(20),
@@ -321,6 +325,9 @@ pub fn render(f: &mut Frame, state: &UiState) {
                 playing_index: state.player.playing_index,
                 tracks: &state.player.tracks,
                 active_playlist: state.active_playlist,
+                search_active: state.search_mode,
+                search_query: &state.search_query,
+                selected_index: state.player.selected_index,
             };
             crate::ui::views::player_view::render_player_view(f, f.area(), &params);
         }
@@ -378,4 +385,23 @@ pub fn format_duration(secs: f64) -> String {
     let mins = total_secs / 60;
     let secs = total_secs % 60;
     format!("{:02}:{:02}", mins, secs)
+}
+
+/// Indices of `tracks` whose title, artist, or path contains `query`
+/// (case-insensitive substring). An empty/blank query matches everything.
+pub(crate) fn search_matches(tracks: &[TrackDisplay], query: &str) -> Vec<usize> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return (0..tracks.len()).collect();
+    }
+    tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| {
+            t.title.to_lowercase().contains(&q)
+                || t.artist.to_lowercase().contains(&q)
+                || t.path.to_string_lossy().to_lowercase().contains(&q)
+        })
+        .map(|(i, _)| i)
+        .collect()
 }
