@@ -51,3 +51,15 @@ cargo test                            ✅ 53 passed（48 单元 + 5 集成，含
 - `InstrumentedSource` 逐 sample 加锁（量级 ~0.2% 单核，可忽略）
 - 目录播放 `tmper play <dir>` 未实现（文档已如实标注为单文件）
 - DESIGN.md v3.5 changelog 的历史测试数被顺带更新为 53（历史不精确，低价值未修）
+
+## 追加：主题切换不生效修复（用户报告）
+
+**症状**：设置界面切主题无效，一直显示蓝紫色（默认 tokyo-night），退出重进也不行。
+
+**根因**：release 下 `paths::project_root()` 用 `current_exe → parent → parent` 解析，对 `target/release/tmper` 布局解析到 `target/`，导致 `Theme::load` 找 `target/themes/<name>.toml`（不存在）→ 回退默认色板。设置写入的 theme 名其实持久化成功了（`target/config/config.toml` 里已是 `catppuccin-mocha`），只是色板加载失败。此问题同时使 release 的 config/data 一直落在 `target/` 下。
+
+**修复**：
+- `paths.rs` release 分支改为从 exe 逐级向上找同时含 `themes/` + `config/` 的目录（兼容 `target/release/tmper` → 仓库根，及 `$prefix/bin/tmper` → `$prefix`），找不到再回退旧启发式
+- 迁移用户真实数据 `target/{config,data}` → 仓库根 `{config,data}`（保留 target/ 作备份未删除）
+
+**验证**：release 运行日志显示 `Loaded config from .../config/config.toml`、无 `Theme ... unreadable` 警告、`Restored saved state (volume=0.10)`；53 测试 + clippy 全绿。
