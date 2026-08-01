@@ -326,10 +326,10 @@ impl App {
             self.move_selection(-1, visible_h);
         } else {
             match key.code {
-                // Seeking — cooldown-protected because seek_relative()
-                // does a full sync re-decode, which freezes the UI at
-                // terminal auto-repeat rate (~30 Hz).  Skip seeks that
-                // arrive within 150ms of the last one.
+                // Seeking — cooldown-limited. seek_relative() now decodes
+                // on a background thread, but holding the key still spawns a
+                // fresh re-decode per event (~30 Hz auto-repeat). The 150ms
+                // cooldown keeps rapid repeats from piling up re-decodes.
                 KeyCode::Left | KeyCode::Right => {
                     let now = std::time::Instant::now();
                     let cooled_down = self

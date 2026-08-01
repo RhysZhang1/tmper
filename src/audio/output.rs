@@ -27,6 +27,10 @@ impl AudioOutput {
         })
     }
 
+    /// Append a source to the sink. Only used by the sync `play_file`
+    /// (test-only) path — production decoding uses `sink_arc().append()`
+    /// from background tasks.
+    #[cfg(test)]
     pub fn append_source(&self, source: impl rodio::Source<Item = f32> + Send + 'static) {
         self.sink.append(source);
     }

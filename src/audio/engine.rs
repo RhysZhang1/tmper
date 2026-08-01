@@ -69,8 +69,6 @@ struct PositionState {
 pub struct AudioEngine {
     output: AudioOutput,
     decoder: Option<AudioDecoder>,
-    sample_rate: u32,
-    channels: u8,
     current_volume: f32,
     duration_secs: Arc<Mutex<Option<f64>>>,
     pub pcm_buffer: Arc<Mutex<VecDeque<f32>>>,
@@ -87,8 +85,6 @@ impl AudioEngine {
         Ok(Self {
             output,
             decoder: None,
-            sample_rate: runtime::DEFAULT_SAMPLE_RATE,
-            channels: 2,
             current_volume: 0.8,
             duration_secs: Arc::new(Mutex::new(None)),
             pcm_buffer: Arc::new(Mutex::new(VecDeque::with_capacity(
@@ -139,12 +135,10 @@ impl AudioEngine {
         self.pcm_buffer.lock().unwrap().clear();
 
         let mut decoder = AudioDecoder::open(path)?;
-        self.sample_rate = decoder.sample_rate;
-        self.channels = decoder.channels;
         *self.duration_secs.lock().unwrap() = Some(decoder.duration_secs());
 
-        let channels = self.channels;
-        let sample_rate = self.sample_rate;
+        let channels = decoder.channels;
+        let sample_rate = decoder.sample_rate;
         let pcm_buf = self.pcm_buffer.clone();
 
         while let Some(samples) = decoder.read_packet()? {
@@ -258,6 +252,10 @@ impl AudioEngine {
 
     /// Seek by a relative delta (seconds). Positive = forward, negative = backward.
     /// Re-decodes the file from the new position (true audio seek).
+    ///
+    /// Decoding runs on a background thread (mirrors `play_file_async`), so
+    /// seeking large files no longer freezes the event loop. Position jumps
+    /// to the target immediately; audio begins once the task feeds the sink.
     pub fn seek_relative(&mut self, delta_secs: f64) -> AppResult<()> {
         self.cancel_decode();
         let path = match &self.current_path {
@@ -275,36 +273,59 @@ impl AudioEngine {
             return Ok(());
         }
 
-        // Re-open file, skip to target, then stream from there
-        let mut decoder = AudioDecoder::open(&path)?;
-        self.sample_rate = decoder.sample_rate;
-        self.channels = decoder.channels;
-        decoder.seek_to_secs(target)?;
+        // Jump position immediately — the UI advances to the target while
+        // the background task decodes the remaining audio from there.
+        *self.position.lock().unwrap() = PositionState {
+            start: Some(Instant::now()),
+            total_paused: Duration::ZERO,
+            pause_start: None,
+            base_offset: target,
+        };
 
-        // Replace sink and stream remaining packets
+        // Replace the sink and clear the FFT buffer for the new stream.
+        self.pcm_buffer.lock().unwrap().clear();
         self.output.stop_and_replace();
         self.output.set_volume(self.current_volume);
-        self.pcm_buffer.lock().unwrap().clear();
 
-        let channels = self.channels;
-        let sample_rate = self.sample_rate;
+        let sink = self.output.sink_arc();
         let pcm_buf = self.pcm_buffer.clone();
+        let volume = self.current_volume;
+        let cancel = self.cancel_flag.clone();
+        sink.set_volume(volume);
 
-        while let Some(samples) = decoder.read_packet()? {
-            let source = rodio::buffer::SamplesBuffer::new(channels as u16, sample_rate, samples);
-            self.output.append_source(InstrumentedSource::new(
-                source,
-                pcm_buf.clone(),
-                runtime::PCM_BUFFER_CAPACITY,
-            ));
-        }
+        let h = tokio::task::spawn_blocking(move || {
+            let mut decoder = match AudioDecoder::open(&path) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::error!("Async seek: failed to open file: {e}");
+                    return;
+                }
+            };
+            if let Err(e) = decoder.seek_to_secs(target) {
+                tracing::error!("Async seek: failed to seek to {target}s: {e}");
+                return;
+            }
+            let sample_rate = decoder.sample_rate;
+            let channels = decoder.channels;
 
-        // Position tracking from the new offset
-        let mut pos = self.position.lock().unwrap();
-        pos.base_offset = target;
-        pos.start = Some(Instant::now());
-        pos.total_paused = Duration::ZERO;
-        pos.pause_start = None;
+            while let Ok(Some(samples)) = decoder.read_packet() {
+                let source =
+                    rodio::buffer::SamplesBuffer::new(channels as u16, sample_rate, samples);
+                let instrumented = InstrumentedSource::new(
+                    source,
+                    pcm_buf.clone(),
+                    runtime::PCM_BUFFER_CAPACITY,
+                );
+                sink.append(instrumented);
+            }
+            // Cancellable wait loop: exits when the sink drains naturally
+            // or the next play/seek/stop cancels the decode.
+            while !cancel.load(Ordering::Relaxed) && !sink.empty() {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+
+        self.decode_handle = Some(h);
 
         Ok(())
     }
@@ -428,5 +449,28 @@ mod tests {
             engine.duration_secs().unwrap_or(0.0) > 0.0,
             "Duration should be set after play_file"
         );
+    }
+
+    #[tokio::test]
+    async fn test_async_seek_jumps_position() {
+        let mut engine = AudioEngine::new().expect("Failed to create engine");
+        engine
+            .play_file(Path::new("tests/fixtures/test.wav"))
+            .expect("Failed to play file");
+
+        // Seek forward by 0.5s. The async path must jump position immediately
+        // (base_offset), not block while the background task re-decodes.
+        engine
+            .seek_relative(0.5)
+            .expect("seek should not error");
+        let pos = engine.position_secs();
+        assert!(
+            (0.4..0.7).contains(&pos),
+            "position should jump to ~0.5s after seek, got {pos}"
+        );
+
+        // Give the background decode task time to finish draining.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        engine.stop();
     }
 }

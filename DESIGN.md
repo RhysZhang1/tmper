@@ -185,7 +185,7 @@ pub struct AudioEngine {
 
 **位置追踪**：使用壁钟时间（`Instant`），而非帧计数。避免了帧计数导致 100% 进度显示的 bug。暂停时记录 `paused_at`，恢复时补偿。
 
-**seek**：`seek_relative(secs)` 从目标位置重新解码整个文件，送入新 Sink。
+**seek**：`seek_relative(secs)` 从目标位置重新解码整个文件，送入新 Sink。解码在后台线程进行（镜像 `play_file_async` 的 `Arc<Sink>` 模式），位置立即跳到目标，不阻塞事件循环。
 
 **InstrumentedSource**：包装 rodio Source，在 `next()` 中拷贝采样到共享 `pcm_buffer: Arc<Mutex<VecDeque<f32>>>`，供 FFT 线程读取。
 
@@ -801,6 +801,7 @@ tmper/
 | v3.2 | 2026-07-18 | 代码质量改进：PCM 缓冲增大、消除 clippy allow、render() 改 match、Config 默认值去重、RUST_LOG 支持、KeyHandler 控制字符过滤 |
 | v3.3 | 2026-07-18 | Session A–D：UiState 视图参数抽取 + 状态分组 (PlayerCore/LyricsState/ViewState)、play_file 异步化解码、stdout 防护增强 (4 层防御) |
 | v3.4 | 2026-07-19 | 回滚长按快进快退；事件循环绘制节流（~20fps）修复播放时滚动卡顿；键1迷你歌单独立滚动状态修复末行消失 |
+| v3.5 | 2026-07-19 | seek_relative 改为后台线程异步解码（镜像 play_file_async）；git 卫生（分支 rename main、清理 tar.gz、补 gitignore）；文档同步（帮助键 8、测试数 54、事件模型） |
 
 ### 已知技术债（v3.4 更新）
 
@@ -813,4 +814,4 @@ tmper/
 | 长按快进快退 | 🟡 | 已回滚（crossterm 无按键释放检测） | ✅ v3.4 回滚 |
 | 播放时滚动卡顿 | 🟡 | 事件循环绘制节流至 ~20fps | ✅ v3.4 修复 |
 | 键1 迷你歌单末行消失 | 🟡 | 侧边栏独立滚动状态 | ✅ v3.4 修复 |
-| seek_relative 同步解码 | 🟡 | 跳转时阻塞事件循环 | ⏳ 待处理 |
+| seek_relative 同步解码 | 🟡 | 跳转时阻塞事件循环 | ✅ v3.5 后台线程异步解码 |
