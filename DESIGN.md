@@ -609,8 +609,6 @@ pub struct Config {
 ```
 crossterm KeyEvent → KeyHandler (双键序列检测: gg, dd)
     → handle_key_event():
-        ├─ [Cover-Escape Guard] 最近 200ms 内输出过封面数据?
-        │    └─ Yes & Key is Char → 丢弃 (防终端转义干扰)
         ├─ 视图切换键 (1-7, 8)
         ├─ Esc (清除搜索/帮助)
         ├─ 搜索模式 (累积字符)
@@ -622,18 +620,15 @@ crossterm KeyEvent → KeyHandler (双键序列检测: gg, dd)
 
 `KeyHandler` 记录上一个按键 + 时间戳。200ms 内收到第二个键 → 匹配序列（`gg` → JumpTop, `dd` → RemoveSelected）。超时 → 丢弃第一个键。
 
-### 9.3 Cover-Escape Guard
+### 9.3 Cover 渲染与输入隔离
 
-SIXEL/Kitty 封面数据写入 stdout 后，部分终端（如 Konsole）可能将此转义序列中的字节误解释为 stdin 输入，产生虚假按键事件。处理机制：
-1. `CoverRenderer` 记录 `last_output_at`：仅在**实际向 stdout 输出封面数据**时更新（Kitty 协议 flush 后 / SIXEL flush 后）。
-2. 在 `handle_key_event()` 中：如果当前时间在 `last_output_at` 之后 200ms 内，屏蔽所有 `Char` 类型事件。
-3. `suppress_countdown` 在切歌后阻止封面渲染 10 帧（~330ms），避免转切期间触发 guard。
-4. 无封面、封面禁用、或被 `suppress_countdown` 阻止时不启动 guard。
+SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），Konsole 等终端可能把转义字节误读为 stdin 产生虚假按键。2026-08-03 起的设计（详见 `progress/2026-08-03-cover-refactor.md`）：
 
-相比旧的固定 800ms 盲拦方案，改进为：
-- **精确触发**：仅在真正写封面数据时才启动计时窗口，而非切歌就盲等
-- **窗口更短**：200ms vs 800ms，仅为应对终端回显的延迟
-- **零误伤**：无封面时不阻拦任何按键
+1. **一次性发送**：SIXEL/Kitty 是持久图形层——发送后不随 ratatui 重绘消失。封面只在变化时发送一次（换歌、改渲染区域、切回播放器视图），不再每帧重发。**每帧重发是伪按键与卡顿的历史根因**（见 `progress/2026-08-01-cover-rollback.md`）。
+2. **协议互斥**：Kitty 与 chafa SIXEL 按终端环境检测二选一，避免两者同时写入争抢同一区域。
+3. **输入零防御**：不再需要 guard / 帧抑制 / 控制字符过滤等防御层。`handle_key_event` 不拦截任何按键。
+4. **清理**：离开播放器视图、隐藏封面、或新曲目无封面时，置 `clear_pending` → 事件循环 `terminal.clear()` 覆盖 SIXEL 残留（Konsole 对 ED 清 SIXEL 的 workaround）。
+5. 渲染器经注入式 writer + encoder 可测试，状态机由 6 个单元测试锁定（`src/ui/cover/mod.rs`）。
 
 ### 9.4 全局快捷键
 
@@ -771,7 +766,7 @@ tmper/
 │   │   ├── mod.rs              #     UiState、ViewMode、render() 入口
 │   │   ├── theme.rs            #     13 色槽语义主题（themes/*.toml 加载）
 │   │   ├── cover/              #     封面图渲染（终端协议直接输出）
-│   │   │   └── mod.rs          #       CoverRenderer: Kitty / SIXEL 协议
+│   │   │   └── mod.rs          #       CoverRenderer: Kitty/SIXEL 互斥、一次性发送、6 测试
 │   │   ├── views/              #     视图
 │   │   │   ├── player_view.rs  #       播放器主视图
 │   │   │   ├── library_view.rs #       曲库浏览器
@@ -833,13 +828,14 @@ tmper/
 | v3.4 | 2026-07-19 | 回滚长按快进快退；事件循环绘制节流（~20fps）修复播放时滚动卡顿；键1迷你歌单独立滚动状态修复末行消失 |
 | v3.5 | 2026-07-19 | seek_relative 改为后台线程异步解码（镜像 play_file_async）；git 卫生（分支 rename main、清理 tar.gz、补 gitignore）；文档同步（帮助键 8、测试数 53、事件模型） |
 | v3.6 | 2026-08-02 | 清理死配置键（`[library]`/`[lyrics]` 段、gapless、crossfade_seconds、resume_on_startup、color_scheme、char_set、show_on_idle、scan_on_startup、follow_symlinks、show_progress_bar、cover_art_max_width、default_view 全部移除）；首运行自动生成 `config/config.toml`；真实主题系统（13 色槽 `Theme`，从 `themes/*.toml` 加载）；输入改为 burst 模式（poll/read 批量读取）；启动恢复音量/循环模式/歌词偏移 |
+| v3.7 | 2026-08-03 | 封面收敛：SIXEL 每次变化只发一次（替代每帧重发）；删除 cover-escape guard / 帧抑制 / `COVER_SUPPRESS_FRAMES`；Kitty 与 SIXEL 协议互斥；无封面曲目清除残留 SIXEL；chafa 空输出 sticky 失败标记；移除裸 `\x1b[?25l`；CoverRenderer 注入式 writer/encoder + 6 测试 |
 
 ### 已知技术债（v3.4 更新）
 
 | 问题 | 严重度 | 说明 | 状态 |
 |------|--------|------|------|
 | UiState 上帝结构体 | 🔴 | 30+ 字段 → 13 分组 + 3 Cell | ✅ v3.3 完成 |
-| stdout 直接写入 | 🔴 | 4 层防御；ratatui-image 集成待调研 | 🟡 缓解 |
+| stdout 直接写入 | 🟡 | 已收敛为"每次变化一次发送 + 协议互斥"，无输入防御层；仍绕过 ratatui 差分缓冲（架构约束，非 bug） | 🟡 大幅缓解（v3.7） |
 | play_file 同步解码 | 🟡 | 异步路径对 >50MB 启用；seek_relative 仍同步 | 🟡 部分 |
 | 无集成测试 | 🟡 | 53 测试（48 单元 + 5 集成） | ✅ v3.3 完成 |
 | 长按快进快退 | 🟡 | 已回滚（crossterm 无按键释放检测） | ✅ v3.4 回滚 |
