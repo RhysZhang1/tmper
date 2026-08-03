@@ -116,16 +116,20 @@ pub struct CoverRenderer {
 impl CoverRenderer {
     /// Create the production renderer writing to stdout.
     pub fn new() -> Self {
-        Self::with_writer(Box::new(std::io::stdout()), Box::new(ChafaEncoder))
+        let mut renderer = Self::with_writer(Box::new(std::io::stdout()), Box::new(ChafaEncoder));
+        renderer.chafa_available = which_chafa();
+        renderer
     }
 
-    /// Test constructor — inject a writer and an encoder.
+    /// Test constructor — inject a writer and an encoder. The injected encoder
+    /// is assumed to work, so `chafa_available` is forced on — the real `chafa`
+    /// binary is not installed on CI runners, and the tests stub the encoder
+    /// anyway.
     fn with_writer(out: Box<dyn Write + Send>, encoder: Box<dyn SixelEncoder>) -> Self {
-        let chafa_available = which_chafa();
         Self {
             out,
             encoder,
-            chafa_available,
+            chafa_available: true,
             chafa_sixel_cache: None,
             last_chafa_gen: 0,
             last_chafa_rect: None,
