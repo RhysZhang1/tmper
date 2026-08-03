@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Terminal music player (codename: **tmper**) — a terminal-native music player for Arch Linux/KDE Plasma. Written in Rust with ratatui TUI framework. Supports multi-format audio decoding, metadata display, cover art, LRC lyrics syncing, spectrum visualizer, playlist management, a SQLite library index, and Vim-style keyboard navigation.
 
-The project is **implemented and working** (~8,000 lines of Rust, 50+ tests). The source of truth for the architecture is `DESIGN.md`; per-session change logs live in `progress/`. All docs (CLAUDE.md / README.md / DESIGN.md) were reconciled with the code on 2026-08-02.
+The project is **implemented and working** (~8,200 lines of Rust, 59 tests). The source of truth for the architecture is `DESIGN.md`; per-session change logs live in `progress/`. All docs (CLAUDE.md / README.md / DESIGN.md) were reconciled with the code on 2026-08-03.
 
 ## Layout
 
@@ -72,7 +72,7 @@ src/
 
 ## Known Architectural Debt (do NOT re-litigate without a dedicated plan)
 
-- **Cover art rendering** (`src/ui/cover/mod.rs`): writes Kitty/SIXEL escape sequences directly to stdout outside ratatui's buffer and re-sends SIXEL every frame. This is the source of spurious key presses and UI lag on Konsole. A ratatui-image integration was attempted and rolled back (see `progress/2026-08-01-cover-rollback.md`). A dedicated fix (send SIXEL only on content change) is planned but NOT started.
+- **Cover art rendering** (`src/ui/cover/mod.rs`): writes Kitty/SIXEL escape sequences directly to stdout outside ratatui's buffer — inherent to native terminal graphics. Now stable: payloads are sent once per change and the protocols are mutually exclusive (see `progress/2026-08-03-cover-refactor.md`). The chafa subprocess runs with `--probe off` — its default OSC 10/11 terminal probe was the root cause of the phantom keys (responses landed on stdin; commit `3a03ac0`). Residual: the half-block fallback still renders underneath a native overlay (cached, acceptable).
 - `tmper play <directory>` (directory playback) is NOT implemented — CLI accepts a single file only.
 - MPRIS2, EQ, online lyrics, notifications are not implemented.
 

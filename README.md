@@ -19,6 +19,7 @@
   1. **Kitty 图形协议** — 原生像素渲染（Kitty、WezTerm、Ghostty）
   2. **SIXEL** — 通过 `chafa` 子进程（Konsole Plasma 6+，可选）
   3. **半块字符** — Lanczos3 缩放 + Floyd-Steinberg 误差扩散抖动（通用回退）
+- SIXEL 只在封面变化时发送一次；chafa 以 `--probe off` 运行（避免终端颜色探测注入伪按键）
 - 自动读取内嵌封面（ID3v2 APIC / Vorbis Comments / MP4）
 
 ### 元数据
@@ -356,7 +357,7 @@ tmper/
 ```bash
 cargo build                        # 调试编译
 cargo build --release              # 发布编译（单文件 ~7MB）
-cargo test                         # 全部测试（53 个）
+cargo test                         # 全部测试（59 个）
 cargo clippy -- -D warnings        # 代码检查
 cargo fmt --all                    # 格式化
 
