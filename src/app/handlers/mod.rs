@@ -92,21 +92,6 @@ impl App {
             return;
         }
 
-        // ── Cover-escape guard: SIXEL/Kitty data written to stdout may be
-        // misinterpreted by the terminal as stdin input.  Block Char events
-        // for COVER_GUARD_MS after each actual cover-data write (not from
-        // track change — the window is proportional to real output activity).
-        // When cover art is disabled or no data was written, no guard fires.
-        const COVER_GUARD_MS: u64 = 200;
-        if matches!(key.code, KeyCode::Char(_))
-            && self
-                .cover_renderer
-                .last_output()
-                .is_some_and(|t| t.elapsed().as_millis() < COVER_GUARD_MS as u128)
-        {
-            return;
-        }
-
         // View switching (works in all views)
         match key.code {
             KeyCode::Char('1') => self.switch_view(ViewMode::Player),

@@ -214,8 +214,8 @@ impl App {
                     cover_art: self.ui_state.player.cover_art.clone(),
                     cover_rect: self.ui_state.cover_rect.get(),
                 };
-                self.cover_renderer.render_kitty(&cover_params);
-                self.cover_renderer.render_chafa(&cover_params);
+                // Dispatch to the active protocol (Kitty or chafa SIXEL).
+                self.cover_renderer.render(&cover_params);
 
                 last_draw = std::time::Instant::now();
                 needs_draw = false;

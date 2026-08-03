@@ -5,6 +5,15 @@
 //!   Kitty protocol (Kitty / WezTerm / Ghostty)
 //!   → SIXEL via chafa subprocess (Konsole Plasma 6+)
 //!   → half-block characters (fallback in player_view.rs)
+//!
+//! Design: SIXEL/Kitty images are a *persistent graphics layer* on modern
+//! terminals — once sent they survive subsequent ratatui redraws. Each
+//! protocol payload is therefore sent ONCE per change (new cover, new area,
+//! terminal resize, returning to the player view) and left on screen.
+//! Re-sending every frame was the historical root cause of spurious stdin
+//! events ("phantom keys") and UI lag on Konsole — see
+//! `progress/2026-08-01-cover-rollback.md`. Sending once also makes the old
+//! defense stack (frame suppression, blanket input guard) unnecessary.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -26,52 +35,112 @@ pub struct CoverParams {
     pub cover_rect: (u16, u16, u16, u16),
 }
 
+/// Converts cover image bytes into a terminal graphics payload (e.g. SIXEL).
+/// Abstracted so tests can stub the chafa subprocess.
+///
+/// `Send` keeps `CoverRenderer` (and thus `App`) `Send` for the multi-threaded
+/// tokio runtime.
+trait SixelEncoder: Send {
+    /// Returns the payload to write to the terminal, or a human-readable error.
+    fn encode(&self, cover: &[u8], cols: u16, rows: u16) -> Result<Vec<u8>, String>;
+}
+
+/// Default encoder: runs `chafa` as a subprocess (Konsole SIXEL).
+struct ChafaEncoder;
+
+impl SixelEncoder for ChafaEncoder {
+    fn encode(&self, cover: &[u8], cols: u16, rows: u16) -> Result<Vec<u8>, String> {
+        let mut child = std::process::Command::new("chafa")
+            .arg("-f")
+            .arg("sixels")
+            .arg("-c")
+            .arg("full")
+            .arg("-s")
+            .arg(format!("{cols}x{rows}"))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("chafa spawn failed: {e}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(cover);
+        }
+        let out = child
+            .wait_with_output()
+            .map_err(|e| format!("chafa wait failed: {e}"))?;
+        if !out.stderr.is_empty() {
+            tracing::warn!("chafa stderr: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        Ok(out.stdout)
+    }
+}
+
 /// Manages cover-art rendering state and terminal protocol output.
 ///
 /// All fields are private — interaction goes through the public methods.
+/// Protocol output goes through an injectable writer so tests can capture it.
 pub struct CoverRenderer {
-    kitty_rendered: bool,
-    last_cover_gen: u64,
+    out: Box<dyn Write + Send>,
+    encoder: Box<dyn SixelEncoder>,
+    /// Whether the `chafa` binary is usable (checked once at construction).
     chafa_available: bool,
-    last_cover_gen_chafa: u64,
+    /// Cached SIXEL payload — re-sent only when the cover or area changes.
     chafa_sixel_cache: Option<Vec<u8>>,
-    /// Last area (x,y,w,h) the SIXEL payload was rendered for. Re-send when it
-    /// changes (terminal resize) since a one-time send won't reposition.
+    /// Cover identity the cached SIXEL payload was rendered for.
+    last_chafa_gen: u64,
+    /// Last area (x,y,w,h) the SIXEL payload was rendered for.
     last_chafa_rect: Option<(u16, u16, u16, u16)>,
+    /// Sticky: encoding produced no usable payload. Stops per-frame chafa
+    /// spawns until the cover or area changes (a terminal that doesn't
+    /// support SIXEL won't start supporting it mid-session).
+    chafa_failed: bool,
     /// Set to `true` when leaving the player view — the event loop calls
     /// `terminal.clear()` before the next ratatui draw so the internal diff
     /// buffer covers all cells and overwrites any SIXEL residue.
     clear_pending: bool,
-    /// Frame countdown that suppresses ALL cover output when > 0.
-    /// Decrements each frame. Set after track transitions to prevent
-    /// terminal escape-sequence interference during state changes.
-    suppress_countdown: u8,
-    /// Timestamp of the last actual write to stdout (Kitty or SIXEL).
-    /// Used by the event loop to guard against spurious stdin events
-    /// that the terminal may produce from escape-sequence data.
-    last_output_at: Option<std::time::Instant>,
+    /// Whether a Kitty image is currently displayed on screen (needed to
+    /// send the clear sequence when the cover is hidden or the view changes).
+    kitty_active: bool,
+    /// Cover identity the last Kitty image was rendered for.
+    last_kitty_gen: u64,
 }
 
 impl CoverRenderer {
+    /// Create the production renderer writing to stdout.
     pub fn new() -> Self {
+        Self::with_writer(Box::new(std::io::stdout()), Box::new(ChafaEncoder))
+    }
+
+    /// Test constructor — inject a writer and an encoder.
+    fn with_writer(out: Box<dyn Write + Send>, encoder: Box<dyn SixelEncoder>) -> Self {
         let chafa_available = which_chafa();
         Self {
-            kitty_rendered: false,
-            last_cover_gen: 0,
+            out,
+            encoder,
             chafa_available,
-            last_cover_gen_chafa: 0,
             chafa_sixel_cache: None,
+            last_chafa_gen: 0,
             last_chafa_rect: None,
+            chafa_failed: false,
             clear_pending: false,
-            suppress_countdown: 0,
-            last_output_at: None,
+            kitty_active: false,
+            last_kitty_gen: 0,
         }
     }
 
-    // ── Public interface called from App ──
+    /// Render the cover via whichever protocol this terminal supports:
+    /// Kitty if available, otherwise chafa SIXEL. Mutually exclusive — the
+    /// two graphics layers would otherwise fight over the same area.
+    pub fn render(&mut self, params: &CoverParams) {
+        if is_kitty_graphics_compatible() {
+            self.render_kitty(params);
+        } else {
+            self.render_chafa(params);
+        }
+    }
 
     /// Returns `true` when a `terminal.clear()` is needed before the next
-    /// ratatui draw (SIXEL cleanup on view switch).
+    /// ratatui draw (SIXEL cleanup on view switch / cover change).
     pub fn needs_clear(&self) -> bool {
         self.clear_pending
     }
@@ -81,57 +150,36 @@ impl CoverRenderer {
         self.clear_pending = false;
     }
 
-    /// Suppress all cover output for the next `n` frames.
-    /// Call after track transitions to prevent terminal escape-sequence
-    /// interference (spurious input events from SIXEL/Kitty data).
-    pub fn suppress_frames(&mut self, n: u8) {
-        self.suppress_countdown = self.suppress_countdown.saturating_add(n);
-    }
+    // ── Kitty protocol (Kitty / WezTerm / Ghostty) ──
 
-    /// Call after every ratatui draw when on the player view (key 1).
-    /// Attempts Kitty protocol first; falls back to chafa SIXEL.
-    pub fn render_kitty(&mut self, params: &CoverParams) {
-        // Suppress during track transitions to prevent escape-seq interference
-        if self.suppress_countdown > 0 {
-            self.suppress_countdown -= 1;
-            return;
-        }
-        // Only render cover on the player view
-        if params.active_view != ViewMode::Player {
-            self.kitty_rendered = false;
-            return;
-        }
-        // Hide cover when overlays (help, command input) are on top
-        if params.show_help || params.command_mode {
-            self.kitty_rendered = false;
-            return;
-        }
-
-        // Toggle handling: clear Kitty image when cover display is off
-        if !params.show_cover_art {
-            if self.kitty_rendered {
-                let _ = write!(std::io::stdout(), "\x1b_Ga=d,d=I\x1b\\");
-                let _ = std::io::stdout().flush();
-                self.kitty_rendered = false;
-            }
-            return;
-        }
-
-        // Only on terminals that support Kitty graphics protocol
+    fn render_kitty(&mut self, params: &CoverParams) {
         if !is_kitty_graphics_compatible() {
-            self.kitty_rendered = false;
+            self.kitty_active = false;
+            return;
+        }
+        // Not on the player view, or an overlay is on top → clear the image.
+        if params.active_view != ViewMode::Player || params.show_help || params.command_mode {
+            self.clear_kitty();
+            return;
+        }
+        // Cover hidden → clear the image.
+        if !params.show_cover_art {
+            self.clear_kitty();
             return;
         }
 
         let gen = params.cover_gen;
-        if gen == self.last_cover_gen {
-            return; // Image unchanged, Kitty image persists on screen
+        if self.kitty_active && gen == self.last_kitty_gen {
+            return; // image unchanged — Kitty image persists on screen
         }
-        self.last_cover_gen = gen;
+        self.last_kitty_gen = gen;
 
-        let cover = match params.cover_art {
-            Some(ref c) => c.clone(),
-            None => return,
+        let cover = match &params.cover_art {
+            Some(c) => c.clone(),
+            None => {
+                self.clear_kitty();
+                return;
+            }
         };
 
         let (x_chars, y_chars, w_chars, h_chars) = params.cover_rect;
@@ -139,7 +187,6 @@ impl CoverRenderer {
             return;
         }
 
-        // Load, resize, and output via Kitty protocol
         match image::load_from_memory(&cover[..]) {
             Ok(img) => {
                 let (img_w, img_h) = img.dimensions();
@@ -178,13 +225,12 @@ impl CoverRenderer {
                         0
                     };
                     let _ = write!(
-                        std::io::stdout(),
+                        self.out,
                         "\x1b_Ga=T,f=100,s={out_w},v={out_h},c=3,p={px},{py},m={more};{chunk_str}\x1b\\",
                     );
                 }
-                let _ = std::io::stdout().flush();
-                self.kitty_rendered = true;
-                self.last_output_at = Some(std::time::Instant::now());
+                let _ = self.out.flush();
+                self.kitty_active = true;
             }
             Err(e) => {
                 tracing::warn!("Failed to decode cover for Kitty protocol: {e}");
@@ -192,151 +238,101 @@ impl CoverRenderer {
         }
     }
 
-    /// Render cover art via chafa subprocess using SIXEL protocol.
-    /// Only shows on the player view (key 1).
-    ///
-    /// Caches the FULL chafa output (including Konsole-specific setup
-    /// sequences) and re-sends every frame so the image survives redraws.
-    pub fn render_chafa(&mut self, params: &CoverParams) {
-        // Suppress during track transitions to prevent escape-seq interference.
-        // (render_kitty already decremented — just check here.)
-        if self.suppress_countdown > 0 {
-            return;
+    /// Send the Kitty clear sequence if an image is currently displayed.
+    fn clear_kitty(&mut self) {
+        if self.kitty_active {
+            let _ = write!(self.out, "\x1b_Ga=d,d=I\x1b\\");
+            let _ = self.out.flush();
+            self.kitty_active = false;
         }
-        // Only render cover on the player view
-        if params.active_view != ViewMode::Player {
-            if self.chafa_sixel_cache.is_some() {
-                self.clear_pending = true;
-            }
-            self.chafa_sixel_cache = None;
-            self.last_cover_gen_chafa = 0;
-            self.last_chafa_rect = None;
-            return;
-        }
-        // Hide cover when overlays (help, command input) are on top
-        if params.show_help || params.command_mode {
-            if self.chafa_sixel_cache.is_some() {
-                self.clear_pending = true;
-            }
-            self.chafa_sixel_cache = None;
-            self.last_cover_gen_chafa = 0;
-            self.last_chafa_rect = None;
-            return;
-        }
+    }
 
+    // ── chafa SIXEL (Konsole Plasma 6+) ──
+
+    fn render_chafa(&mut self, params: &CoverParams) {
+        // Only render on the player view; hide under overlays.
+        if params.active_view != ViewMode::Player || params.show_help || params.command_mode {
+            self.reset_chafa();
+            return;
+        }
+        // Cover hidden → clear any previously displayed SIXEL.
+        if !params.show_cover_art {
+            self.reset_chafa();
+            return;
+        }
         if !self.chafa_available {
             return;
         }
 
-        let (x_char, y_char, w_char, h_char) = params.cover_rect;
-        if w_char == 0 || h_char == 0 {
-            return;
-        }
-
-        // Cover hidden — clear cache
-        if !params.show_cover_art {
-            if self.chafa_sixel_cache.is_some() {
-                self.clear_pending = true;
-            }
-            self.chafa_sixel_cache = None;
-            self.last_cover_gen_chafa = 0;
-            self.last_chafa_rect = None;
-            return;
-        }
-
-        // Regenerate AND send the SIXEL payload when the cover art changes,
-        // the render area changes (terminal resize), or we've switched back to
-        // the player view. SIXEL is a persistent graphics layer on Konsole, so
-        // a single send per change is enough — the old every-frame re-send was
-        // the source of spurious stdin events (phantom keys) and UI lag.
-        let gen = params.cover_gen;
-        let rect = (x_char, y_char, w_char, h_char);
-        let rect_changed = self.last_chafa_rect != Some(rect);
-        if self.chafa_sixel_cache.is_none() || gen != self.last_cover_gen_chafa || rect_changed {
-            self.last_cover_gen_chafa = gen;
-            self.last_chafa_rect = Some(rect);
-
-            let cover = match params.cover_art {
-                Some(ref c) => c.clone(),
-                None => {
-                    self.chafa_sixel_cache = None;
-                    return;
-                }
-            };
-
-            let output = match std::process::Command::new("chafa")
-                .arg("-f")
-                .arg("sixels")
-                .arg("-c")
-                .arg("full")
-                .arg("-s")
-                .arg(format!("{}x{}", w_char, h_char))
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-            {
-                Ok(mut child) => {
-                    if let Some(ref mut stdin) = child.stdin {
-                        let _ = stdin.write_all(&cover);
-                    }
-                    drop(child.stdin.take());
-                    match child.wait_with_output() {
-                        Ok(out) => {
-                            if !out.stderr.is_empty() {
-                                let msg = String::from_utf8_lossy(&out.stderr);
-                                tracing::warn!("chafa stderr: {msg}");
-                            }
-                            out.stdout
-                        }
-                        Err(e) => {
-                            tracing::warn!("chafa wait failed: {e}");
-                            return;
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("chafa spawn failed: {e}");
-                    self.chafa_available = false;
-                    return;
-                }
-            };
-
-            if output.is_empty() {
-                tracing::warn!("chafa SIXEL output is empty — terminal may not support it");
-                self.chafa_sixel_cache = None;
+        // No cover on this track → a previously shown SIXEL must be cleared,
+        // not left over the fallback song-info text.
+        let cover = match &params.cover_art {
+            Some(c) => c.clone(),
+            None => {
+                self.reset_chafa();
                 return;
             }
+        };
 
-            // Cache the FULL output including any terminal setup sequences
-            self.chafa_sixel_cache = Some(output.clone());
-            self.last_output_at = Some(std::time::Instant::now());
-            tracing::info!(
-                "chafa SIXEL: {} bytes cached (area {}x{})",
-                output.len(),
-                w_char,
-                h_char
-            );
+        let gen = params.cover_gen;
+        let rect = params.cover_rect;
 
-            // Send the payload once. `last_output_at` is recorded above so the
-            // cover-escape guard suppresses phantom input only around this
-            // single write, not permanently (the old every-frame re-send never
-            // re-armed the guard, leaving it ineffective).
-            if let Some(ref data) = self.chafa_sixel_cache {
-                let _ = write!(std::io::stdout(), "\x1b[{};{}H", y_char + 1, x_char + 1);
-                let _ = std::io::stdout().write_all(data);
-                let _ = write!(std::io::stdout(), "\x1b[?25l");
-                let _ = std::io::stdout().flush();
+        // A previously-failed encode only retries when the cover or area
+        // actually changed — no per-frame chafa spawns on terminals that
+        // don't support SIXEL.
+        if self.chafa_failed && self.last_chafa_gen == gen && self.last_chafa_rect == Some(rect) {
+            return;
+        }
+
+        // SIXEL is a persistent graphics layer on Konsole: one send per
+        // change is enough. Re-sending every frame was the root cause of
+        // phantom key events and UI lag (see progress/2026-08-01).
+        let dirty = self.chafa_sixel_cache.is_none()
+            || gen != self.last_chafa_gen
+            || self.last_chafa_rect != Some(rect);
+        if !dirty {
+            return;
+        }
+        self.chafa_failed = false;
+        self.last_chafa_gen = gen;
+        self.last_chafa_rect = Some(rect);
+
+        match self.encoder.encode(&cover, rect.2, rect.3) {
+            Ok(payload) if !payload.is_empty() => {
+                self.chafa_sixel_cache = Some(payload.clone());
+                // Position the cursor at the cover area, then send the payload
+                // once. No cursor-hide sequence: hiding the cursor is cosmetic,
+                // and a raw `\x1b[?25l` bypassing ratatui's cursor management
+                // left the cursor hidden after exit.
+                let _ = write!(self.out, "\x1b[{};{}H", rect.1 + 1, rect.0 + 1);
+                let _ = self.out.write_all(&payload);
+                let _ = self.out.flush();
+            }
+            Ok(_) => {
+                // Empty output — terminal doesn't support SIXEL.
+                tracing::warn!("chafa SIXEL output is empty — terminal may not support it");
+                self.chafa_sixel_cache = None;
+                self.chafa_failed = true;
+            }
+            Err(e) => {
+                tracing::warn!("chafa failed: {e}");
+                self.chafa_sixel_cache = None;
+                self.chafa_failed = true;
             }
         }
     }
 
-    /// Timestamp of the last stdout cover output, if any.
-    /// Used by the event loop to briefly suppress Char events after a
-    /// cover-data write, preventing terminal echo from producing
-    /// spurious key events.
-    pub fn last_output(&self) -> Option<std::time::Instant> {
-        self.last_output_at
+    /// Reset SIXEL state when leaving the player view or hiding the cover.
+    /// Requests a full `terminal.clear()` so ratatui's diff buffer overwrites
+    /// any SIXEL residue.
+    fn reset_chafa(&mut self) {
+        if self.chafa_sixel_cache.is_some() {
+            self.clear_pending = true;
+        }
+        self.chafa_sixel_cache = None;
+        self.last_chafa_gen = 0;
+        self.last_chafa_rect = None;
+        self.chafa_failed = false;
     }
 }
 
@@ -371,4 +367,151 @@ fn is_kitty_graphics_compatible() -> bool {
         return true;
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// Write sink that records bytes so tests can assert on output volume.
+    #[derive(Clone, Default)]
+    struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedBuf {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct StubEncoder;
+    impl SixelEncoder for StubEncoder {
+        fn encode(&self, cover: &[u8], cols: u16, rows: u16) -> Result<Vec<u8>, String> {
+            Ok(format!("SIXEL:{cols}x{rows}:{}B", cover.len()).into_bytes())
+        }
+    }
+
+    struct EmptyEncoder;
+    impl SixelEncoder for EmptyEncoder {
+        fn encode(&self, _cover: &[u8], _cols: u16, _rows: u16) -> Result<Vec<u8>, String> {
+            Ok(Vec::new()) // simulates a terminal that rejects SIXEL
+        }
+    }
+
+    fn renderer(buf: &SharedBuf) -> CoverRenderer {
+        CoverRenderer::with_writer(Box::new(buf.clone()), Box::new(StubEncoder))
+    }
+
+    fn params(gen: u64, rect: (u16, u16, u16, u16), cover: Option<&[u8]>) -> CoverParams {
+        CoverParams {
+            active_view: ViewMode::Player,
+            show_help: false,
+            command_mode: false,
+            show_cover_art: true,
+            cover_gen: gen,
+            cover_art: cover.map(|b| Arc::new(b.to_vec())),
+            cover_rect: rect,
+        }
+    }
+
+    fn written(buf: &SharedBuf) -> usize {
+        buf.0.lock().unwrap().len()
+    }
+
+    // ── Core invariant: one SIXEL send per change ──
+
+    #[test]
+    fn chafa_sends_once_until_cover_changes() {
+        let buf = SharedBuf::default();
+        let mut r = renderer(&buf);
+        let p = params(1, (0, 0, 10, 10), Some(&[1, 2, 3]));
+        r.render_chafa(&p);
+        let first = written(&buf);
+        assert!(first > 0, "first render must send the SIXEL payload");
+
+        // Same cover + same area → nothing written again.
+        r.render_chafa(&p);
+        assert_eq!(written(&buf), first, "unchanged cover must not re-send");
+
+        // A new cover (gen bump) re-sends.
+        r.render_chafa(&params(2, (0, 0, 10, 10), Some(&[4, 5])));
+        assert!(written(&buf) > first, "cover change must re-send");
+    }
+
+    #[test]
+    fn chafa_resent_on_area_change() {
+        let buf = SharedBuf::default();
+        let mut r = renderer(&buf);
+        r.render_chafa(&params(1, (0, 0, 10, 10), Some(&[1])));
+        let first = written(&buf);
+
+        // Terminal resize changes the render area → re-send.
+        r.render_chafa(&params(1, (0, 0, 12, 10), Some(&[1])));
+        assert!(written(&buf) > first, "resize must re-send");
+    }
+
+    // ── Cleanup on view switch / cover hide / coverless track ──
+
+    #[test]
+    fn leaving_player_view_requests_clear() {
+        let buf = SharedBuf::default();
+        let mut r = renderer(&buf);
+        r.render_chafa(&params(1, (0, 0, 10, 10), Some(&[1])));
+        assert!(!r.needs_clear());
+
+        let mut p = params(1, (0, 0, 10, 10), Some(&[1]));
+        p.active_view = ViewMode::Library;
+        r.render_chafa(&p);
+        assert!(r.needs_clear(), "leaving player view must schedule a clear");
+    }
+
+    #[test]
+    fn hiding_cover_schedules_clear() {
+        let buf = SharedBuf::default();
+        let mut r = renderer(&buf);
+        r.render_chafa(&params(1, (0, 0, 10, 10), Some(&[1])));
+
+        let mut p = params(1, (0, 0, 10, 10), Some(&[1]));
+        p.show_cover_art = false;
+        r.render_chafa(&p);
+        assert!(r.needs_clear(), "hiding the cover must schedule a clear");
+    }
+
+    #[test]
+    fn coverless_track_clears_stale_sixel() {
+        let buf = SharedBuf::default();
+        let mut r = renderer(&buf);
+        r.render_chafa(&params(1, (0, 0, 10, 10), Some(&[1])));
+        assert!(!r.needs_clear());
+
+        // Next track has no embedded cover — the stale SIXEL must not linger.
+        r.render_chafa(&params(2, (0, 0, 10, 10), None));
+        assert!(
+            r.needs_clear(),
+            "stale SIXEL must be cleared on a coverless track"
+        );
+    }
+
+    // ── Failure handling ──
+
+    #[test]
+    fn empty_sixel_output_is_not_retried_every_frame() {
+        let buf = SharedBuf::default();
+        let mut r = CoverRenderer::with_writer(Box::new(buf.clone()), Box::new(EmptyEncoder));
+        r.render_chafa(&params(1, (0, 0, 10, 10), Some(&[1])));
+        let first = written(&buf);
+        assert_eq!(first, 0, "empty payload writes nothing");
+
+        // Terminal rejects SIXEL → must not spawn chafa on every frame.
+        r.render_chafa(&params(1, (0, 0, 10, 10), Some(&[1])));
+        assert_eq!(
+            written(&buf),
+            0,
+            "failed encode must not be retried per frame"
+        );
+    }
 }

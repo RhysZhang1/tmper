@@ -39,11 +39,6 @@ pub mod runtime {
     /// Kitty terminals recommend keeping payloads ≤ 4 KiB per escape sequence.
     pub const KITTY_CHUNK_SIZE: usize = 4096;
 
-    /// Number of frames to suppress cover output after a track transition.
-    /// Prevents terminal escape-sequence interference with stdin.
-    /// At 30 FPS, 10 frames ≈ 330ms.
-    pub const COVER_SUPPRESS_FRAMES: u8 = 10;
-
     // ── FFT ──
 
     /// Number of PCM samples fed into the FFT analyzer per frame.
