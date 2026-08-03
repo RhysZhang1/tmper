@@ -50,7 +50,15 @@ struct ChafaEncoder;
 
 impl SixelEncoder for ChafaEncoder {
     fn encode(&self, cover: &[u8], cols: u16, rows: u16) -> Result<Vec<u8>, String> {
+        // `--probe off` is critical: by default chafa probes the controlling
+        // terminal for capabilities (incl. background color via OSC 10/11
+        // queries through `/dev/tty`) and waits up to 5s for the response.
+        // The response lands on the same PTY as tmper's stdin, so it is read
+        // as phantom key events, and the 5s wait blocks the main thread.
+        // We already know the terminal supports SIXEL — no probing needed.
         let mut child = std::process::Command::new("chafa")
+            .arg("--probe")
+            .arg("off")
             .arg("-f")
             .arg("sixels")
             .arg("-c")
