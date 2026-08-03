@@ -15,6 +15,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # rodio → cpal → alsa-sys links against libasound at build time.
+      # The ubuntu runner doesn't ship the ALSA dev headers/so, so every
+      # job that compiles the crate fails without this.
+      - name: Install ALSA dev headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: rustfmt, clippy
@@ -25,6 +30,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install ALSA dev headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       # Headless runners have no sound card; cpal's ALSA "default" must
       # resolve to the null plugin or the 18 audio-dependent tests panic
@@ -48,6 +55,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install ALSA dev headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: clippy
