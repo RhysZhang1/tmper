@@ -2,7 +2,7 @@ pub mod cover;
 pub mod theme;
 pub mod views;
 pub mod widgets;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
 use ratatui::layout::Rect;
@@ -55,6 +55,18 @@ pub struct TrackDisplay {
     pub duration_secs: f64,
 }
 
+/// Cached result of the half-block cover render (image decode + Lanczos3
+/// resize + Floyd-Steinberg dither), keyed by cover identity and render area.
+/// Recomputing every frame at 30 FPS was a major UI-lag source on the player
+/// view, even on terminals where a SIXEL/Kitty cover hides the blocks.
+#[derive(Debug, Clone)]
+pub struct CoverLinesCache {
+    pub gen: u64,
+    pub width: u16,
+    pub height: u16,
+    pub lines: Vec<ratatui::text::Line<'static>>,
+}
+
 /// Core player state — all fields related to the currently playing track.
 #[derive(Debug, Clone)]
 pub struct PlayerCore {
@@ -74,6 +86,7 @@ pub struct PlayerCore {
     pub cover_art: Option<Arc<Vec<u8>>>,
     pub show_cover_art: bool,
     pub cover_gen: Cell<u64>,
+    pub cover_lines_cache: RefCell<Option<CoverLinesCache>>,
 }
 
 impl Default for PlayerCore {
@@ -95,6 +108,7 @@ impl Default for PlayerCore {
             cover_art: None,
             show_cover_art: true,
             cover_gen: Cell::new(0),
+            cover_lines_cache: RefCell::new(None),
         }
     }
 }
@@ -323,6 +337,8 @@ pub fn render(f: &mut Frame, state: &UiState) {
                 cover_art: state.player.cover_art.as_ref(),
                 show_cover_art: state.player.show_cover_art,
                 cover_rect: &state.cover_rect,
+                cover_gen: state.player.cover_gen.get(),
+                cover_lines_cache: &state.player.cover_lines_cache,
                 lyric_track: state.lyrics.lyric_track.as_ref(),
                 current_lyric_index: state.lyrics.current_lyric_index,
                 visualizer_data: &state.visualizer_data,

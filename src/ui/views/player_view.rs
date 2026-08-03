@@ -4,14 +4,14 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
 use crate::lyrics::types::LyricTrack;
 use crate::ui::format_duration;
 use crate::ui::theme::Theme;
 use crate::ui::views::playlist_view::PlaylistManagerState;
-use crate::ui::{RepeatMode, TrackDisplay};
+use crate::ui::{CoverLinesCache, RepeatMode, TrackDisplay};
 
 /// Read-only view parameters for the player view.
 /// Extracted from `UiState` so each render function declares exactly what it needs.
@@ -31,6 +31,8 @@ pub struct PlayerViewParams<'a> {
     pub cover_art: Option<&'a Arc<Vec<u8>>>,
     pub show_cover_art: bool,
     pub cover_rect: &'a Cell<(u16, u16, u16, u16)>,
+    pub cover_gen: u64,
+    pub cover_lines_cache: &'a RefCell<Option<CoverLinesCache>>,
     pub lyric_track: Option<&'a LyricTrack>,
     pub current_lyric_index: usize,
     pub visualizer_data: &'a [f32],
@@ -202,10 +204,24 @@ fn render_cover_art(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
         .set((inner.x, inner.y, inner.width, inner.height));
 
     if params.show_cover_art {
-        // Try to render cover art as colored blocks
+        // Render cover art as colored blocks, reusing the cached render when
+        // the cover and area are unchanged (decode + Lanczos3 + dither only
+        // run once per cover instead of every frame).
         if let Some(cover) = params.cover_art {
-            if let Some(lines) = cover_as_colored_lines(inner, &cover[..]) {
-                let para = Paragraph::new(lines);
+            let mut cache = params.cover_lines_cache.borrow_mut();
+            let stale = cache.as_ref().is_none_or(|c| {
+                c.gen != params.cover_gen || c.width != inner.width || c.height != inner.height
+            });
+            if stale {
+                *cache = cover_as_colored_lines(inner, &cover[..]).map(|lines| CoverLinesCache {
+                    gen: params.cover_gen,
+                    width: inner.width,
+                    height: inner.height,
+                    lines,
+                });
+            }
+            if let Some(cached) = cache.as_ref() {
+                let para = Paragraph::new(cached.lines.clone());
                 f.render_widget(para, inner);
                 return;
             }
