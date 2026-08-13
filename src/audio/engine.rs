@@ -9,6 +9,19 @@ use crate::audio::output::AudioOutput;
 use crate::constants::runtime;
 use crate::error::AppResult;
 
+/// Lock a `Mutex`, recovering from poisoning instead of panicking.
+///
+/// `Mutex::lock()` returns `Err(PoisonError)` only if a thread panicked while
+/// holding the guard. The engine never holds a lock across a fallible `?`
+/// operation, so the guarded data is always left in a consistent state;
+/// `into_inner()` is therefore safe and avoids crashing the player — or, worse,
+/// a background decode/FFT thread — on an unrelated panic elsewhere.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Wraps a PCM sample iterator, copying each sample to a shared ring buffer.
 pub struct InstrumentedSource<I> {
     inner: I,
@@ -31,7 +44,7 @@ impl<I: Iterator<Item = f32>> Iterator for InstrumentedSource<I> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next().inspect(|&sample| {
-            let mut buf = self.buffer.lock().unwrap();
+            let mut buf = lock(&self.buffer);
             while buf.len() >= self.capacity {
                 buf.pop_front();
             }
@@ -122,8 +135,8 @@ impl AudioEngine {
     pub fn play_file(&mut self, path: &Path) -> AppResult<()> {
         self.cancel_decode();
         self.decoder = None;
-        *self.duration_secs.lock().unwrap() = None;
-        *self.position.lock().unwrap() = PositionState {
+        *lock(&self.duration_secs) = None;
+        *lock(&self.position) = PositionState {
             start: None,
             total_paused: Duration::ZERO,
             pause_start: None,
@@ -132,10 +145,10 @@ impl AudioEngine {
 
         self.output.stop_and_replace();
         self.output.set_volume(self.current_volume);
-        self.pcm_buffer.lock().unwrap().clear();
+        lock(&self.pcm_buffer).clear();
 
         let mut decoder = AudioDecoder::open(path)?;
-        *self.duration_secs.lock().unwrap() = Some(decoder.duration_secs());
+        *lock(&self.duration_secs) = Some(decoder.duration_secs());
 
         let channels = decoder.channels;
         let sample_rate = decoder.sample_rate;
@@ -153,7 +166,7 @@ impl AudioEngine {
         self.decoder = Some(decoder);
         self.current_path = Some(path.to_path_buf());
 
-        let mut pos = self.position.lock().unwrap();
+        let mut pos = lock(&self.position);
         pos.start = Some(Instant::now());
         pos.total_paused = Duration::ZERO;
         pos.pause_start = None;
@@ -167,8 +180,8 @@ impl AudioEngine {
     /// `stop` work correctly regardless of which path feeds audio.
     pub fn play_file_async(&mut self, path: &Path) -> AppResult<()> {
         self.cancel_decode();
-        self.pcm_buffer.lock().unwrap().clear();
-        *self.duration_secs.lock().unwrap() = None;
+        lock(&self.pcm_buffer).clear();
+        *lock(&self.duration_secs) = None;
 
         let path_buf = path.to_path_buf();
         let sink = self.output.sink_arc();
@@ -187,7 +200,7 @@ impl AudioEngine {
                     return;
                 }
             };
-            *duration.lock().unwrap() = Some(decoder.duration_secs());
+            *lock(&duration) = Some(decoder.duration_secs());
 
             let sample_rate = decoder.sample_rate;
             let channels = decoder.channels;
@@ -209,7 +222,7 @@ impl AudioEngine {
         self.decode_handle = Some(h);
         self.current_path = Some(path_buf);
 
-        let mut pos = self.position.lock().unwrap();
+        let mut pos = lock(&self.position);
         *pos = PositionState {
             start: Some(Instant::now()),
             total_paused: Duration::ZERO,
@@ -222,12 +235,12 @@ impl AudioEngine {
 
     pub fn pause(&mut self) {
         self.output.pause();
-        self.position.lock().unwrap().pause_start = Some(Instant::now());
+        lock(&self.position).pause_start = Some(Instant::now());
     }
 
     pub fn resume(&mut self) {
         self.output.play();
-        let mut pos = self.position.lock().unwrap();
+        let mut pos = lock(&self.position);
         if let Some(pause_start) = pos.pause_start.take() {
             pos.total_paused += pause_start.elapsed();
         }
@@ -238,8 +251,8 @@ impl AudioEngine {
         self.output.stop_and_replace();
         self.decoder = None;
         self.current_path = None;
-        *self.duration_secs.lock().unwrap() = None;
-        *self.position.lock().unwrap() = PositionState {
+        *lock(&self.duration_secs) = None;
+        *lock(&self.position) = PositionState {
             start: None,
             total_paused: Duration::ZERO,
             pause_start: None,
@@ -260,9 +273,9 @@ impl AudioEngine {
             None => return Ok(()),
         };
 
-        let dur = *self.duration_secs.lock().unwrap();
+        let dur = *lock(&self.duration_secs);
         let max_dur = dur.unwrap_or(f64::MAX);
-        let pos_data = self.position.lock().unwrap();
+        let pos_data = lock(&self.position);
         let current = Self::elapsed_without_offset(&pos_data) + pos_data.base_offset;
         drop(pos_data);
         let target = (current + delta_secs).clamp(0.0, max_dur * 0.999);
@@ -272,7 +285,7 @@ impl AudioEngine {
 
         // Jump position immediately — the UI advances to the target while
         // the background task decodes the remaining audio from there.
-        *self.position.lock().unwrap() = PositionState {
+        *lock(&self.position) = PositionState {
             start: Some(Instant::now()),
             total_paused: Duration::ZERO,
             pause_start: None,
@@ -280,7 +293,7 @@ impl AudioEngine {
         };
 
         // Replace the sink and clear the FFT buffer for the new stream.
-        self.pcm_buffer.lock().unwrap().clear();
+        lock(&self.pcm_buffer).clear();
         self.output.stop_and_replace();
         self.output.set_volume(self.current_volume);
 
@@ -352,12 +365,12 @@ impl AudioEngine {
     }
 
     pub fn position_secs(&self) -> f64 {
-        let pos = self.position.lock().unwrap();
+        let pos = lock(&self.position);
         Self::elapsed_without_offset(&pos) + pos.base_offset
     }
 
     pub fn duration_secs(&self) -> Option<f64> {
-        *self.duration_secs.lock().unwrap()
+        *lock(&self.duration_secs)
     }
 }
 
