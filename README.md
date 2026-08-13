@@ -363,6 +363,11 @@ cargo fmt --all                    # 格式化
 
 # 提交前完整检查
 cargo fmt --all && cargo clippy -- -D warnings && cargo test
+
+# 行覆盖率（一次性安装，之后可复用）
+rustup component add llvm-tools-preview   # 一次性：llvm-cov 依赖
+cargo install cargo-llvm-cov --locked     # 一次性
+cargo llvm-cov --all-features --workspace # 输出各模块行覆盖率与总计
 ```
 
 ---

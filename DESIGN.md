@@ -652,7 +652,13 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 
 ## 10. 测试
 
-### 10.1 测试覆盖
+### 10.1 测试分布（按测试数）
+
+> 下表统计的是**测试用例数量**，不是**行覆盖率**。行覆盖率需用 `cargo llvm-cov` 单独测量
+> （见 [10.3 行覆盖率](#103-行覆盖率)）。
+> **基线（2026-08-13 实测）**：总行覆盖率 **45.09%**（函数 59.51%）。`ui/views/*` 与
+> `app/handlers/*` 的渲染/分发逻辑（player_view 440 行、help_popup 192 行等）覆盖率接近 0；
+> 音频/元数据/库层较高（engine 95%、metadata 97%、database 93%）。距 80% 目标的主要缺口在 UI 与 handler 层。
 
 | 模块 | 测试数 | 覆盖内容 |
 |------|--------|----------|
@@ -680,6 +686,20 @@ cargo test                     # 全部测试
 cargo test <test_name>         # 单个测试
 cargo test -- --nocapture      # 显示输出
 ```
+
+### 10.3 行覆盖率
+
+```bash
+# 一次性安装
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov --locked
+
+# 测量（输出各模块行覆盖率与总计）
+cargo llvm-cov --all-features --workspace
+```
+
+> CI `coverage` job 在每次 push 时运行同一测量。无音频设备的环境需先配置 null ALSA
+> （`~/.asoundrc`，见 CLAUDE.md），否则构造 AudioEngine 的测试会失败。
 
 ---
 

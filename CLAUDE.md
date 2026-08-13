@@ -101,6 +101,11 @@ cargo fmt --all
 
 # Full pre-commit check
 cargo fmt --all && cargo clippy -- -D warnings && cargo test
+
+# Coverage (line coverage — one-time setup, then reusable)
+rustup component add llvm-tools-preview   # one-time (needed by llvm-cov)
+cargo install cargo-llvm-cov --locked     # one-time
+cargo llvm-cov --all-features --workspace # prints per-module line coverage + a total
 ```
 
 ## Testing Conventions
@@ -109,3 +114,6 @@ cargo fmt --all && cargo clippy -- -D warnings && cargo test
 - Decoder/metadata tests are headless-safe (pure file I/O). App/engine tests construct a real `AudioEngine` and need an audio device — on a headless machine they fail at construction unless a null ALSA device is configured
 - Logical modules have `#[cfg(test)] mod tests { ... }` inline
 - Tests follow Arrange-Act-Assert pattern; cover normal paths + boundary conditions
+- **Line coverage baseline 45.09%** (measured 2026-08-13 via `cargo llvm-cov`). The big gap is
+  `ui/views/*` and `app/handlers/*` render/dispatch logic (~0%). Do not claim "covered" from test
+  counts alone — run `cargo llvm-cov --all-features --workspace` to measure.
