@@ -38,8 +38,6 @@ pub fn parse_key_str(s: &str) -> KeyEvent {
 pub struct KeyBindings {
     #[serde(default = "default_key")]
     pub play_pause: String,
-    #[serde(default = "default_key")]
-    pub stop: String,
     #[serde(default = "default_next")]
     pub next_track: String,
     #[serde(default = "default_prev")]
@@ -85,7 +83,6 @@ impl Default for KeyBindings {
     fn default() -> Self {
         Self {
             play_pause: " ".into(),
-            stop: "s".into(),
             next_track: "n".into(),
             prev_track: "p".into(),
             vol_down: "-".into(),

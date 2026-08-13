@@ -37,7 +37,7 @@ pub fn render_help(f: &mut Frame, theme: &Theme, scroll: usize) {
         (false, true) => " j/k 滚动 ▼ ",
         (false, false) => "",
     };
-    let title = format!(" 帮助 — 按 0 或 Esc 关闭 {} ", indicator);
+    let title = format!(" 帮助 — 按 8 或 Esc 关闭 {} ", indicator);
 
     let para = Paragraph::new(visible).block(
         Block::default()
@@ -106,8 +106,8 @@ fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         key(theme, "e (歌单视图)", "导出当前展开的歌单"),
         gap(),
         sec(theme, "▎自定义键位"),
-        key(theme, "", "编辑 config/keybindings.toml 可自定义 9 个键位"),
-        key(theme, "", "play_pause stop next_track prev_track"),
+        key(theme, "", "编辑 config/keybindings.toml 可自定义 8 个键位"),
+        key(theme, "", "play_pause next_track prev_track"),
         key(theme, "", "vol_down vol_up quit up down"),
         key(theme, "", "支持单字符、Space、Up/Down 等特殊名称"),
         gap(),
@@ -184,7 +184,7 @@ fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
             "运行时数据: data/ 目录 (state.json, library.db, playlists.json)",
         ),
         gap(),
-        grey(theme, "按 0 或 Esc 关闭帮助，j/k 滚动"),
+        grey(theme, "按 8 或 Esc 关闭帮助，j/k 滚动"),
     ]
 }
 
