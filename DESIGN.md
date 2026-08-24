@@ -2,9 +2,9 @@
 
 > **项目名称**: tmper — 终端音乐播放器
 > **语言**: Rust
-> **平台**: Arch Linux + KDE Plasma
-> **文档版本**: v3.6（实现文档）
-> **最后更新**: 2026-08-02
+> **平台**: Linux（主要在 Arch Linux + KDE Plasma 验证）
+> **文档状态**: 当前实现
+> **最后更新**: 2026-08-25
 
 ---
 
@@ -83,7 +83,7 @@ tmper 是一个运行在终端中的全功能音乐播放器。核心特性：
 │  │  ├─ decoder.rs — Symphonia 解码适配                │
 │  │  └─ output.rs  — Rodio Sink 封装                   │
 │  ├─ LibraryDb (src/library/database.rs)               │
-│  │  ├─ scanner.rs        — 测试辅助（仅 cfg(test)）   │
+│  │  ├─ scanner.rs        — 后台增量目录扫描           │
 │  │  └─ playlist_manager.rs — M3U 导入/导出             │
 │  ├─ LyricEngine (src/lyrics/engine.rs)                │
 │  │  ├─ parser.rs — LRC 解析 + 编码检测                │
@@ -145,7 +145,7 @@ tmper 是一个运行在终端中的全功能音乐播放器。核心特性：
 └─────────────────────────────────────────────────────┘
 ```
 
-**输入模型（burst 模式，commit e122084）**：不再使用 crossterm `EventStream`（一个事件 → 一次绘制）。改为后台线程 `crossterm::event::poll(80ms)` 等待首个事件，然后批量 `read()` 一次性排空 PTY 缓冲（长按按键时终端 auto-repeat 约 33ms 一个事件，每批可收集 2–3 个），经 `mpsc::unbounded_channel<Vec<CrosstermEvent>>` 发给主循环。主循环 `event_rx.recv()` 拿到整批事件后统一处理、绘制一次，消除了「松开按键仍持续滚动」的卡顿。
+**输入模型（burst 模式）**：后台线程通过 crossterm 等待首个事件，然后批量排空 PTY 缓冲，经 channel 发送事件批次。主循环处理整批事件后只绘制一次，避免终端按键自动重复造成绘制堆积。
 
 ---
 
@@ -655,33 +655,25 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 
 ## 10. 测试
 
-### 10.1 测试覆盖
+### 10.1 测试分层
 
-| 模块 | 测试数 | 覆盖内容 |
-|------|--------|----------|
-| audio/decoder.rs | 3 | 解码 WAV、不存在的文件、seek |
-| audio/engine.rs | 5 | 生命周期、位置追踪、停止、排队（含 1 个 tokio 集成式） |
-| lyrics/parser.rs | 7 | 标准 LRC、元数据、多时间戳、逐字、空文件、损坏行、排序 |
-| visualizer/fft.rs | 1 | 440Hz 峰值检测 |
-| visualizer/processor.rs | 2 | 桶数量、平滑收敛 |
-| visualizer/render.rs | 2 | 渲染输出、颜色渐变 |
-| library/database.rs | 6 | upsert、重复更新、搜索、artists、albums、delete |
-| library/scanner.rs | 1 | 扩展名过滤（测试辅助） |
-| library/playlist_manager.rs | 2 | M3U 往返、相对路径 |
-| metadata/reader.rs | 3 | FLAC、WAV（无标签）、不存在的文件 |
-| ui/theme.rs | 4 | hex 颜色解析（有效/无效回退）、缺失主题回退默认、真实主题 13 色槽加载 |
-| input/command.rs | 4 | quit、theme、volume、unknown |
-| playlist.rs | — | （v3.5 后仅存 `PlaylistData` 数据模型，逻辑并入 playlist_view） |
-| app/mod.rs | 13 | 视图切换、音量、循环、加载播放、停止、命令模式、搜索（含 4 个 tokio 集成式） |
-| ui/cover/mod.rs | 6 | 一次性发送不变量、区域重发、视图切换/隐藏/无封面清除、chafa 失败不重试（注入式 writer/encoder） |
-| **总计** | **59** | **54 单元 + 5 集成** |
+| 层级 | 环境与范围 |
+|------|------------|
+| 纯逻辑 | 歌词、命令解析、FFT、频谱处理、路径和扫描过滤，不访问音频设备 |
+| 数据库 | 使用临时的 SQLite `:memory:` 数据库，覆盖 schema、FTS5 同步和增量清理 |
+| 解码/元数据 | 只读取 `tests/fixtures/`，不创建 Rodio 输出流 |
+| UI 渲染 | 使用 Ratatui `TestBackend`，覆盖极小终端与全部主视图 |
+| 播放状态机 | 使用 headless output 和可注入 fake decoder 事件，验证切歌 generation、暂停、seek、完成，无需设备 |
+| 音频输出 | 测试名统一以 `audio_output_` 开头并标记 `#[ignore]`，需要真实设备或虚拟 ALSA |
+
+默认测试集合不会打开 ALSA/PulseAudio。音频输出层单独运行，避免让普通开发和 CI 的逻辑测试依赖声卡。
 
 ### 10.2 运行测试
 
 ```bash
-cargo test                     # 全部测试
-cargo test <test_name>         # 单个测试
-cargo test -- --nocapture      # 显示输出
+cargo test                                      # 全部无设备测试；自动跳过音频输出层
+cargo test <test_name>                          # 单个无设备测试
+cargo test audio_output_ -- --ignored --test-threads=1  # 真实/虚拟音频设备
 ```
 
 ---
@@ -691,22 +683,11 @@ cargo test -- --nocapture      # 显示输出
 ```
 tmper/
 ├── Cargo.toml                  # 包名 tmper，Rust 2021 edition
-├── CLAUDE.md                   # AI 助手指引
 ├── DESIGN.md                   # 本文件 — 架构与实现文档
 ├── README.md                   # 用户手册
-├── tmper                       # 符号链接 → target/release/tmper
+├── STATUS.md                   # 当前能力、限制与近期计划
 │
-├── config/                     # 配置文件（自包含，非 XDG）
-│   ├── default.toml            #   默认配置模板
-│   ├── config.toml             #   主配置（首次运行由 default.toml 自动复制生成）
-│   └── keybindings.toml        #   自定义快捷键（预留）
-│
-├── data/                       # 运行时数据（自动生成）
-│   ├── tmper.log               #   运行日志
-│   ├── state.json              #   退出时保存的状态
-│   ├── playlists.json          #   歌单数据
-│   ├── library.json            #   文件浏览器库路径
-│   └── library.db              #   SQLite 曲库索引
+├── config/default.toml         # 编译进二进制的默认配置
 │
 ├── themes/                     # 主题色板
 │   ├── tokyo-night.toml
@@ -730,7 +711,7 @@ tmper/
 │   ├── error.rs                #   AppError + AppResult<T>
 │   ├── event.rs                #   AppEvent 枚举
 │   ├── playlist.rs             #   PlaylistData 数据结构（唯一歌单模型）
-│   ├── paths.rs                #   项目内路径工具（config_dir, data_dir）
+│   ├── paths.rs                #   XDG 路径与旧数据迁移
 │   │
 │   ├── app/                    #   应用核心
 │   │   ├── mod.rs              #     App struct + run() 事件循环
@@ -763,7 +744,7 @@ tmper/
 │   │
 │   ├── library/                #   音乐库
 │   │   ├── database.rs         #     SQLite CRUD + 搜索
-│   │   ├── scanner.rs          #     测试辅助（仅 #[cfg(test)]，非生产扫描器）
+│   │   ├── scanner.rs          #     后台增量目录扫描
 │   │   └── playlist_manager.rs #     M3U 导入/导出
 │   │
 │   ├── ui/                     #   用户界面
@@ -784,8 +765,8 @@ tmper/
 │   │
 │   └── input/                  #   键盘输入
 │       ├── handler.rs          #     KeyHandler（双键序列）
-│       ├── keymap.rs           #     KeyBindings 配置（预留）
-│       └── command.rs          #     : 命令解析器（预留）
+│       ├── keymap.rs           #     KeyBindings 配置
+│       └── command.rs          #     : 命令解析器
 │
 └── tests/
     └── fixtures/               #   测试数据
@@ -818,31 +799,3 @@ tmper/
 | 编码 | encoding_rs | 0.8 | GBK/Shift-JIS 歌词编码检测 |
 | 日志 | tracing + tracing-subscriber | 0.1/0.3 | 结构化日志 |
 | 错误 | thiserror + anyhow | 2/1 | 错误类型 + 传播 |
-
----
-
-## 13. 版本历史
-
-| 版本 | 日期 | 变更 |
-|------|------|------|
-| v3.0 | 2026-07-12 | 初始实现文档 |
-| v3.1 | 2026-07-17 | 重构：提取 constants.rs、覆盖渲染模块化、统一视图切换 |
-| v3.2 | 2026-07-18 | 代码质量改进：PCM 缓冲增大、消除 clippy allow、render() 改 match、Config 默认值去重、RUST_LOG 支持、KeyHandler 控制字符过滤 |
-| v3.3 | 2026-07-18 | Session A–D：UiState 视图参数抽取 + 状态分组 (PlayerCore/LyricsState/ViewState)、play_file 异步化解码、stdout 防护增强 (4 层防御) |
-| v3.4 | 2026-07-19 | 回滚长按快进快退；事件循环绘制节流（~20fps）修复播放时滚动卡顿；键1迷你歌单独立滚动状态修复末行消失 |
-| v3.5 | 2026-07-19 | seek_relative 改为后台线程异步解码（镜像 play_file_async）；git 卫生（分支 rename main、清理 tar.gz、补 gitignore）；文档同步（帮助键 8、测试数 53、事件模型） |
-| v3.6 | 2026-08-02 | 清理死配置键（`[library]`/`[lyrics]` 段、gapless、crossfade_seconds、resume_on_startup、color_scheme、char_set、show_on_idle、scan_on_startup、follow_symlinks、show_progress_bar、cover_art_max_width、default_view 全部移除）；首运行自动生成 `config/config.toml`；真实主题系统（13 色槽 `Theme`，从 `themes/*.toml` 加载）；输入改为 burst 模式（poll/read 批量读取）；启动恢复音量/循环模式/歌词偏移 |
-| v3.7 | 2026-08-03 | 封面收敛：SIXEL 每次变化只发一次（替代每帧重发）；删除 cover-escape guard / 帧抑制 / `COVER_SUPPRESS_FRAMES`；Kitty 与 SIXEL 协议互斥；无封面曲目清除残留 SIXEL；chafa 空输出 sticky 失败标记；移除裸 `\x1b[?25l`；CoverRenderer 注入式 writer/encoder + 6 测试 |
-
-### 已知技术债（v3.4 更新）
-
-| 问题 | 严重度 | 说明 | 状态 |
-|------|--------|------|------|
-| UiState 上帝结构体 | 🔴 | 30+ 字段 → 13 分组 + 3 Cell | ✅ v3.3 完成 |
-| stdout 直接写入 | 🟡 | 已收敛为"每次变化一次发送 + 协议互斥"，无输入防御层；仍绕过 ratatui 差分缓冲（架构约束，非 bug） | 🟡 大幅缓解（v3.7） |
-| play_file 同步解码 | 🟡 | 异步路径对 >50MB 启用；seek_relative 仍同步 | 🟡 部分 |
-| 无集成测试 | 🟡 | 59 测试（54 单元 + 5 集成） | ✅ v3.3 完成 |
-| 长按快进快退 | 🟡 | 已回滚（crossterm 无按键释放检测） | ✅ v3.4 回滚 |
-| 播放时滚动卡顿 | 🟡 | 事件循环绘制节流至 ~20fps | ✅ v3.4 修复 |
-| 键1 迷你歌单末行消失 | 🟡 | 侧边栏独立滚动状态 | ✅ v3.4 修复 |
-| seek_relative 同步解码 | 🟡 | 跳转时阻塞事件循环 | ✅ v3.5 后台线程异步解码 |

@@ -151,7 +151,15 @@ pub struct AudioEngine {
 
 impl AudioEngine {
     pub fn new() -> AppResult<Self> {
-        let output = AudioOutput::new()?;
+        Self::with_output(AudioOutput::new()?)
+    }
+
+    #[cfg(test)]
+    pub fn new_headless() -> Self {
+        Self::with_output(AudioOutput::new_headless()).expect("headless output is infallible")
+    }
+
+    fn with_output(output: AudioOutput) -> AppResult<Self> {
         let (event_tx, event_rx) = mpsc::channel();
         Ok(Self {
             output,
@@ -179,6 +187,20 @@ impl AudioEngine {
             queued_samples: Arc::new(AtomicUsize::new(0)),
             peak_queued_samples: Arc::new(AtomicUsize::new(0)),
         })
+    }
+
+    #[cfg(test)]
+    fn begin_fake_session(&mut self, path: &Path) -> u64 {
+        let (generation, ..) = self.begin_session();
+        self.current_path = Some(path.to_path_buf());
+        self.reset_position(0.0, false);
+        self.state = PlaybackState::Loading;
+        generation
+    }
+
+    #[cfg(test)]
+    fn inject_decoder_event(&self, event: DecoderEvent) {
+        self.event_tx.send(event).expect("test event receiver");
     }
 
     fn begin_session(&mut self) -> (u64, Arc<AtomicBool>, Arc<AtomicUsize>, Arc<AtomicUsize>) {
@@ -581,7 +603,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_engine_lifecycle() {
+    #[ignore = "requires a real or virtual audio output device"]
+    fn audio_output_engine_lifecycle() {
         let mut engine = AudioEngine::new().expect("Failed to create engine");
         engine
             .play_file(Path::new("tests/fixtures/test.wav"))
@@ -597,7 +620,8 @@ mod tests {
     }
 
     #[test]
-    fn test_stop_clears_position() {
+    #[ignore = "requires a real or virtual audio output device"]
+    fn audio_output_stop_clears_position() {
         let mut engine = AudioEngine::new().expect("Failed to create engine");
         engine
             .play_file(Path::new("tests/fixtures/test.wav"))
@@ -608,7 +632,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn async_stream_is_bounded_and_finishes() {
+    #[ignore = "requires a real or virtual audio output device"]
+    async fn audio_output_stream_is_bounded_and_finishes() {
         let mut engine = AudioEngine::new().expect("Failed to create engine");
         engine
             .play_file_async(Path::new("tests/fixtures/test.wav"))
@@ -635,7 +660,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rapid_session_replacement_ignores_old_events() {
+    #[ignore = "requires a real or virtual audio output device"]
+    async fn audio_output_rapid_session_replacement_ignores_old_events() {
         let mut engine = AudioEngine::new().expect("Failed to create engine");
         engine
             .play_file_async(Path::new("tests/fixtures/test.wav"))
@@ -661,7 +687,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn async_open_error_reaches_main_thread() {
+    #[ignore = "requires a real or virtual audio output device"]
+    async fn audio_output_open_error_reaches_main_thread() {
         let mut engine = AudioEngine::new().expect("Failed to create engine");
         engine
             .play_file_async(Path::new("tests/fixtures/missing.wav"))
@@ -681,7 +708,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seek_while_paused_stays_paused() {
+    #[ignore = "requires a real or virtual audio output device"]
+    async fn audio_output_seek_while_paused_stays_paused() {
         let mut engine = AudioEngine::new().expect("Failed to create engine");
         engine
             .play_file_async(Path::new("tests/fixtures/test.wav"))
@@ -710,5 +738,58 @@ mod tests {
             (second - first).abs() < 0.01,
             "paused position must not advance"
         );
+    }
+
+    struct FakeDecoder {
+        generation: u64,
+    }
+
+    impl FakeDecoder {
+        fn ready(&self, engine: &AudioEngine, duration_secs: f64, sample_rate: u32) {
+            engine.inject_decoder_event(DecoderEvent::Ready {
+                generation: self.generation,
+                duration_secs,
+                sample_rate,
+            });
+        }
+
+        fn finished(&self, engine: &AudioEngine) {
+            engine.inject_decoder_event(DecoderEvent::Finished {
+                generation: self.generation,
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn playback_state_machine_switch_pause_seek_and_finish_without_device() {
+        let mut engine = AudioEngine::new_headless();
+        let first = FakeDecoder {
+            generation: engine.begin_fake_session(Path::new("first.fake")),
+        };
+        first.ready(&engine, 120.0, 48_000);
+        assert!(matches!(
+            engine.drain_events().as_slice(),
+            [PlaybackEvent::Ready { .. }]
+        ));
+        assert_eq!(engine.state(), &PlaybackState::Playing);
+
+        engine.pause();
+        assert_eq!(engine.state(), &PlaybackState::Paused);
+        engine
+            .seek_relative(10.0)
+            .expect("fake seek starts a new session");
+        assert_eq!(engine.state(), &PlaybackState::Paused);
+
+        let second = FakeDecoder {
+            generation: engine.begin_fake_session(Path::new("second.fake")),
+        };
+        first.finished(&engine);
+        second.ready(&engine, 60.0, 44_100);
+        let events = engine.drain_events();
+        assert_eq!(events.len(), 1, "stale decoder event must be ignored");
+        assert_eq!(engine.state(), &PlaybackState::Playing);
+        second.finished(&engine);
+        assert_eq!(engine.drain_events(), vec![PlaybackEvent::Finished]);
+        assert_eq!(engine.state(), &PlaybackState::Finished);
     }
 }

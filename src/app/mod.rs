@@ -103,6 +103,15 @@ struct SavedState {
 impl App {
     pub fn new(config: &Config) -> crate::error::AppResult<Self> {
         let engine = AudioEngine::new()?;
+        Self::with_engine(config, engine)
+    }
+
+    #[cfg(test)]
+    fn new_headless(config: &Config) -> crate::error::AppResult<Self> {
+        Self::with_engine(config, AudioEngine::new_headless())
+    }
+
+    fn with_engine(config: &Config, engine: AudioEngine) -> crate::error::AppResult<Self> {
         let library_db = LibraryDb::open(&crate::paths::data_dir().join("library.db"))
             .unwrap_or_else(|_| LibraryDb::open_memory().expect("in-memory db"));
         let key_bindings = KeyBindings::load();
@@ -313,7 +322,7 @@ mod tests {
     impl TestApp {
         fn new() -> Self {
             let config = Config::default();
-            let app = App::new(&config).expect("Failed to create App");
+            let app = App::new_headless(&config).expect("Failed to create headless App");
             Self { app }
         }
 

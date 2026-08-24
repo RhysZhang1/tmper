@@ -4,6 +4,8 @@
 
 支持多格式音频解码、元数据显示、内嵌封面图展示（Kitty 协议 / SIXEL / 半块字符三层渐进）、LRC 歌词同步、cava 风格频谱可视化、歌单管理、SQLite 曲库，纯键盘 Vim 风格操作。
 
+当前能力和限制见 [STATUS.md](STATUS.md)，实现架构见 [DESIGN.md](DESIGN.md)。`progress/` 仅保存历史开发记录，不作为当前功能说明。
+
 ---
 
 ## 功能特性
@@ -49,7 +51,7 @@
 
 ### 配置与持久化
 - 5 套内置主题：Tokyo Night、Dracula、Nord、Solarized Dark、Catppuccin Mocha
-- 自定义快捷键（`config/keybindings.toml`）
+- 自定义快捷键（`$XDG_CONFIG_HOME/tmper/keybindings.toml`）
 - 退出自动保存状态，下次启动恢复音量、循环模式与歌词偏移（不自动恢复上次曲目）
 
 ---
@@ -79,7 +81,7 @@ cd tmper
 cargo build --release
 ```
 
-编译产物在 `target/release/tmper`。默认配置和五套主题已内嵌，可单独复制二进制运行。
+编译产物在 `target/release/tmper`。运行所需的默认配置和五套主题已嵌入可执行文件，因此复制该文件即可运行；用户配置、曲库数据库和状态仍写入 XDG 目录。
 
 也可以直接安装到 Cargo 的可执行目录：
 
@@ -301,18 +303,12 @@ tmper/
 ├── Cargo.toml                    # Rust 项目配置
 ├── Cargo.lock
 ├── DESIGN.md                     # 架构设计文档
+├── STATUS.md                     # 当前能力、限制与近期计划
 ├── README.md                     # 本文件
 │
-├── config/                       # 配置文件（自包含）
-│   ├── default.toml              #   默认配置模板
-│   ├── config.toml               #   主配置（首次运行由 default.toml 自动生成）
-│   └── keybindings.toml          #   快捷键
-│
-├── data/                         # 运行时数据（自动生成）
-│   ├── tmper.log                 #   日志
-│   ├── state.json                #   退出状态
-│   ├── playlists.json            #   歌单
-│   └── library.db                #   SQLite 曲库
+├── config/default.toml           # 编译进程序的默认配置
+├── themes/                       # 编译进程序的五套默认主题
+├── progress/                     # 历史开发记录，不代表当前实现
 │
 ├── src/                          # 源代码 (~8,000 行 Rust)
 │   ├── main.rs                   #   入口
@@ -370,8 +366,9 @@ tmper/
 
 ```bash
 cargo build                        # 调试编译
-cargo build --release              # 发布编译（单文件 ~7MB）
-cargo test                         # 全部测试（59 个）
+cargo build --release              # 发布编译（资源已内嵌的可执行文件）
+cargo test                         # 默认：全部无需音频设备的测试
+cargo test audio_output_ -- --ignored --test-threads=1  # 需要真实/虚拟设备
 cargo clippy -- -D warnings        # 代码检查
 cargo fmt --all                    # 格式化
 

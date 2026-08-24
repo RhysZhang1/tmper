@@ -6,8 +6,8 @@ use crate::error::AppResult;
 
 pub struct AudioOutput {
     sink: Arc<Sink>,
-    stream_handle: OutputStreamHandle,
-    _stream: OutputStream,
+    stream_handle: Option<OutputStreamHandle>,
+    _stream: Option<OutputStream>,
 }
 
 impl AudioOutput {
@@ -22,9 +22,21 @@ impl AudioOutput {
 
         Ok(Self {
             sink: Arc::new(sink),
-            stream_handle,
-            _stream: stream,
+            stream_handle: Some(stream_handle),
+            _stream: Some(stream),
         })
+    }
+
+    /// Device-free output used by unit tests. The queue receiver is dropped,
+    /// so app and state-machine tests never open ALSA/PulseAudio.
+    #[cfg(test)]
+    pub fn new_headless() -> Self {
+        let (sink, _) = Sink::new_idle();
+        Self {
+            sink: Arc::new(sink),
+            stream_handle: None,
+            _stream: None,
+        }
     }
 
     /// Append a source to the sink. Only used by the sync `play_file`
@@ -49,7 +61,11 @@ impl AudioOutput {
     /// wakes up, allowing the task to exit cleanly.
     pub fn stop_and_replace(&mut self) {
         self.sink.stop();
-        match Sink::try_new(&self.stream_handle) {
+        let new_sink = match &self.stream_handle {
+            Some(handle) => Sink::try_new(handle),
+            None => Ok(Sink::new_idle().0),
+        };
+        match new_sink {
             Ok(new_sink) => self.sink = Arc::new(new_sink),
             Err(e) => {
                 tracing::error!("Failed to create new sink (audio may be unavailable): {e}");
