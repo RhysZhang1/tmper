@@ -2,10 +2,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::Event as CrosstermEvent;
-use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use crossterm::{execute, ExecutableCommand};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
@@ -17,10 +17,59 @@ use crate::event::AppEvent;
 use crate::input::handler::KeyHandler;
 use crate::input::keymap::{self, KeyBindings};
 use crate::library::database::LibraryDb;
+use crate::library::scanner::ScanUpdate;
 use crate::ui::cover::{CoverParams, CoverRenderer};
 use crate::ui::theme::Theme;
 use crate::ui::{self, PlayerCore, UiState};
 use serde::{Deserialize, Serialize};
+
+/// Owns the terminal while the TUI is active and restores it on every exit
+/// path, including early returns and unwinding panics.
+struct TerminalGuard {
+    terminal: Terminal<CrosstermBackend<std::io::Stdout>>,
+}
+
+impl TerminalGuard {
+    fn enter() -> crate::error::AppResult<Self> {
+        enable_raw_mode().map_err(|e| {
+            crate::error::AppError::Config(format!("Failed to enable raw mode: {e}"))
+        })?;
+
+        let mut stdout = std::io::stdout();
+        if let Err(e) = execute!(stdout, EnterAlternateScreen) {
+            let _ = disable_raw_mode();
+            return Err(crate::error::AppError::Config(format!(
+                "Failed to enter alternate screen: {e}"
+            ))
+            .into());
+        }
+
+        match Terminal::new(CrosstermBackend::new(stdout)) {
+            Ok(terminal) => Ok(Self { terminal }),
+            Err(e) => {
+                let mut stdout = std::io::stdout();
+                let _ = stdout.execute(LeaveAlternateScreen);
+                let _ = disable_raw_mode();
+                Err(
+                    crate::error::AppError::Config(format!("Failed to create terminal: {e}"))
+                        .into(),
+                )
+            }
+        }
+    }
+
+    fn terminal_mut(&mut self) -> &mut Terminal<CrosstermBackend<std::io::Stdout>> {
+        &mut self.terminal
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = self.terminal.show_cursor();
+        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = disable_raw_mode();
+    }
+}
 
 pub(crate) mod handlers;
 pub(crate) mod persistence;
@@ -38,6 +87,9 @@ pub struct App {
     fft_data: Arc<Mutex<Vec<f32>>>,
     cover_renderer: CoverRenderer,
     last_seek_time: Option<std::time::Instant>,
+    library_scan_tx: Option<tokio::sync::mpsc::UnboundedSender<ScanUpdate>>,
+    library_scan_cancels: Vec<Arc<std::sync::atomic::AtomicBool>>,
+    library_scans_active: usize,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -75,25 +127,20 @@ impl App {
             fft_data: Arc::new(Mutex::new(Vec::new())),
             cover_renderer: CoverRenderer::new(),
             last_seek_time: None,
+            library_scan_tx: None,
+            library_scan_cancels: Vec::new(),
+            library_scans_active: 0,
         };
         app.load_state();
         Ok(app)
     }
 
     pub async fn run(&mut self, cli: Cli) -> crate::error::AppResult<()> {
-        enable_raw_mode().map_err(|e| {
-            crate::error::AppError::Config(format!("Failed to enable raw mode: {e}"))
-        })?;
+        let mut terminal_guard = TerminalGuard::enter()?;
 
-        let mut stdout = std::io::stdout();
-        execute!(stdout, EnterAlternateScreen).map_err(|e| {
-            crate::error::AppError::Config(format!("Failed to enter alternate screen: {e}"))
-        })?;
-
-        let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend).map_err(|e| {
-            crate::error::AppError::Config(format!("Failed to create terminal: {e}"))
-        })?;
+        let (library_scan_tx, mut library_scan_rx) =
+            tokio::sync::mpsc::unbounded_channel::<ScanUpdate>();
+        self.library_scan_tx = Some(library_scan_tx);
 
         // Seed visible_rows from actual terminal size so the first keypress
         // uses the correct value instead of the hardcoded default (20).
@@ -188,6 +235,12 @@ impl App {
                         needs_draw = true;
                     }
                 }
+                update = library_scan_rx.recv() => {
+                    if let Some(update) = update {
+                        self.handle_scan_update(update);
+                        needs_draw = true;
+                    }
+                }
             }
 
             if self.should_quit {
@@ -197,11 +250,14 @@ impl App {
 
             if needs_draw {
                 if self.cover_renderer.needs_clear() {
-                    let _ = terminal.clear();
+                    let _ = terminal_guard.terminal_mut().clear();
                     self.cover_renderer.clear_done();
                 }
 
-                if let Err(e) = terminal.draw(|f| ui::render(f, &self.ui_state)) {
+                if let Err(e) = terminal_guard
+                    .terminal_mut()
+                    .draw(|f| ui::render(f, &self.ui_state))
+                {
                     tracing::error!("Render error: {e}");
                 }
 
@@ -209,7 +265,9 @@ impl App {
                     active_view: self.ui_state.view.active_view,
                     show_help: self.ui_state.view.show_help,
                     command_mode: self.ui_state.command_mode,
-                    show_cover_art: self.ui_state.player.show_cover_art,
+                    show_cover_art: self.ui_state.player.show_cover_art
+                        && self.ui_state.cover_rect.get().2 > 0
+                        && self.ui_state.cover_rect.get().3 > 0,
                     cover_gen: self.ui_state.player.cover_gen.get(),
                     cover_art: self.ui_state.player.cover_art.clone(),
                     cover_rect: self.ui_state.cover_rect.get(),
@@ -224,8 +282,7 @@ impl App {
 
         // Stop FFT
         self.fft_cancel_tx = None;
-        disable_raw_mode().ok();
-        execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
+        self.library_scan_tx = None;
 
         Ok(())
     }

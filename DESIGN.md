@@ -33,7 +33,7 @@ tmper 是一个运行在终端中的全功能音乐播放器。核心特性：
 - **元数据**: ID3v1/v2、Vorbis Comments、APE、MP4 标签，含内嵌封面图
 - **LRC 歌词**: 标准/增强 LRC 解析，实时同步，编码自动检测
 - **频谱可视化**: 2048 点 FFT，对数分桶，颜色渐变
-- **曲库**: SQLite 索引，三栏浏览器，全文搜索
+- **曲库**: 后台目录扫描、SQLite 增量索引、FTS5 全文搜索
 - **7 个视图**: 播放器、曲库、歌词、频谱、歌单管理、文件浏览器、设置
 - **5 套主题**: Tokyo Night、Dracula、Nord、Solarized Dark、Catppuccin Mocha
 - **Vim 风格操作**: 模态键盘，双键序列（gg、dd），/ 搜索
@@ -325,19 +325,18 @@ pub struct FftAnalyzer {
 
 ```rust
 pub struct LibraryDb { conn: Connection }
-pub struct TrackRow { /* 21 个字段，匹配数据库列 */ }
+pub struct TrackRow { /* 对应 tracks 主表全部字段 */ }
 ```
 
-**Schema**：`tracks` 表，21 列（id, path, title, artist, album, ..., added_at）。3 个索引（artist, album, genre）。
+**Schema**：`tracks` 主表 + external-content `tracks_fts` FTS5 虚拟表；insert/update/delete 触发器保持全文索引同步，`PRAGMA user_version` 管理版本。
 
-**操作**：`upsert()`（INSERT OR REPLACE）、`get_by_path()`、`search()`（LIKE 模糊搜索）、`get_artists()`、`get_albums()`、`delete_by_path()`。
+**操作**：`upsert()`、`get_by_path()`、`search()`（FTS5 前缀全文搜索）、艺术家/专辑查询、文件指纹快照、删除目录下已消失条目。
 
-**测试**：6 个测试覆盖 upsert、重复更新、搜索、get_artists、get_albums、delete。
+**测试**：覆盖 upsert、FTS 更新/删除同步、搜索、分组查询和缺失文件清理。
 
-#### scanner.rs — 测试辅助（非生产模块）
+#### scanner.rs — 后台增量目录扫描
 
-> 该文件整体 `#[cfg(test)]`，仅作为**测试辅助**存在；项目当前**没有**生产目录扫描器，
-> 也没有基于 mtime 的增量扫描。`follow_symlinks` 配置键已移除。
+通过 `WalkDir` 递归发现音频文件，默认不跟随符号链接。扫描线程对比 `file_size + mtime` 指纹，只解析新增或变化文件的元数据，通过 Tokio channel 将结果交回主线程写入 SQLite；支持进度、取消以及扫描完成后的缺失文件清理。
 
 **测试**：扩展名过滤验证（1 个）。
 
@@ -473,7 +472,7 @@ pub struct UiState {
 ### 5.3 主题系统
 
 `src/ui/theme.rs` 定义了一个 **13 色槽语义化 `Theme` 结构体**（另含 `name` 字段），
-从 `themes/<name>.toml` 加载（5 套真实配色：Tokyo Night、Dracula、Nord、Solarized Dark、Catppuccin Mocha）。
+优先从 `$XDG_CONFIG_HOME/tmper/themes/<name>.toml` 加载，并回退到二进制内嵌的 5 套配色。
 UI 颜色统一取自 `UiState.theme`，不再硬编码；`ui.theme` 配置键、`:theme <名称>` 命令与设置视图均可实时切换。
 
 | 颜色键 | 用途 |
@@ -540,16 +539,16 @@ pub async fn run(&mut self, cli: Cli) -> AppResult<()> {
 
 ### 7.1 文件位置
 
-所有配置文件自包含在项目 `config/` 目录中（非 XDG 路径，便携设计）。
+配置和运行时数据遵循 XDG：配置、数据、状态分别位于 XDG config/data/state 目录；测试可通过 `TMPER_*_DIR` 覆盖。
 
 | 文件 | 用途 |
 |------|------|
-| `config/default.toml` | 默认配置模板（随仓库分发） |
-| `config/config.toml` | 主配置（首次运行由 `default.toml` 自动复制生成；设置视图可在线编辑和保存） |
-| `config/keybindings.toml` | 自定义快捷键（预留） |
-| `data/state.json` | 退出时保存的状态 |
-| `data/library.db` | 曲库 SQLite 数据库 |
-| `data/tmper.log` | 运行日志 |
+| 内嵌 `config/default.toml` | 默认配置模板（编译进二进制） |
+| `$XDG_CONFIG_HOME/tmper/config.toml` | 主配置（首次运行由内嵌模板生成） |
+| `$XDG_CONFIG_HOME/tmper/keybindings.toml` | 自定义快捷键（可选） |
+| `$XDG_STATE_HOME/tmper/state.json` | 退出时保存的状态 |
+| `$XDG_DATA_HOME/tmper/library.db` | 曲库 SQLite + FTS5 数据库 |
+| `$XDG_STATE_HOME/tmper/tmper.log` | 运行日志 |
 
 ### 7.2 配置结构
 
@@ -563,14 +562,14 @@ pub struct Config {
 
 > `[library]` / `[lyrics]` 配置段及 `gapless`、`resume_on_startup`、`color_scheme` 等键均已移除，仅保留以上 7 个键。
 
-**加载**：首次运行 `Config::ensure_config_file()` 将 `config/default.toml` 复制为 `config/config.toml`；随后 `Config::load_or_default()` — 读取 `config/config.toml` → `toml::from_str` → 失败则用 `Default::default()`
+**加载**：首次运行由内嵌模板生成 XDG `config.toml`；随后读取并解析，失败则使用 `Default::default()`。旧项目目录数据只复制迁移，不删除源文件。
 
 **保存**：`write_config()` — `toml::to_string_pretty(&config)` → 写入文件（通过设置视图自动触发）
 
 ### 7.3 配置优先级
 
 ```
-设置视图在线修改 > config/config.toml > 硬编码默认值
+设置视图在线修改 > XDG config.toml > 内嵌默认值
 ```
 
 ---

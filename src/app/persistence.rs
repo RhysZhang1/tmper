@@ -9,7 +9,7 @@ use crate::ui::TrackDisplay;
 
 impl App {
     pub(super) fn save_state(&self) {
-        let state_path = crate::paths::data_dir().join("state.json");
+        let state_path = crate::paths::state_dir().join("state.json");
 
         if let Some(parent) = state_path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -39,7 +39,7 @@ impl App {
     /// offset) from `data/state.json` on startup. Silently ignores missing
     /// or corrupt state — a fresh install must not error out.
     pub(super) fn load_state(&mut self) {
-        let state_path = crate::paths::data_dir().join("state.json");
+        let state_path = crate::paths::state_dir().join("state.json");
         let Ok(content) = std::fs::read_to_string(&state_path) else {
             return;
         };
@@ -60,7 +60,7 @@ impl App {
             name: String,
             songs: Vec<String>,
         }
-        let path = crate::paths::data_dir().join("playlists.json");
+        let path = crate::paths::state_dir().join("playlists.json");
         let save: Vec<SavePlaylist> = self
             .ui_state
             .playlist_state
@@ -86,7 +86,7 @@ impl App {
             name: String,
             songs: Vec<String>,
         }
-        let path = crate::paths::data_dir().join("playlists.json");
+        let path = crate::paths::state_dir().join("playlists.json");
         if let Ok(content) = std::fs::read_to_string(&path) {
             if let Ok(save) = serde_json::from_str::<Vec<SavePlaylist>>(&content) {
                 for sp in save {
@@ -108,7 +108,7 @@ impl App {
     }
 
     pub(super) fn save_library_paths(&self) {
-        let path = crate::paths::data_dir().join("library.json");
+        let path = crate::paths::state_dir().join("library.json");
         let paths: Vec<String> = self
             .ui_state
             .file_browser_state
@@ -122,14 +122,22 @@ impl App {
     }
 
     pub(super) fn load_library_paths(&mut self) {
-        let path = crate::paths::data_dir().join("library.json");
+        let path = crate::paths::state_dir().join("library.json");
         if let Ok(content) = std::fs::read_to_string(&path) {
             if let Ok(paths) = serde_json::from_str::<Vec<String>>(&content) {
                 for p_str in paths {
                     let pb = std::path::PathBuf::from(&p_str);
                     if pb.exists() && !self.ui_state.file_browser_state.library_paths.contains(&pb)
                     {
-                        self.load_and_play_collect(&pb);
+                        self.ui_state
+                            .file_browser_state
+                            .library_paths
+                            .push(pb.clone());
+                        if pb.is_dir() {
+                            self.start_library_scan(pb);
+                        } else {
+                            self.load_and_play_collect(&pb);
+                        }
                     }
                 }
             }

@@ -25,7 +25,7 @@
 ### 元数据
 - ID3v1/v2、Vorbis Comments、APE、MP4 等标签自动读取
 - 缺失字段自动回退（标题用文件名、艺术家显示 "Unknown Artist"）
-- SQLite 曲库索引，支持全文搜索
+- 后台增量扫描音乐目录，SQLite FTS5 全文搜索
 
 ### 歌词系统
 - 标准 LRC 和增强 LRC（逐字时间戳）解析
@@ -78,7 +78,13 @@ cd tmper
 cargo build --release
 ```
 
-编译产物在 `target/release/tmper`（单文件二进制，约 7MB）。
+编译产物在 `target/release/tmper`。默认配置和五套主题已内嵌，可单独复制二进制运行。
+
+也可以直接安装到 Cargo 的可执行目录：
+
+```bash
+cargo install --path .
+```
 
 ### 第三步（可选）：加入 PATH
 
@@ -154,7 +160,7 @@ tmper play ~/Music/song.flac   # 播放单曲（目录播放暂未实现，请�
 
 ### 切换主题
 
-编辑 `config/config.toml`：
+编辑 `~/.config/tmper/config.toml`：
 
 ```toml
 [ui]
@@ -183,6 +189,8 @@ theme = "dracula"
 | `/` | 播放器队列搜索（实时过滤，j/k 选结果，Enter 播放） |
 | `1`–`7` | 切换视图 |
 | `8` | 帮助面板 |
+| `a` | 文件浏览器中添加/重新扫描当前目录 |
+| `c` | 文件浏览器中取消后台扫描 |
 | `[` `]` `{` `}` | 歌词偏移微调 |
 | `Ctrl+r` | 重置歌词偏移 |
 | `q` | 退出 |
@@ -209,11 +217,16 @@ theme = "dracula"
 
 ## 配置文件
 
-所有配置文件在项目目录下的 `config/` 中：
+配置遵循 XDG 目录规范：
 
-### config/config.toml
+- 配置：`$XDG_CONFIG_HOME/tmper/`（通常为 `~/.config/tmper/`）
+- 曲库：`$XDG_DATA_HOME/tmper/library.db`
+- 状态、歌单和日志：`$XDG_STATE_HOME/tmper/`
+- 可用 `TMPER_CONFIG_DIR`、`TMPER_DATA_DIR`、`TMPER_STATE_DIR` 覆盖，便于测试和便携使用
 
-首次运行时由 `config/default.toml` 自动复制生成，之后修改 `config/config.toml` 生效。
+### ~/.config/tmper/config.toml
+
+首次运行时由二进制内嵌模板生成。旧版项目目录中的配置和数据会在首次启动时复制到新位置，旧文件不会删除。
 
 ```toml
 [playback]
@@ -230,7 +243,7 @@ theme = "tokyo-night"
 show_cover_art = true
 ```
 
-### config/keybindings.toml
+### ~/.config/tmper/keybindings.toml
 
 ```toml
 play_pause = " "
@@ -249,7 +262,7 @@ down = "j"
 
 ### Q: 启动后按键没反应？
 
-检查日志文件 `data/tmper.log`。终端窗口至少需要 10 行高度。
+检查日志文件 `~/.local/state/tmper/tmper.log`。终端小于 30×8 时会显示尺寸提示页。
 
 ### Q: 播放没有声音？
 
@@ -268,7 +281,7 @@ down = "j"
 
 ### Q: 如何添加更多音乐？
 
-使用文件浏览器（键 `6`）浏览本地音乐，或使用 `:import <path.m3u>` 导入 M3U 歌单。
+按 `6` 打开文件浏览器，进入音乐目录后按 `a` 添加并后台扫描；以后再次按 `a` 只会读取新增或发生变化的文件。扫描中按 `c` 可取消。也可以使用 `:import <path.m3u>` 导入 M3U 歌单。
 
 ### Q: 支持哪些音频格式？
 

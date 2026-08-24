@@ -1,4 +1,4 @@
-//! Theme system — named color palettes loaded from `themes/<name>.toml`.
+//! Theme system — user themes override palettes embedded in the binary.
 //!
 //! The palette uses semantic slots so views don't hardcode `Color` values.
 //! Each slot maps to one of the colors previously hardcoded across the views.
@@ -85,24 +85,29 @@ impl Theme {
         }
     }
 
-    /// Load `themes/<name>.toml` from the project tree. Falls back to the
-    /// built-in default on any I/O or parse failure (never panics).
+    /// Load `$XDG_CONFIG_HOME/tmper/themes/<name>.toml`, then fall back to an
+    /// embedded built-in palette. Unknown themes use Tokyo Night.
     pub fn load(name: &str) -> Self {
-        let path = paths::project_root()
+        let path = paths::config_dir()
             .join("themes")
             .join(format!("{name}.toml"));
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!("Theme '{name}' unreadable ({e}); using default");
-                return Self::default();
-            }
+        let external = std::fs::read_to_string(&path).ok();
+        let content = external.as_deref().or_else(|| built_in_theme(name));
+        let Some(content) = content else {
+            tracing::warn!("Unknown theme '{name}'; using default");
+            return Self::default();
         };
-        let file: ThemeFile = match toml::from_str(&content) {
+        let file: ThemeFile = match toml::from_str(content) {
             Ok(f) => f,
             Err(e) => {
-                tracing::warn!("Theme '{name}' malformed ({e}); using default");
-                return Self::default();
+                tracing::warn!("Theme '{name}' malformed ({e}); using built-in palette");
+                let Some(built_in) = built_in_theme(name) else {
+                    return Self::default();
+                };
+                match toml::from_str(built_in) {
+                    Ok(file) => file,
+                    Err(_) => return Self::default(),
+                }
             }
         };
         Self {
@@ -121,6 +126,17 @@ impl Theme {
             codec: parse_hex(&file.codec),
             bg: parse_hex(&file.bg),
         }
+    }
+}
+
+fn built_in_theme(name: &str) -> Option<&'static str> {
+    match name {
+        "tokyo-night" => Some(include_str!("../../themes/tokyo-night.toml")),
+        "dracula" => Some(include_str!("../../themes/dracula.toml")),
+        "nord" => Some(include_str!("../../themes/nord.toml")),
+        "solarized-dark" => Some(include_str!("../../themes/solarized-dark.toml")),
+        "catppuccin-mocha" => Some(include_str!("../../themes/catppuccin-mocha.toml")),
+        _ => None,
     }
 }
 

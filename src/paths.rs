@@ -1,45 +1,109 @@
 use std::path::PathBuf;
 
-/// Returns the project root directory.
-///
-/// - **Debug builds** (cargo run / cargo test): uses `CARGO_MANIFEST_DIR` at
-///   compile time, which always points to the crate root. This ensures config/
-///   data/ and themes/ resolve correctly during development regardless of the
-///   working directory or the executable's location.
-///
-/// - **Release builds**: walks up from the executable looking for the project
-///   root — the first ancestor directory containing both `themes/` and
-///   `config/`. This handles both the in-tree layout (`target/release/tmper`
-///   → repo root) and an installed layout (`$prefix/bin/tmper` → `$prefix`).
-///   Falls back to the old `parent().parent()` heuristic if no match is found.
-pub fn project_root() -> PathBuf {
-    #[cfg(debug_assertions)]
-    {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-    }
+const APP_NAME: &str = "tmper";
 
-    #[cfg(not(debug_assertions))]
-    {
-        let mut dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()));
-        while let Some(d) = dir {
-            if d.join("themes").is_dir() && d.join("config").is_dir() {
-                return d;
-            }
-            dir = d.parent().map(|p| p.to_path_buf());
-        }
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf()))
-            .unwrap_or_else(|| PathBuf::from("."))
-    }
+fn env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
-pub fn data_dir() -> PathBuf {
-    project_root().join("data")
+fn home_fallback(child: &str) -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(child)
+        .join(APP_NAME)
 }
 
 pub fn config_dir() -> PathBuf {
-    project_root().join("config")
+    env_path("TMPER_CONFIG_DIR")
+        .or_else(|| dirs::config_dir().map(|path| path.join(APP_NAME)))
+        .unwrap_or_else(|| home_fallback(".config"))
+}
+
+pub fn data_dir() -> PathBuf {
+    env_path("TMPER_DATA_DIR")
+        .or_else(|| dirs::data_dir().map(|path| path.join(APP_NAME)))
+        .unwrap_or_else(|| home_fallback(".local/share"))
+}
+
+pub fn state_dir() -> PathBuf {
+    env_path("TMPER_STATE_DIR")
+        .or_else(|| {
+            std::env::var_os("XDG_STATE_HOME")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .map(|path| path.join(APP_NAME))
+        })
+        .unwrap_or_else(|| home_fallback(".local/state"))
+}
+
+/// Source-tree root used only to migrate pre-XDG installations.
+pub fn legacy_project_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+/// Copy old project-local runtime files into XDG locations once. Old files
+/// are intentionally retained so migration is reversible.
+pub fn migrate_legacy_layout() {
+    let legacy = legacy_project_root();
+    let mappings = [
+        (
+            legacy.join("config/config.toml"),
+            config_dir().join("config.toml"),
+        ),
+        (
+            legacy.join("config/keybindings.toml"),
+            config_dir().join("keybindings.toml"),
+        ),
+        (
+            legacy.join("data/library.db"),
+            data_dir().join("library.db"),
+        ),
+        (
+            legacy.join("data/state.json"),
+            state_dir().join("state.json"),
+        ),
+        (
+            legacy.join("data/playlists.json"),
+            state_dir().join("playlists.json"),
+        ),
+        (
+            legacy.join("data/library.json"),
+            state_dir().join("library.json"),
+        ),
+    ];
+
+    for (old, new) in mappings {
+        if old.exists() && !new.exists() {
+            if let Some(parent) = new.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match std::fs::copy(&old, &new) {
+                Ok(_) => tracing::info!("Migrated {:?} to {:?}", old, new),
+                Err(error) => tracing::warn!("Failed to migrate {:?}: {error}", old),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn xdg_paths_have_tmper_suffix() {
+        assert_eq!(
+            config_dir().file_name().and_then(|name| name.to_str()),
+            Some(APP_NAME)
+        );
+        assert_eq!(
+            data_dir().file_name().and_then(|name| name.to_str()),
+            Some(APP_NAME)
+        );
+        assert_eq!(
+            state_dir().file_name().and_then(|name| name.to_str()),
+            Some(APP_NAME)
+        );
+    }
 }

@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -42,8 +43,80 @@ impl LibraryDb {
         let conn = Connection::open(path)
             .map_err(|e| AppError::Config(format!("Failed to open database: {e}")))?;
 
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS tracks (
+        initialize_schema(&conn)?;
+
+        Ok(Self { conn })
+    }
+
+    pub fn open_memory() -> AppResult<Self> {
+        let conn = Connection::open_in_memory()
+            .map_err(|e| AppError::Config(format!("Failed to open in-memory database: {e}")))?;
+
+        initialize_schema(&conn)?;
+
+        Ok(Self { conn })
+    }
+
+    pub fn file_fingerprints_under(&self, root: &Path) -> AppResult<HashMap<PathBuf, (u64, i64)>> {
+        let root = root.to_string_lossy();
+        let prefix = format!(
+            "{}{}%",
+            root.trim_end_matches(std::path::MAIN_SEPARATOR),
+            std::path::MAIN_SEPARATOR
+        );
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, file_size, file_mtime FROM tracks WHERE path LIKE ?1")
+            .map_err(|e| AppError::Config(format!("Failed to prepare fingerprint query: {e}")))?;
+        let rows = stmt
+            .query_map([prefix], |row| {
+                Ok((
+                    PathBuf::from(row.get::<_, String>(0)?),
+                    (row.get::<_, i64>(1)? as u64, row.get(2)?),
+                ))
+            })
+            .map_err(|e| AppError::Config(format!("Failed to query fingerprints: {e}")))?;
+        let mut result = HashMap::new();
+        for row in rows {
+            let (path, fingerprint) =
+                row.map_err(|e| AppError::Config(format!("Failed to read fingerprint: {e}")))?;
+            result.insert(path, fingerprint);
+        }
+        Ok(result)
+    }
+
+    pub fn delete_missing_under(&self, root: &Path, seen: &[PathBuf]) -> AppResult<usize> {
+        let known = self.file_fingerprints_under(root)?;
+        let seen: HashSet<&Path> = seen.iter().map(PathBuf::as_path).collect();
+        let mut removed = 0;
+        for path in known.keys().filter(|path| !seen.contains(path.as_path())) {
+            removed += self
+                .conn
+                .execute(
+                    "DELETE FROM tracks WHERE path = ?1",
+                    [path.to_string_lossy().as_ref()],
+                )
+                .map_err(|e| AppError::Config(format!("Failed to delete missing track: {e}")))?;
+        }
+        Ok(removed)
+    }
+
+    #[cfg(test)]
+    pub fn count(&self) -> AppResult<usize> {
+        let count: usize = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))
+            .map_err(|e| AppError::Config(format!("Failed to count: {e}")))?;
+        Ok(count)
+    }
+}
+
+fn initialize_schema(conn: &Connection) -> AppResult<()> {
+    let schema_version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap_or(0);
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS tracks (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 path        TEXT NOT NULL UNIQUE,
                 title       TEXT,
@@ -66,45 +139,37 @@ impl LibraryDb {
             CREATE INDEX IF NOT EXISTS idx_artist ON tracks(artist);
             CREATE INDEX IF NOT EXISTS idx_album  ON tracks(album);
             CREATE INDEX IF NOT EXISTS idx_genre  ON tracks(genre);
-            CREATE INDEX IF NOT EXISTS idx_search ON tracks(title, artist, album);",
-        )
-        .map_err(|e| AppError::Config(format!("Failed to create schema: {e}")))?;
-
-        Ok(Self { conn })
-    }
-
-    pub fn open_memory() -> AppResult<Self> {
-        let conn = Connection::open_in_memory()
-            .map_err(|e| AppError::Config(format!("Failed to open in-memory database: {e}")))?;
-
-        conn.execute_batch(
-            "CREATE TABLE tracks (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                path        TEXT NOT NULL UNIQUE,
-                title       TEXT,
-                artist      TEXT,
-                album       TEXT,
-                album_artist TEXT,
-                track_num   INTEGER,
-                disc_num    INTEGER,
-                genre       TEXT,
-                year        INTEGER,
-                duration_s  REAL,
-                bitrate     INTEGER,
-                sample_rate INTEGER,
-                channels    INTEGER,
-                codec       TEXT,
-                file_size   INTEGER,
-                file_mtime  INTEGER,
-                added_at    INTEGER
+            CREATE INDEX IF NOT EXISTS idx_search ON tracks(title, artist, album);
+            CREATE VIRTUAL TABLE IF NOT EXISTS tracks_fts USING fts5(
+                title, artist, album, genre, content='tracks', content_rowid='id'
             );
-            CREATE INDEX IF NOT EXISTS idx_search ON tracks(title, artist, album);",
+            CREATE TRIGGER IF NOT EXISTS tracks_ai AFTER INSERT ON tracks BEGIN
+                INSERT INTO tracks_fts(rowid, title, artist, album, genre)
+                VALUES (new.id, new.title, new.artist, new.album, new.genre);
+            END;
+            CREATE TRIGGER IF NOT EXISTS tracks_ad AFTER DELETE ON tracks BEGIN
+                INSERT INTO tracks_fts(tracks_fts, rowid, title, artist, album, genre)
+                VALUES ('delete', old.id, old.title, old.artist, old.album, old.genre);
+            END;
+            CREATE TRIGGER IF NOT EXISTS tracks_au AFTER UPDATE ON tracks BEGIN
+                INSERT INTO tracks_fts(tracks_fts, rowid, title, artist, album, genre)
+                VALUES ('delete', old.id, old.title, old.artist, old.album, old.genre);
+                INSERT INTO tracks_fts(rowid, title, artist, album, genre)
+                VALUES (new.id, new.title, new.artist, new.album, new.genre);
+            END;",
+    )
+    .map_err(|e| AppError::Config(format!("Failed to create schema: {e}")))?;
+    if schema_version < 1 {
+        conn.execute_batch(
+            "INSERT INTO tracks_fts(tracks_fts) VALUES ('rebuild');
+             PRAGMA user_version = 1;",
         )
-        .map_err(|e| AppError::Config(format!("Failed to create schema: {e}")))?;
-
-        Ok(Self { conn })
+        .map_err(|e| AppError::Config(format!("Failed to migrate schema: {e}")))?;
     }
+    Ok(())
+}
 
+impl LibraryDb {
     #[allow(clippy::too_many_arguments)]
     pub fn upsert(
         &self,
@@ -194,17 +259,27 @@ impl LibraryDb {
     }
 
     pub fn search(&self, query: &str) -> AppResult<Vec<TrackRow>> {
-        let pattern = format!("%{query}%");
+        let fts_query = query
+            .split_whitespace()
+            .filter(|term| !term.is_empty())
+            .map(|term| format!("\"{}\"*", term.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        if fts_query.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT * FROM tracks WHERE title LIKE ?1 OR artist LIKE ?1 OR album LIKE ?1
-                 ORDER BY artist, album, track_num",
+                "SELECT tracks.* FROM tracks_fts
+                 JOIN tracks ON tracks.id = tracks_fts.rowid
+                 WHERE tracks_fts MATCH ?1
+                 ORDER BY rank, tracks.artist, tracks.album, tracks.track_num",
             )
             .map_err(|e| AppError::Config(format!("Failed to prepare search: {e}")))?;
 
         let rows = stmt
-            .query_map(params![pattern], row_from_db)
+            .query_map(params![fts_query], row_from_db)
             .map_err(|e| AppError::Config(format!("Failed to search: {e}")))?;
 
         let mut result = Vec::new();
@@ -273,15 +348,6 @@ impl LibraryDb {
             .execute("DELETE FROM tracks WHERE path = ?1", params![path])
             .map_err(|e| AppError::Config(format!("Failed to delete: {e}")))?;
         Ok(())
-    }
-
-    #[cfg(test)]
-    pub fn count(&self) -> AppResult<usize> {
-        let count: usize = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))
-            .map_err(|e| AppError::Config(format!("Failed to count: {e}")))?;
-        Ok(count)
     }
 }
 
@@ -390,6 +456,54 @@ mod tests {
         let results = db.search("jane").unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].artist.as_deref(), Some("Jane"));
+    }
+
+    #[test]
+    fn test_fts_tracks_updates_and_deletes() {
+        let db = LibraryDb::open_memory().unwrap();
+        insert_test_track(&db, "/music/a.flac", "Old Title", "Artist 1", "Album 1");
+        assert_eq!(db.search("Old").unwrap().len(), 1);
+
+        db.upsert(
+            "/music/a.flac",
+            "New Title",
+            Some("Artist 1"),
+            Some("Album 1"),
+            None,
+            Some(1),
+            Some(1),
+            Some("Rock"),
+            Some(2024),
+            200.0,
+            320,
+            44100,
+            2,
+            "FLAC",
+            10000,
+            2000,
+        )
+        .unwrap();
+        assert!(db.search("Old").unwrap().is_empty());
+        assert_eq!(db.search("New").unwrap().len(), 1);
+
+        db.delete_by_path("/music/a.flac").unwrap();
+        assert!(db.search("New").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_delete_missing_under_root() {
+        let db = LibraryDb::open_memory().unwrap();
+        insert_test_track(&db, "/music/a.flac", "A", "Artist", "Album");
+        insert_test_track(&db, "/music/b.flac", "B", "Artist", "Album");
+        insert_test_track(&db, "/other/c.flac", "C", "Artist", "Album");
+
+        let removed = db
+            .delete_missing_under(Path::new("/music/"), &[PathBuf::from("/music/a.flac")])
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert!(db.get_by_path("/music/a.flac").unwrap().is_some());
+        assert!(db.get_by_path("/music/b.flac").unwrap().is_none());
+        assert!(db.get_by_path("/other/c.flac").unwrap().is_some());
     }
 
     #[test]

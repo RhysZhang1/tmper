@@ -59,17 +59,13 @@ fn default_theme() -> String {
 }
 
 impl Config {
-    /// Ensure a `config/config.toml` exists on first run by copying the
-    /// shipped `config/default.toml`. Without this a fresh checkout would
-    /// silently run on hardcoded defaults and the settings view would have
-    /// nothing to persist back to.
+    /// Ensure an editable XDG config exists using the built-in template.
     pub fn ensure_config_file() {
         let dir = crate::paths::config_dir();
         std::fs::create_dir_all(&dir).ok();
         let cfg = dir.join("config.toml");
-        let dflt = dir.join("default.toml");
-        if !cfg.exists() && dflt.exists() {
-            match std::fs::copy(&dflt, &cfg) {
+        if !cfg.exists() {
+            match std::fs::write(&cfg, include_str!("../config/default.toml")) {
                 Ok(_) => tracing::info!("Generated config.toml from default.toml"),
                 Err(e) => tracing::warn!("Failed to generate config.toml: {e}"),
             }

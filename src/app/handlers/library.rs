@@ -1,9 +1,105 @@
 use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::app::App;
+use crate::library::scanner::{ScanUpdate, ScannedTrack};
 use crate::ui::views::library_view::LibraryPanel;
 
 impl App {
+    pub(crate) fn start_library_scan(&mut self, root: std::path::PathBuf) {
+        let Some(tx) = self.library_scan_tx.clone() else {
+            return;
+        };
+        let known = self
+            .library_db
+            .file_fingerprints_under(&root)
+            .unwrap_or_default();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.library_scan_cancels.push(cancel.clone());
+        self.library_scans_active += 1;
+        self.ui_state.file_browser_state.scan_status = Some("scanning… c: cancel".into());
+        tokio::task::spawn_blocking(move || {
+            crate::library::scanner::scan_incremental(root, known, tx, cancel);
+        });
+    }
+
+    pub(super) fn cancel_library_scan(&mut self) {
+        for cancel in &self.library_scan_cancels {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn handle_scan_update(&mut self, update: ScanUpdate) {
+        match update {
+            ScanUpdate::Track(track) => self.index_scanned_track(*track),
+            ScanUpdate::Progress { scanned, changed } => {
+                self.ui_state.file_browser_state.scan_status =
+                    Some(format!("scanned {scanned}, updated {changed} — c: cancel"));
+            }
+            ScanUpdate::Finished {
+                root,
+                seen,
+                scanned,
+                changed,
+                failed,
+                cancelled,
+            } => {
+                let removed = if cancelled {
+                    0
+                } else {
+                    self.library_db
+                        .delete_missing_under(&root, &seen)
+                        .unwrap_or(0)
+                };
+                self.library_scans_active = self.library_scans_active.saturating_sub(1);
+                if self.library_scans_active == 0 {
+                    self.library_scan_cancels.clear();
+                }
+                let status = if cancelled {
+                    format!("scan cancelled after {scanned} files")
+                } else {
+                    format!(
+                        "done: {scanned} scanned, {changed} updated, {removed} removed, {failed} failed"
+                    )
+                };
+                self.ui_state.file_browser_state.scan_status =
+                    Some(if self.library_scans_active > 0 {
+                        format!(
+                            "{status}; {} scan(s) still running — c: cancel",
+                            self.library_scans_active
+                        )
+                    } else {
+                        status
+                    });
+                self.refresh_library_artists();
+            }
+        }
+    }
+
+    fn index_scanned_track(&mut self, track: ScannedTrack) {
+        let info = track.info;
+        let path = info.path.to_string_lossy().to_string();
+        if let Err(error) = self.library_db.upsert(
+            &path,
+            &info.title,
+            info.artist.as_deref(),
+            info.album.as_deref(),
+            info.album_artist.as_deref(),
+            info.track_number,
+            info.disc_number,
+            info.genre.as_deref(),
+            info.year,
+            info.duration.as_secs_f64(),
+            info.bitrate,
+            info.sample_rate,
+            info.channels as u32,
+            &info.codec,
+            track.file_size,
+            track.file_mtime,
+        ) {
+            tracing::warn!("Failed to index {path}: {error}");
+        }
+    }
+
     /// Handle keyboard events in View 2 (Library Browser).
     pub(super) fn handle_library_key(&mut self, key: &KeyEvent) {
         let s = &mut self.ui_state.library_state;

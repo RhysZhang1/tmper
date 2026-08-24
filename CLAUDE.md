@@ -10,9 +10,9 @@ The project is **implemented and working** (~8,200 lines of Rust, 59 tests). The
 
 ## Layout
 
-- **Config lives in `<project>/config/`** (NOT XDG). On first run the app copies `config/default.toml` → `config/config.toml`; edit `config/config.toml` thereafter. `keybindings.toml` is optional (hardcoded defaults exist).
-- **Runtime data lives in `<project>/data/`** — `tmper.log`, `state.json` (saved volume/repeat/lyrics-offset, restored at startup), `playlists.json`, `library.db` (SQLite). This dir is gitignored.
-- **Themes live in `themes/<name>.toml`** — 5 real palettes (tokyo-night, dracula, nord, solarized-dark, catppuccin-mocha) loaded by `src/ui/theme.rs`. UI colors come from `UiState.theme`, never hardcoded.
+- **Paths follow XDG**: config in `$XDG_CONFIG_HOME/tmper`, SQLite in `$XDG_DATA_HOME/tmper`, and state/logs in `$XDG_STATE_HOME/tmper`. `TMPER_CONFIG_DIR`, `TMPER_DATA_DIR`, and `TMPER_STATE_DIR` override them for tests.
+- **Defaults are embedded**: `config/default.toml` and all five `themes/*.toml` palettes are compiled into the binary. User themes in `$XDG_CONFIG_HOME/tmper/themes/` override built-ins.
+- **Legacy migration is copy-only**: project-local `config/` and `data/` runtime files are copied once when the XDG destination is absent; old files are never deleted.
 
 ## Key Architecture Decisions
 
@@ -67,7 +67,7 @@ src/
 - **Background decode/seek**: heavy work is `spawn_blocking`, results land via shared `Arc` handles; the main thread stays responsive.
 - **Immutable-ish updates**: state structs use `Default` + `..Default::default()`; version counters use `Cell` (`cover_gen`, `visible_rows`).
 - **Error handling**: `AppResult<T>` / `AppError` (thiserror) for public APIs; background-thread errors go to `tracing` logs (never panics).
-- **Config priority**: CLI args > `config/config.toml` > hardcoded defaults. Unknown keys are ignored (no `deny_unknown_fields`).
+- **Config priority**: CLI args > XDG `config.toml` > embedded defaults. Unknown keys are ignored (no `deny_unknown_fields`).
 - **Config reality check**: only `default_volume`, `seek_step_small_secs`, `num_bars`, `frame_rate`, `smoothing`, `theme`, `show_cover_art` are live. Do not re-add speculative keys without a consuming implementation.
 
 ## Known Architectural Debt (do NOT re-litigate without a dedicated plan)

@@ -26,6 +26,7 @@ pub struct FileBrowserState {
     pub selected_library_index: usize,
     pub focused: BrowserPanel,
     pub fs_items: Vec<FsItem>,
+    pub scan_status: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +50,7 @@ impl Default for FileBrowserState {
             selected_library_index: 0,
             focused: BrowserPanel::Filesystem,
             fs_items: Vec::new(),
+            scan_status: None,
         }
     }
 }
@@ -78,7 +80,8 @@ fn render_library_panel(f: &mut Frame, area: Rect, theme: &Theme, state: &FileBr
     let items: Vec<ListItem> = (start..end)
         .map(|i| {
             let p = &state.library_paths[i];
-            let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("?");
+            let prefix = if p.is_dir() { "📁 " } else { "🎵 " };
             let style = if i == state.selected_library_index && is_focused {
                 Style::default()
                     .fg(theme.text)
@@ -87,14 +90,19 @@ fn render_library_panel(f: &mut Frame, area: Rect, theme: &Theme, state: &FileBr
             } else {
                 Style::default().fg(theme.secondary)
             };
-            ListItem::new(Line::from(Span::styled(name, style)))
+            ListItem::new(Line::from(Span::styled(format!("{prefix}{name}"), style)))
         })
         .collect();
 
+    let title = state
+        .scan_status
+        .as_deref()
+        .map(|status| format!(" Library — {status} "))
+        .unwrap_or_else(|| " Library — a: add/rescan directory ".to_string());
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Library ")
+            .title(title)
             .border_style(border_style),
     );
     f.render_widget(list, area);
