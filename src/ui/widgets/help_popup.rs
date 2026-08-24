@@ -37,7 +37,7 @@ pub fn render_help(f: &mut Frame, theme: &Theme, scroll: usize) {
         (false, true) => " j/k 滚动 ▼ ",
         (false, false) => "",
     };
-    let title = format!(" 帮助 — 按 0 或 Esc 关闭 {} ", indicator);
+    let title = format!(" 帮助 — 按 8 或 Esc 关闭 {} ", indicator);
 
     let para = Paragraph::new(visible).block(
         Block::default()
@@ -73,8 +73,17 @@ fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         key(theme, "r", "切换播放模式（顺序/随机/单曲）"),
         gap(),
         sec(theme, "▎搜索"),
-        key(theme, "/", "进入搜索（实时过滤）"),
-        key(theme, "Esc", "清除搜索"),
+        key(
+            theme,
+            "/ (视图 1)",
+            "实时过滤播放队列，j/k 选择，Enter 播放",
+        ),
+        key(theme, "/ (视图 2)", "输入后 Enter 执行曲库全文搜索"),
+        key(
+            theme,
+            "Esc / Backspace",
+            "退出播放器搜索 / 退出空的曲库搜索",
+        ),
         gap(),
         sec(theme, "▎命令模式（按 : 进入，Vim 风格）"),
         key(theme, ":q / :quit", "退出程序"),
@@ -92,6 +101,7 @@ fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
             ":repeat <模式>",
             "循环模式 (sequential/shuffle/single)",
         ),
+        key(theme, ":shuffle <on|off>", "打开或关闭随机播放"),
         key(
             theme,
             ":view <名称>",
@@ -106,9 +116,13 @@ fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         key(theme, "e (歌单视图)", "导出当前展开的歌单"),
         gap(),
         sec(theme, "▎自定义键位"),
-        key(theme, "", "编辑 ~/.config/tmper/keybindings.toml"),
-        key(theme, "", "play_pause stop next_track prev_track"),
-        key(theme, "", "vol_down vol_up quit up down"),
+        key(theme, "", "编辑 $XDG_CONFIG_HOME/tmper/keybindings.toml"),
+        key(
+            theme,
+            "",
+            "play_pause next_track prev_track vol_down vol_up",
+        ),
+        key(theme, "", "quit up down（stop 当前未接入）"),
         key(theme, "", "支持单字符、Space、Up/Down 等特殊名称"),
         gap(),
         sec(theme, "▎视图切换"),
@@ -121,6 +135,14 @@ fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         key(theme, "7", "设置"),
         key(theme, "8", "本帮助"),
         gap(),
+        sec(theme, "▎视图 2 — 曲库浏览器"),
+        key(theme, "h / ←", "焦点移向 艺术家←专辑←歌曲"),
+        key(theme, "l / → / Tab", "焦点移向 艺术家→专辑→歌曲"),
+        key(theme, "j / k", "在当前栏移动"),
+        key(theme, "Enter(歌曲)", "播放选中歌曲"),
+        key(theme, "/", "搜索标题、艺术家、专辑和流派"),
+        key(theme, "Backspace", "返回艺术家列表"),
+        gap(),
         sec(theme, "▎视图 5 — 播放列表管理"),
         key(theme, "h / l / Tab", "切换焦点 曲库↔歌单"),
         key(theme, "Enter(曲库)", "添加到展开歌单"),
@@ -130,10 +152,11 @@ fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         key(theme, "e", "导出当前歌单为 M3U"),
         gap(),
         sec(theme, "▎视图 6 — 文件管理器"),
-        key(theme, "h / l / Tab", "切换焦点"),
+        key(theme, "h / l / Tab", "切换曲库路径与文件系统焦点"),
         key(theme, "Enter(文件夹)", "进入文件夹"),
-        key(theme, "Enter(音频)", "添加到曲库"),
-        key(theme, "a", "添加/重新扫描当前目录"),
+        key(theme, "Enter(音频)", "添加单个文件并立即播放"),
+        key(theme, "Enter(曲库路径)", "移除该曲库路径及其索引"),
+        key(theme, "a", "添加当前目录并启动增量扫描"),
         key(theme, "c", "取消后台目录扫描"),
         key(theme, "Backspace", "返回上级"),
         gap(),
@@ -175,18 +198,13 @@ fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         sec(theme, "▎配置与数据"),
         txt(
             theme,
-            "配置文件: config/config.toml (主题/音量/频谱/音乐目录)",
+            "配置: $XDG_CONFIG_HOME/tmper/ (config.toml, keybindings.toml)",
         ),
-        txt(
-            theme,
-            "键位文件: config/keybindings.toml (自定义键位, 9个可配置键)",
-        ),
-        txt(
-            theme,
-            "运行时数据: data/ 目录 (state.json, library.db, playlists.json)",
-        ),
+        txt(theme, "曲库数据库: $XDG_DATA_HOME/tmper/library.db"),
+        txt(theme, "状态/歌单/日志: $XDG_STATE_HOME/tmper/"),
+        txt(theme, "通常对应 ~/.config、~/.local/share、~/.local/state"),
         gap(),
-        grey(theme, "按 0 或 Esc 关闭帮助，j/k 滚动"),
+        grey(theme, "按 8 或 Esc 关闭帮助，j/k 或方向键滚动"),
     ]
 }
 
@@ -234,4 +252,25 @@ fn grey(theme: &Theme, text: &str) -> Line<'static> {
         text.to_string(),
         Style::default().fg(theme.muted),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn help_matches_current_navigation_and_xdg_paths() {
+        let text = build_lines(&Theme::default())
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("按 8 或 Esc 关闭帮助"));
+        assert!(text.contains("$XDG_CONFIG_HOME/tmper/keybindings.toml"));
+        assert!(text.contains("添加当前目录并启动增量扫描"));
+        assert!(text.contains("搜索标题、艺术家、专辑和流派"));
+        assert!(!text.contains("config/config.toml"));
+        assert!(!text.contains("按 0 或 Esc"));
+    }
 }
