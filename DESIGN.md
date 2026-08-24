@@ -197,13 +197,17 @@ pub struct AudioEngine {
 }
 ```
 
-**位置追踪**：使用壁钟时间（`Instant`），而非帧计数。避免了帧计数导致 100% 进度显示的 bug。暂停时记录 `paused_at`，恢复时补偿。
+**位置追踪**：使用壁钟时间（`Instant`）并补偿暂停时间；解码器发出 `Ready` 后才重置会话计时，加载时间不计入播放位置。
 
-**seek**：`seek_relative(secs)` 从目标位置重新解码整个文件，送入新 Sink。解码在后台线程进行（镜像 `play_file_async` 的 `Arc<Sink>` 模式），位置立即跳到目标，不阻塞事件循环。
+**有界流式解码**：后台线程按实际未播放 PCM 样本数实施约 2 秒的高水位背压，不再把整首音频预先排入 Rodio。每次播放/seek 都使用独立 Sink、取消令牌和递增 generation，旧会话无法污染新会话。
 
-**InstrumentedSource**：包装 rodio Source，在 `next()` 中拷贝采样到共享 `pcm_buffer: Arc<Mutex<VecDeque<f32>>>`，供 FFT 线程读取。
+**生命周期事件**：后台解码器向主线程发送 `Ready`、`Finished`、`Failed`；自动切歌以 Sink 真正排空的 `Finished` 为准，不再使用“壁钟位置达到标签时长”推断结束。
 
-**测试**：生命周期测试、位置追踪、停止清空位置、排队测试。
+**seek**：`seek_relative(secs)` 使用容器原生 seek 并在后台重新建立流式会话；暂停状态跨 seek 保留。
+
+**InstrumentedSource**：包装 Rodio Source，在 `next()` 中拷贝采样到 FFT ring buffer，并精确递减排队样本数；被取消时 `Drop` 释放尚未播放的计数。
+
+**测试**：覆盖生命周期、背压上限、显式完成、快速替换会话、后台错误传播和暂停中 seek。
 
 ---
 
@@ -399,7 +403,7 @@ pub type AppResult<T> = anyhow::Result<T>;
       ├─ AudioDecoder::open(path)
       │    └─ Symphonia: 探测容器 → 选择音轨 → 创建解码器
       │
-      ├─ 循环 read_packet() 解码全部 PCM 采样
+      ├─ 循环 read_packet()，按约 2 秒 PCM 高水位施加背压
       │    └─ 送入 InstrumentedSource → Rodio Sink
       │         └─ InstrumentedSource::next() 拷贝采样到 pcm_buffer
       │

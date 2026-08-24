@@ -61,14 +61,6 @@ impl AudioOutput {
         self.sink.set_volume(vol);
     }
 
-    pub fn is_paused(&self) -> bool {
-        self.sink.is_paused()
-    }
-
-    pub fn empty(&self) -> bool {
-        self.sink.empty()
-    }
-
     /// Clone of the shared `Arc<Sink>` for use in background decode tasks.
     /// Both the main thread and background task reference the same sink,
     /// so `set_volume` and `stop` work correctly regardless of which path

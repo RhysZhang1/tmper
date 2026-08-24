@@ -13,6 +13,12 @@ pub mod runtime {
     /// the container / codec params.
     pub const DEFAULT_SAMPLE_RATE: u32 = 44100;
 
+    /// Maximum decoded audio queued ahead of the device.
+    pub const AUDIO_PREBUFFER_SECS: u32 = 2;
+
+    pub const AUDIO_BACKPRESSURE_SLEEP_MS: u64 = 10;
+    pub const AUDIO_COMPLETION_POLL_MS: u64 = 20;
+
     // ── Keyboard ──
 
     /// Timeout window (ms) for detecting double-key sequences like `gg` / `dd`.

@@ -11,6 +11,7 @@
 ### 音频播放
 - 支持 MP3、FLAC、OGG、Opus、WAV、AAC、M4A、WMA、APE、WavPack、AIFF 等格式
 - 基于 [Symphonia](https://github.com/pdeljanov/Symphonia) 纯 Rust 解码，**无需安装 ffmpeg**
+- 有界流式解码，仅预缓冲约 2 秒；快速切歌和跳转会取消旧播放会话
 - 音量控制、快进快退（← 后退 / → 前进，真实音频 seek）
 - 顺序 / 随机 / 单曲 三种循环模式
 

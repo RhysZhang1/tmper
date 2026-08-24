@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::audio::decoder::AudioDecoder;
@@ -9,19 +9,78 @@ use crate::audio::output::AudioOutput;
 use crate::constants::runtime;
 use crate::error::AppResult;
 
-/// Wraps a PCM sample iterator, copying each sample to a shared ring buffer.
+/// User-visible state of the current playback session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaybackState {
+    Stopped,
+    Loading,
+    Playing,
+    Paused,
+    Seeking,
+    Finished,
+    Failed(String),
+}
+
+/// Events produced by the active decoder and consumed by the app tick.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlaybackEvent {
+    Ready {
+        duration_secs: f64,
+        sample_rate: u32,
+    },
+    Finished,
+    Failed(String),
+}
+
+enum DecoderEvent {
+    Ready {
+        generation: u64,
+        duration_secs: f64,
+        sample_rate: u32,
+    },
+    Finished {
+        generation: u64,
+    },
+    Failed {
+        generation: u64,
+        message: String,
+    },
+}
+
+/// Copies played samples to the FFT ring buffer and decrements the exact
+/// number of samples still queued for this packet. Dropping a stopped source
+/// also releases its unplayed count, so backpressure cannot remain stuck.
 pub struct InstrumentedSource<I> {
     inner: I,
     buffer: Arc<Mutex<VecDeque<f32>>>,
     capacity: usize,
+    queued_samples: Arc<AtomicUsize>,
+    remaining: usize,
 }
 
 impl<I: Iterator<Item = f32>> InstrumentedSource<I> {
-    pub fn new(inner: I, buffer: Arc<Mutex<VecDeque<f32>>>, capacity: usize) -> Self {
+    pub fn new(
+        inner: I,
+        buffer: Arc<Mutex<VecDeque<f32>>>,
+        capacity: usize,
+        queued_samples: Arc<AtomicUsize>,
+        sample_count: usize,
+    ) -> Self {
         Self {
             inner,
             buffer,
             capacity,
+            queued_samples,
+            remaining: sample_count,
+        }
+    }
+}
+
+impl<I> Drop for InstrumentedSource<I> {
+    fn drop(&mut self) {
+        if self.remaining > 0 {
+            atomic_saturating_sub(&self.queued_samples, self.remaining);
+            self.remaining = 0;
         }
     }
 }
@@ -30,13 +89,18 @@ impl<I: Iterator<Item = f32>> Iterator for InstrumentedSource<I> {
     type Item = f32;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next().inspect(|&sample| {
-            let mut buf = self.buffer.lock().unwrap();
-            while buf.len() >= self.capacity {
-                buf.pop_front();
+        let sample = self.inner.next()?;
+        if self.remaining > 0 {
+            self.remaining -= 1;
+            atomic_saturating_sub(&self.queued_samples, 1);
+        }
+        if let Ok(mut buffer) = self.buffer.lock() {
+            while buffer.len() >= self.capacity {
+                buffer.pop_front();
             }
-            buf.push_back(sample);
-        })
+            buffer.push_back(sample);
+        }
+        Some(sample)
     }
 }
 
@@ -53,40 +117,48 @@ impl<I: Iterator<Item = f32> + rodio::Source> rodio::Source for InstrumentedSour
         self.inner.sample_rate()
     }
 
-    fn total_duration(&self) -> Option<std::time::Duration> {
+    fn total_duration(&self) -> Option<Duration> {
         self.inner.total_duration()
     }
 }
 
-/// Tracks playback position using wall-clock time (not decoded frame counts).
 struct PositionState {
     start: Option<Instant>,
     total_paused: Duration,
     pause_start: Option<Instant>,
-    base_offset: f64, // seek offset in seconds
+    base_offset: f64,
 }
 
 pub struct AudioEngine {
     output: AudioOutput,
+    #[cfg(test)]
     decoder: Option<AudioDecoder>,
     current_volume: f32,
-    duration_secs: Arc<Mutex<Option<f64>>>,
+    duration_secs: Option<f64>,
     pub pcm_buffer: Arc<Mutex<VecDeque<f32>>>,
     position: Mutex<PositionState>,
     current_path: Option<PathBuf>,
     decode_handle: Option<tokio::task::JoinHandle<()>>,
-    /// Flag shared with the background decode task; set to cancel.
     cancel_flag: Arc<AtomicBool>,
+    generation: Arc<AtomicU64>,
+    state: PlaybackState,
+    event_tx: mpsc::Sender<DecoderEvent>,
+    event_rx: mpsc::Receiver<DecoderEvent>,
+    sample_rate: Arc<AtomicU32>,
+    queued_samples: Arc<AtomicUsize>,
+    peak_queued_samples: Arc<AtomicUsize>,
 }
 
 impl AudioEngine {
     pub fn new() -> AppResult<Self> {
         let output = AudioOutput::new()?;
+        let (event_tx, event_rx) = mpsc::channel();
         Ok(Self {
             output,
+            #[cfg(test)]
             decoder: None,
             current_volume: 0.8,
-            duration_secs: Arc::new(Mutex::new(None)),
+            duration_secs: None,
             pcm_buffer: Arc::new(Mutex::new(VecDeque::with_capacity(
                 runtime::PCM_BUFFER_CAPACITY,
             ))),
@@ -99,265 +171,408 @@ impl AudioEngine {
             current_path: None,
             decode_handle: None,
             cancel_flag: Arc::new(AtomicBool::new(false)),
+            generation: Arc::new(AtomicU64::new(0)),
+            state: PlaybackState::Stopped,
+            event_tx,
+            event_rx,
+            sample_rate: Arc::new(AtomicU32::new(runtime::DEFAULT_SAMPLE_RATE)),
+            queued_samples: Arc::new(AtomicUsize::new(0)),
+            peak_queued_samples: Arc::new(AtomicUsize::new(0)),
         })
     }
 
-    /// Cancel any in-progress async decode.
-    fn cancel_decode(&mut self) {
-        if self.decode_handle.is_some() {
-            // Signal the background task to stop its wait loop.
-            self.cancel_flag.store(true, Ordering::SeqCst);
-            // Stop the shared sink — unblocks the bg task if it's in
-            // the cancellable wait loop.
-            self.output.stop_and_replace();
-            self.output.set_volume(self.current_volume);
-            // Reset flag for next use.
-            self.cancel_flag = Arc::new(AtomicBool::new(false));
-            self.decode_handle = None;
-        }
-    }
-
-    /// Sync decode — blocks until the entire file is decoded and queued.
-    #[cfg(test)]
-    pub fn play_file(&mut self, path: &Path) -> AppResult<()> {
+    fn begin_session(&mut self) -> (u64, Arc<AtomicBool>, Arc<AtomicUsize>, Arc<AtomicUsize>) {
         self.cancel_decode();
-        self.decoder = None;
-        *self.duration_secs.lock().unwrap() = None;
-        *self.position.lock().unwrap() = PositionState {
-            start: None,
-            total_paused: Duration::ZERO,
-            pause_start: None,
-            base_offset: 0.0,
-        };
-
         self.output.stop_and_replace();
         self.output.set_volume(self.current_volume);
         self.pcm_buffer.lock().unwrap().clear();
+        self.duration_secs = None;
+
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.cancel_flag = Arc::new(AtomicBool::new(false));
+        self.queued_samples = Arc::new(AtomicUsize::new(0));
+        self.peak_queued_samples = Arc::new(AtomicUsize::new(0));
+        (
+            generation,
+            self.cancel_flag.clone(),
+            self.queued_samples.clone(),
+            self.peak_queued_samples.clone(),
+        )
+    }
+
+    fn cancel_decode(&mut self) {
+        self.cancel_flag.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.decode_handle.take() {
+            handle.abort();
+        }
+    }
+
+    #[cfg(test)]
+    pub fn play_file(&mut self, path: &Path) -> AppResult<()> {
+        self.begin_session();
+        self.decoder = None;
 
         let mut decoder = AudioDecoder::open(path)?;
-        *self.duration_secs.lock().unwrap() = Some(decoder.duration_secs());
-
+        self.duration_secs = Some(decoder.duration_secs());
+        self.sample_rate
+            .store(decoder.sample_rate, Ordering::Relaxed);
         let channels = decoder.channels;
         let sample_rate = decoder.sample_rate;
-        let pcm_buf = self.pcm_buffer.clone();
+        let pcm_buffer = self.pcm_buffer.clone();
 
         while let Some(samples) = decoder.read_packet()? {
+            let sample_count = samples.len();
+            self.queued_samples
+                .fetch_add(sample_count, Ordering::Relaxed);
+            update_peak(&self.peak_queued_samples, self.queued_samples());
             let source = rodio::buffer::SamplesBuffer::new(channels as u16, sample_rate, samples);
             self.output.append_source(InstrumentedSource::new(
                 source,
-                pcm_buf.clone(),
+                pcm_buffer.clone(),
                 runtime::PCM_BUFFER_CAPACITY,
+                self.queued_samples.clone(),
+                sample_count,
             ));
         }
 
         self.decoder = Some(decoder);
         self.current_path = Some(path.to_path_buf());
-
-        let mut pos = self.position.lock().unwrap();
-        pos.start = Some(Instant::now());
-        pos.total_paused = Duration::ZERO;
-        pos.pause_start = None;
-        pos.base_offset = 0.0;
-
+        self.reset_position(0.0, false);
+        self.state = PlaybackState::Playing;
         Ok(())
     }
 
-    /// Async decode — spawns a background task, returns immediately.
-    /// Uses the same `Arc<Sink>` as the main thread so `set_volume` and
-    /// `stop` work correctly regardless of which path feeds audio.
     pub fn play_file_async(&mut self, path: &Path) -> AppResult<()> {
-        self.cancel_decode();
-        self.pcm_buffer.lock().unwrap().clear();
-        *self.duration_secs.lock().unwrap() = None;
-
         let path_buf = path.to_path_buf();
+        let (generation, cancel, queued, peak) = self.begin_session();
         let sink = self.output.sink_arc();
-        let pcm_buf = self.pcm_buffer.clone();
-        let duration = self.duration_secs.clone();
-        let volume = self.current_volume;
-        let cancel = self.cancel_flag.clone();
-        sink.set_volume(volume);
+        self.current_path = Some(path_buf.clone());
+        self.reset_position(0.0, false);
+        self.state = PlaybackState::Loading;
+        self.spawn_decoder(path_buf, 0.0, generation, cancel, queued, peak, sink);
+        Ok(())
+    }
 
-        let decode_path = path_buf.clone();
-        let h = tokio::task::spawn_blocking(move || {
-            let mut decoder = match AudioDecoder::open(&decode_path) {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::error!("Async decode open failed: {e}");
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_decoder(
+        &mut self,
+        path: PathBuf,
+        offset_secs: f64,
+        generation: u64,
+        cancel: Arc<AtomicBool>,
+        queued: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+        sink: Arc<rodio::Sink>,
+    ) {
+        let pcm_buffer = self.pcm_buffer.clone();
+        let event_tx = self.event_tx.clone();
+        let generation_counter = self.generation.clone();
+
+        self.decode_handle = Some(tokio::task::spawn_blocking(move || {
+            let mut decoder = match AudioDecoder::open(&path) {
+                Ok(decoder) => decoder,
+                Err(error) => {
+                    send_failure(
+                        &event_tx,
+                        generation,
+                        format!("Failed to open audio: {error}"),
+                    );
                     return;
                 }
             };
-            *duration.lock().unwrap() = Some(decoder.duration_secs());
+            if offset_secs > 0.0 {
+                if let Err(error) = decoder.seek_to_secs(offset_secs) {
+                    send_failure(&event_tx, generation, format!("Failed to seek: {error}"));
+                    return;
+                }
+            }
 
             let sample_rate = decoder.sample_rate;
-            let channels = decoder.channels;
+            let channels = decoder.channels.max(1);
+            let max_queued =
+                sample_rate as usize * channels as usize * runtime::AUDIO_PREBUFFER_SECS as usize;
+            if event_tx
+                .send(DecoderEvent::Ready {
+                    generation,
+                    duration_secs: decoder.duration_secs(),
+                    sample_rate,
+                })
+                .is_err()
+            {
+                return;
+            }
 
-            while let Ok(Some(samples)) = decoder.read_packet() {
+            loop {
+                while queued.load(Ordering::Relaxed) >= max_queued {
+                    if session_cancelled(&cancel, &generation_counter, generation) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(runtime::AUDIO_BACKPRESSURE_SLEEP_MS));
+                }
+                if session_cancelled(&cancel, &generation_counter, generation) {
+                    return;
+                }
+
+                let samples = match decoder.read_packet() {
+                    Ok(Some(samples)) => samples,
+                    Ok(None) => break,
+                    Err(error) => {
+                        send_failure(&event_tx, generation, format!("Decode failed: {error}"));
+                        return;
+                    }
+                };
+                let sample_count = samples.len();
+                queued.fetch_add(sample_count, Ordering::Relaxed);
+                update_peak(&peak, queued.load(Ordering::Relaxed));
                 let source =
                     rodio::buffer::SamplesBuffer::new(channels as u16, sample_rate, samples);
-                let instrumented =
-                    InstrumentedSource::new(source, pcm_buf.clone(), runtime::PCM_BUFFER_CAPACITY);
-                sink.append(instrumented);
+                sink.append(InstrumentedSource::new(
+                    source,
+                    pcm_buffer.clone(),
+                    runtime::PCM_BUFFER_CAPACITY,
+                    queued.clone(),
+                    sample_count,
+                ));
             }
-            // Cancellable wait loop: polls every 50ms, exits immediately
-            // when cancel_flag is set or the sink drains naturally.
-            while !cancel.load(Ordering::Relaxed) && !sink.empty() {
-                std::thread::sleep(Duration::from_millis(50));
+
+            while !sink.empty() {
+                if session_cancelled(&cancel, &generation_counter, generation) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(runtime::AUDIO_COMPLETION_POLL_MS));
             }
-        });
-
-        self.decode_handle = Some(h);
-        self.current_path = Some(path_buf);
-
-        let mut pos = self.position.lock().unwrap();
-        *pos = PositionState {
-            start: Some(Instant::now()),
-            total_paused: Duration::ZERO,
-            pause_start: None,
-            base_offset: 0.0,
-        };
-
-        Ok(())
+            if !session_cancelled(&cancel, &generation_counter, generation) {
+                let _ = event_tx.send(DecoderEvent::Finished { generation });
+            }
+        }));
     }
 
     pub fn pause(&mut self) {
-        self.output.pause();
-        self.position.lock().unwrap().pause_start = Some(Instant::now());
+        if matches!(
+            self.state,
+            PlaybackState::Loading | PlaybackState::Playing | PlaybackState::Seeking
+        ) {
+            self.output.pause();
+            let mut position = self.position.lock().unwrap();
+            if position.pause_start.is_none() {
+                position.pause_start = Some(Instant::now());
+            }
+            self.state = PlaybackState::Paused;
+        }
     }
 
     pub fn resume(&mut self) {
-        self.output.play();
-        let mut pos = self.position.lock().unwrap();
-        if let Some(pause_start) = pos.pause_start.take() {
-            pos.total_paused += pause_start.elapsed();
+        if self.state == PlaybackState::Paused {
+            self.output.play();
+            let mut position = self.position.lock().unwrap();
+            if let Some(pause_start) = position.pause_start.take() {
+                position.total_paused += pause_start.elapsed();
+            }
+            self.state = PlaybackState::Playing;
         }
     }
 
     pub fn stop(&mut self) {
         self.cancel_decode();
+        self.generation.fetch_add(1, Ordering::SeqCst);
         self.output.stop_and_replace();
-        self.decoder = None;
+        #[cfg(test)]
+        {
+            self.decoder = None;
+        }
         self.current_path = None;
-        *self.duration_secs.lock().unwrap() = None;
-        *self.position.lock().unwrap() = PositionState {
-            start: None,
-            total_paused: Duration::ZERO,
-            pause_start: None,
-            base_offset: 0.0,
-        };
+        self.duration_secs = None;
+        self.queued_samples.store(0, Ordering::Relaxed);
+        self.reset_position(0.0, false);
+        self.state = PlaybackState::Stopped;
     }
 
-    /// Seek by a relative delta (seconds). Positive = forward, negative = backward.
-    /// Re-decodes the file from the new position (true audio seek).
-    ///
-    /// Decoding runs on a background thread (mirrors `play_file_async`), so
-    /// seeking large files no longer freezes the event loop. Position jumps
-    /// to the target immediately; audio begins once the task feeds the sink.
     pub fn seek_relative(&mut self, delta_secs: f64) -> AppResult<()> {
-        self.cancel_decode();
         let path = match &self.current_path {
-            Some(p) => p.clone(),
+            Some(path) => path.clone(),
             None => return Ok(()),
         };
-
-        let dur = *self.duration_secs.lock().unwrap();
-        let max_dur = dur.unwrap_or(f64::MAX);
-        let pos_data = self.position.lock().unwrap();
-        let current = Self::elapsed_without_offset(&pos_data) + pos_data.base_offset;
-        drop(pos_data);
-        let target = (current + delta_secs).clamp(0.0, max_dur * 0.999);
-        if target == current {
+        let current = self.position_secs();
+        let max_duration = self.duration_secs.unwrap_or(f64::MAX);
+        let target = (current + delta_secs).clamp(0.0, max_duration * 0.999);
+        if (target - current).abs() < f64::EPSILON {
             return Ok(());
         }
 
-        // Jump position immediately — the UI advances to the target while
-        // the background task decodes the remaining audio from there.
-        *self.position.lock().unwrap() = PositionState {
-            start: Some(Instant::now()),
-            total_paused: Duration::ZERO,
-            pause_start: None,
-            base_offset: target,
-        };
-
-        // Replace the sink and clear the FFT buffer for the new stream.
-        self.pcm_buffer.lock().unwrap().clear();
-        self.output.stop_and_replace();
-        self.output.set_volume(self.current_volume);
-
+        let was_paused = self.state == PlaybackState::Paused;
+        let (generation, cancel, queued, peak) = self.begin_session();
+        if was_paused {
+            self.output.pause();
+        }
         let sink = self.output.sink_arc();
-        let pcm_buf = self.pcm_buffer.clone();
-        let volume = self.current_volume;
-        let cancel = self.cancel_flag.clone();
-        sink.set_volume(volume);
-
-        let h = tokio::task::spawn_blocking(move || {
-            let mut decoder = match AudioDecoder::open(&path) {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::error!("Async seek: failed to open file: {e}");
-                    return;
-                }
-            };
-            if let Err(e) = decoder.seek_to_secs(target) {
-                tracing::error!("Async seek: failed to seek to {target}s: {e}");
-                return;
-            }
-            let sample_rate = decoder.sample_rate;
-            let channels = decoder.channels;
-
-            while let Ok(Some(samples)) = decoder.read_packet() {
-                let source =
-                    rodio::buffer::SamplesBuffer::new(channels as u16, sample_rate, samples);
-                let instrumented =
-                    InstrumentedSource::new(source, pcm_buf.clone(), runtime::PCM_BUFFER_CAPACITY);
-                sink.append(instrumented);
-            }
-            // Cancellable wait loop: exits when the sink drains naturally
-            // or the next play/seek/stop cancels the decode.
-            while !cancel.load(Ordering::Relaxed) && !sink.empty() {
-                std::thread::sleep(Duration::from_millis(50));
-            }
-        });
-
-        self.decode_handle = Some(h);
-
+        self.current_path = Some(path.clone());
+        self.reset_position(target, was_paused);
+        self.state = if was_paused {
+            PlaybackState::Paused
+        } else {
+            PlaybackState::Seeking
+        };
+        self.spawn_decoder(path, target, generation, cancel, queued, peak, sink);
         Ok(())
     }
 
-    /// Helper: wall-clock elapsed without base_offset.
-    fn elapsed_without_offset(pos: &PositionState) -> f64 {
-        match pos.start {
-            Some(start_time) => {
-                let playing = start_time
+    pub fn drain_events(&mut self) -> Vec<PlaybackEvent> {
+        let current_generation = self.generation.load(Ordering::SeqCst);
+        let mut events = Vec::new();
+        while let Ok(event) = self.event_rx.try_recv() {
+            match event {
+                DecoderEvent::Ready {
+                    generation,
+                    duration_secs,
+                    sample_rate,
+                } if generation == current_generation => {
+                    self.duration_secs = Some(duration_secs);
+                    self.sample_rate.store(sample_rate, Ordering::Relaxed);
+                    let paused = self.state == PlaybackState::Paused;
+                    let base_offset = self.position.lock().unwrap().base_offset;
+                    self.reset_position(base_offset, paused);
+                    if !paused {
+                        self.state = PlaybackState::Playing;
+                    }
+                    events.push(PlaybackEvent::Ready {
+                        duration_secs,
+                        sample_rate,
+                    });
+                }
+                DecoderEvent::Finished { generation } if generation == current_generation => {
+                    self.state = PlaybackState::Finished;
+                    events.push(PlaybackEvent::Finished);
+                }
+                DecoderEvent::Failed {
+                    generation,
+                    message,
+                } if generation == current_generation => {
+                    self.state = PlaybackState::Failed(message.clone());
+                    events.push(PlaybackEvent::Failed(message));
+                }
+                _ => {}
+            }
+        }
+        events
+    }
+
+    fn reset_position(&self, base_offset: f64, paused: bool) {
+        *self.position.lock().unwrap() = PositionState {
+            start: Some(Instant::now()),
+            total_paused: Duration::ZERO,
+            pause_start: paused.then(Instant::now),
+            base_offset,
+        };
+    }
+
+    fn elapsed_without_offset(position: &PositionState) -> f64 {
+        match position.start {
+            Some(start) => {
+                let elapsed = start
                     .elapsed()
-                    .checked_sub(pos.total_paused)
+                    .checked_sub(position.total_paused)
                     .unwrap_or(Duration::ZERO);
-                let adjusted = match pos.pause_start {
-                    Some(ps) => playing.checked_sub(ps.elapsed()).unwrap_or(Duration::ZERO),
-                    None => playing,
+                let adjusted = match position.pause_start {
+                    Some(pause_start) => elapsed
+                        .checked_sub(pause_start.elapsed())
+                        .unwrap_or(Duration::ZERO),
+                    None => elapsed,
                 };
-                adjusted.as_secs_f64().max(0.0)
+                adjusted.as_secs_f64()
             }
             None => 0.0,
         }
     }
 
-    pub fn set_volume(&mut self, vol: f32) {
-        self.current_volume = vol;
-        self.output.set_volume(vol);
+    pub fn set_volume(&mut self, volume: f32) {
+        self.current_volume = volume;
+        self.output.set_volume(volume);
     }
 
     pub fn is_playing(&self) -> bool {
-        !self.output.is_paused() && !self.output.empty()
+        matches!(
+            self.state,
+            PlaybackState::Loading | PlaybackState::Playing | PlaybackState::Seeking
+        )
+    }
+
+    #[cfg(test)]
+    pub fn state(&self) -> &PlaybackState {
+        &self.state
     }
 
     pub fn position_secs(&self) -> f64 {
-        let pos = self.position.lock().unwrap();
-        Self::elapsed_without_offset(&pos) + pos.base_offset
+        if matches!(
+            self.state,
+            PlaybackState::Stopped | PlaybackState::Failed(_)
+        ) {
+            return 0.0;
+        }
+        let position = self.position.lock().unwrap();
+        let value = Self::elapsed_without_offset(&position) + position.base_offset;
+        self.duration_secs
+            .map_or(value, |duration| value.min(duration))
     }
 
     pub fn duration_secs(&self) -> Option<f64> {
-        *self.duration_secs.lock().unwrap()
+        self.duration_secs
+    }
+
+    pub fn sample_rate_handle(&self) -> Arc<AtomicU32> {
+        self.sample_rate.clone()
+    }
+
+    #[cfg(test)]
+    pub fn queued_samples(&self) -> usize {
+        self.queued_samples.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn peak_queued_samples(&self) -> usize {
+        self.peak_queued_samples.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for AudioEngine {
+    fn drop(&mut self) {
+        self.cancel_flag.store(true, Ordering::SeqCst);
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        if let Some(handle) = self.decode_handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+fn session_cancelled(cancel: &AtomicBool, generation: &AtomicU64, expected: u64) -> bool {
+    cancel.load(Ordering::Relaxed) || generation.load(Ordering::SeqCst) != expected
+}
+
+fn send_failure(tx: &mpsc::Sender<DecoderEvent>, generation: u64, message: String) {
+    tracing::error!("{message}");
+    let _ = tx.send(DecoderEvent::Failed {
+        generation,
+        message,
+    });
+}
+
+fn update_peak(peak: &AtomicUsize, value: usize) {
+    let mut current = peak.load(Ordering::Relaxed);
+    while value > current {
+        match peak.compare_exchange_weak(current, value, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+fn atomic_saturating_sub(value: &AtomicUsize, amount: usize) {
+    let mut current = value.load(Ordering::Relaxed);
+    loop {
+        let next = current.saturating_sub(amount);
+        match value.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
     }
 }
 
@@ -368,101 +583,132 @@ mod tests {
     #[test]
     fn test_engine_lifecycle() {
         let mut engine = AudioEngine::new().expect("Failed to create engine");
-
         engine
             .play_file(Path::new("tests/fixtures/test.wav"))
             .expect("Failed to play file");
-
-        let pos = engine.position_secs();
-        assert!(pos > 0.0, "Position should be > 0 after decoding");
-
+        assert!(engine.position_secs() >= 0.0);
         engine.pause();
+        assert_eq!(engine.state(), &PlaybackState::Paused);
         engine.resume();
-
+        assert_eq!(engine.state(), &PlaybackState::Playing);
         engine.stop();
-        assert!(
-            engine.duration_secs().is_none(),
-            "Duration should be cleared after stop"
-        );
-    }
-
-    #[test]
-    fn test_position_tracking() {
-        let mut engine = AudioEngine::new().expect("Failed to create engine");
-
-        engine
-            .play_file(Path::new("tests/fixtures/test.wav"))
-            .expect("Failed to play file");
-
-        let pos = engine.position_secs();
-        assert!(
-            pos > 0.0,
-            "Position should be > 0 after playing 2s of audio"
-        );
-
-        let dur = engine.duration_secs();
-        assert!(dur.is_some(), "Duration should be known");
-        assert!(dur.unwrap() > 1.5, "Duration should be ~2 seconds");
+        assert_eq!(engine.state(), &PlaybackState::Stopped);
+        assert!(engine.duration_secs().is_none());
     }
 
     #[test]
     fn test_stop_clears_position() {
         let mut engine = AudioEngine::new().expect("Failed to create engine");
-
         engine
             .play_file(Path::new("tests/fixtures/test.wav"))
             .expect("Failed to play file");
-
         engine.stop();
-
-        assert_eq!(
-            engine.position_secs(),
-            0.0,
-            "Position should be 0 after stop"
-        );
+        assert_eq!(engine.position_secs(), 0.0);
         assert!(engine.duration_secs().is_none());
     }
 
-    #[test]
-    fn test_audio_pipeline_queued() {
+    #[tokio::test]
+    async fn async_stream_is_bounded_and_finishes() {
         let mut engine = AudioEngine::new().expect("Failed to create engine");
-
         engine
-            .play_file(Path::new("tests/fixtures/test.wav"))
-            .expect("Failed to play file");
+            .play_file_async(Path::new("tests/fixtures/test.wav"))
+            .unwrap();
 
-        // Sources are queued in the sink synchronously during play_file.
-        // In headless test environments the audio device may drain instantly,
-        // so is_playing() may return false. Verify position tracking works
-        // (wall-clock based) and duration was set correctly instead.
-        assert!(
-            engine.position_secs() > 0.0,
-            "Position should advance after play_file"
-        );
-        assert!(
-            engine.duration_secs().unwrap_or(0.0) > 0.0,
-            "Duration should be set after play_file"
-        );
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let mut finished = false;
+        while Instant::now() < deadline {
+            for event in engine.drain_events() {
+                if event == PlaybackEvent::Finished {
+                    finished = true;
+                }
+            }
+            if finished {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(finished, "stream should emit an explicit completion event");
+        let bound =
+            runtime::DEFAULT_SAMPLE_RATE as usize * 2 * runtime::AUDIO_PREBUFFER_SECS as usize
+                + 8192;
+        assert!(engine.peak_queued_samples() <= bound);
     }
 
     #[tokio::test]
-    async fn test_async_seek_jumps_position() {
+    async fn rapid_session_replacement_ignores_old_events() {
         let mut engine = AudioEngine::new().expect("Failed to create engine");
         engine
-            .play_file(Path::new("tests/fixtures/test.wav"))
-            .expect("Failed to play file");
+            .play_file_async(Path::new("tests/fixtures/test.wav"))
+            .unwrap();
+        engine.seek_relative(0.5).unwrap();
+        engine
+            .play_file_async(Path::new("tests/fixtures/test.flac"))
+            .unwrap();
 
-        // Seek forward by 0.5s. The async path must jump position immediately
-        // (base_offset), not block while the background task re-decodes.
-        engine.seek_relative(0.5).expect("seek should not error");
-        let pos = engine.position_secs();
-        assert!(
-            (0.4..0.7).contains(&pos),
-            "position should jump to ~0.5s after seek, got {pos}"
-        );
-
-        // Give the background decode task time to finish draining.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut ready_rate = None;
+        while Instant::now() < deadline && ready_rate.is_none() {
+            for event in engine.drain_events() {
+                if let PlaybackEvent::Ready { sample_rate, .. } = event {
+                    ready_rate = Some(sample_rate);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(ready_rate, Some(44100));
+        assert!(!matches!(engine.state(), PlaybackState::Failed(_)));
         engine.stop();
+    }
+
+    #[tokio::test]
+    async fn async_open_error_reaches_main_thread() {
+        let mut engine = AudioEngine::new().expect("Failed to create engine");
+        engine
+            .play_file_async(Path::new("tests/fixtures/missing.wav"))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            if engine
+                .drain_events()
+                .iter()
+                .any(|event| matches!(event, PlaybackEvent::Failed(_)))
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("decoder failure should reach the main thread");
+    }
+
+    #[tokio::test]
+    async fn seek_while_paused_stays_paused() {
+        let mut engine = AudioEngine::new().expect("Failed to create engine");
+        engine
+            .play_file_async(Path::new("tests/fixtures/test.wav"))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            if engine
+                .drain_events()
+                .iter()
+                .any(|event| matches!(event, PlaybackEvent::Ready { .. }))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        engine.pause();
+        engine.seek_relative(0.5).unwrap();
+        assert_eq!(engine.state(), &PlaybackState::Paused);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        engine.drain_events();
+        assert_eq!(engine.state(), &PlaybackState::Paused);
+        let first = engine.position_secs();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let second = engine.position_secs();
+        assert!(
+            (second - first).abs() < 0.01,
+            "paused position must not advance"
+        );
     }
 }

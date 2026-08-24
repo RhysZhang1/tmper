@@ -24,14 +24,15 @@ The project is **implemented and working** (~8,200 lines of Rust, 59 tests). The
 ### Concurrency Model
 - **tokio** async runtime in `App::run()`; main loop uses `tokio::select!` over an event channel and a tick interval
 - **Burst-mode input thread**: a background thread `poll()`s crossterm and batch-`read()`s events into an `mpsc::unbounded_channel` of `Vec<CrosstermEvent>`; the loop processes the batch and draws ONCE (handles key auto-repeat without scroll-after-release)
-- Audio decode and seek run on background threads (`tokio::task::spawn_blocking`) feeding a shared `Arc<Sink>` — track switches and seeks don't freeze the UI
-- FFT analysis runs on its own thread writing into a shared `Arc<Mutex<VecDeque<f32>>>` ring buffer; the UI reads a `Vec<f32>` snapshot each tick
+- Audio decode and seek run on background threads with generation-based cancellation. Exact queued PCM sample accounting limits prebuffering to about two seconds; stale sessions cannot affect the active sink or emit accepted events.
+- Decoder `Ready`/`Finished`/`Failed` events return to the main loop. Natural completion is sink-driven rather than inferred from wall-clock duration.
+- FFT analysis uses the active track's real sample rate and writes through a shared PCM ring buffer; the UI reads a `Vec<f32>` snapshot each tick.
 - UI rendering is read-only over `&UiState`; all mutation happens in `App::handle_event`
 
 ### Audio Pipeline
 ```
-Audio file → Symphonia (format probe + decoder) → PCM f32 samples
-  ├─ Rodio Sink (shared Arc, fed from background thread) → sound card
+Audio file → Symphonia (format probe + streaming decoder) → bounded PCM queue
+  ├─ Per-session Rodio Sink → sound card
   └─ Ring buffer → FFT thread → SpectrumProcessor → UiState.visualizer_data
 ```
 
@@ -64,7 +65,7 @@ src/
 ## Key Design Patterns
 
 - **Single writer, read-only readers**: `App` (event loop) mutates `UiState`; `ui::render` only reads it. Render functions take explicit read-only `Params` structs (e.g. `PlayerViewParams`) rather than the whole state.
-- **Background decode/seek**: heavy work is `spawn_blocking`, results land via shared `Arc` handles; the main thread stays responsive.
+- **Bounded streaming sessions**: background decode/seek uses a two-second PCM high-water mark, per-session cancellation, and generation-filtered lifecycle events.
 - **Immutable-ish updates**: state structs use `Default` + `..Default::default()`; version counters use `Cell` (`cover_gen`, `visible_rows`).
 - **Error handling**: `AppResult<T>` / `AppError` (thiserror) for public APIs; background-thread errors go to `tracing` logs (never panics).
 - **Config priority**: CLI args > XDG `config.toml` > embedded defaults. Unknown keys are ignored (no `deny_unknown_fields`).

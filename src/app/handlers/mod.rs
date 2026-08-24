@@ -300,12 +300,12 @@ impl App {
         let is_up = key.code == KeyCode::Up || self.key_matches(&key, &self.key_bindings.up);
 
         if is_play_pause {
-            if self.engine.is_playing() || self.ui_state.player.is_playing {
+            if self.engine.is_playing() {
                 self.engine.pause();
                 self.ui_state.player.is_playing = false;
             } else {
                 self.engine.resume();
-                self.ui_state.player.is_playing = true;
+                self.ui_state.player.is_playing = self.engine.is_playing();
             }
         } else if is_vol_down {
             let new_vol = (self.ui_state.volume - runtime::VOLUME_STEP).max(0.0);
@@ -626,6 +626,31 @@ impl App {
             }
         }
 
+        let mut track_finished = false;
+        for event in self.engine.drain_events() {
+            match event {
+                crate::audio::engine::PlaybackEvent::Ready { duration_secs, .. } => {
+                    self.ui_state.player.duration = duration_secs;
+                    self.ui_state.player.is_playing = self.engine.is_playing();
+                }
+                crate::audio::engine::PlaybackEvent::Finished => {
+                    track_finished = true;
+                }
+                crate::audio::engine::PlaybackEvent::Failed(message) => {
+                    self.ui_state.player.is_playing = false;
+                    self.ui_state.notification = Some((
+                        format!("Playback failed: {message}"),
+                        std::time::Instant::now(),
+                    ));
+                    tracing::error!("Playback failed: {message}");
+                }
+            }
+        }
+
+        if track_finished {
+            self.on_track_ended();
+        }
+
         let pos = self.engine.position_secs();
         self.ui_state.player.position = pos;
 
@@ -650,13 +675,6 @@ impl App {
         }
 
         self.sync_lyrics(pos);
-
-        if self.ui_state.player.is_playing
-            && self.ui_state.player.duration > 0.0
-            && pos >= self.ui_state.player.duration
-        {
-            self.on_track_ended();
-        }
 
         // Sync config flag to UI state (user may have toggled in settings)
         self.ui_state.player.show_cover_art = self.config.ui.show_cover_art;
