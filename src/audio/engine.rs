@@ -23,7 +23,11 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// User-visible state of the current playback session.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// This is also the wire spelling of the state ([`crate::ipc::proto`]): the
+/// engine's state machine *is* the daemon's truth about playback, so the
+/// snapshot carries it verbatim instead of a mirror that could drift.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PlaybackState {
     Stopped,
     Loading,

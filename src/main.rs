@@ -4,6 +4,7 @@ mod config;
 mod constants;
 mod error;
 mod event;
+mod ipc;
 mod paths;
 mod playlist;
 

@@ -10,7 +10,6 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
-use serde::{Deserialize, Serialize};
 
 use crate::constants::runtime;
 use crate::lyrics::types::LyricTrack;
@@ -19,12 +18,12 @@ use crate::ui::theme::Theme;
 const MIN_TERMINAL_WIDTH: u16 = 30;
 const MIN_TERMINAL_HEIGHT: u16 = 8;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RepeatMode {
-    Sequential,
-    Shuffle,
-    SingleTrack,
-}
+/// Declared by the wire contract (`ipc::proto`) rather than here, because
+/// repeat mode is daemon policy: it decides the next track when no TUI is
+/// attached, and it is what `state.json` saves. Re-exported so the client can
+/// keep naming it `ui::RepeatMode` — and so the one thing the UI adds to it,
+/// the label, still reads as a UI concern.
+pub use crate::ipc::proto::RepeatMode;
 
 impl RepeatMode {
     pub fn label(&self) -> &'static str {
