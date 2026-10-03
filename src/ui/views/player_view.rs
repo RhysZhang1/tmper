@@ -93,7 +93,7 @@ fn fit_cover_rect(area: Rect, img_w: u32, img_h: u32, cell_px: (u16, u16)) -> Re
     )
 }
 
-/// Decode cover art bytes and render as colored block characters (chafa-style).
+/// Decode cover art bytes and render as colored block characters.
 /// Uses Lanczos3 resize + lower-half block (▄) with fg/bg for 2× vertical resolution.
 ///
 /// Returns the box the art was rendered into along with the lines, so the

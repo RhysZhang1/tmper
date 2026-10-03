@@ -17,8 +17,8 @@
 
 - 只正式支持 Linux；macOS 和 Windows 未验证。
 - CLI 尚不能把目录直接作为临时播放队列，目录导入需在文件浏览器中操作。
-- 原生 Kitty/SIXEL 图像位于 Ratatui 缓冲区之外，终端兼容性取决于协议支持；通用回退是半块字符封面。封面矩形按图片宽高比自适应，并依赖终端上报的单元格像素尺寸：启动时用 `CSI 16 t` 探测一次（Konsole 走这条），拿不到再用 `TIOCGWINSZ`，都不上报时（部分 tmux 配置、少数模拟器）退回 10×20 的假设值，此时封面比例仍正确但可能小一圈，可用配置里的 `cell_px` 覆盖。测量结果会写进日志。
-- **没有图形能力探测**：Kitty 路径只看环境变量，SIXEL 路径只检查 `chafa` 二进制是否存在。chafa 一旦可用就会写出 DCS 载荷并撤掉半块字符画，因此在不支持 SIXEL 的终端（VTE/GNOME Terminal、xfce4-terminal、Alacritty、未开 passthrough 的 tmux）上封面区是**空白**，而不是字符画兜底。修法与实测见 `progress/2026-10-03-encoder-and-terminal-compat.md`。
+- 原生 Kitty/SIXEL 图像位于 Ratatui 缓冲区之外，终端兼容性取决于协议支持；通用回退是半块字符封面。封面矩形按图片宽高比自适应，并依赖终端上报的单元格像素尺寸：启动时用一趟探测拿到（`CSI 16 t`，Konsole 走这条；拿不到再试 `CSI 14 t` ÷ `CSI 18 t`，仍无则 `TIOCGWINSZ`），都不上报时（部分 tmux 配置、少数模拟器）退回 10×20 的假设值，此时封面比例仍正确但可能小一圈，可用配置里的 `cell_px` 覆盖。结果写进日志。
+- **图形能力只探测了 SIXEL**：同一趟启动探测会用 `CSI c`（DA1）询问终端是否支持 SIXEL，只有终端明确回答支持才发送图形载荷，否则一律保留半块字符画——VTE 系（GNOME Terminal、xfce4-terminal）、Alacritty 上封面因此是字符画而不是空白面板。Kitty 路径仍只看环境变量（`KITTY_WINDOW_ID` 等），认不出「设了变量但不支持图形协议」的终端；`tmux` / `screen` 下也没做 DCS passthrough 包装，载荷会被复用器吞掉（此时退回字符画）。改进方向与实测见 `progress/2026-10-03-encoder-and-terminal-compat.md`。
 - 没有 MPRIS2、均衡器、在线歌词和桌面通知；播放与 TUI 同进程，退出即停播，也没有可重新接管的常驻进程。
 - 音频输出测试需要真实声卡或虚拟 ALSA，默认测试集合会跳过它们。
 

@@ -191,8 +191,8 @@ pub struct UiState {
     pub cover_rect: Cell<(u16, u16, u16, u16)>,
     /// Pixel size of one terminal cell, measured once per frame from the
     /// terminal's reported window size. Both cover layers need it: the block
-    /// art to pick a box whose aspect matches the artwork, and the chafa
-    /// fallback to convert that box into the pixel geometry chafa emits.
+    /// art to pick a box whose aspect matches the artwork, and the SIXEL
+    /// encoder to size the raster to that same box.
     pub cell_px: Cell<(u16, u16)>,
     /// A terminal-native image (SIXEL/Kitty) is on screen for the current
     /// cover. It covers the same rect the block art would, but the two can

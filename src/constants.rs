@@ -45,15 +45,27 @@ pub mod runtime {
     /// Kitty terminals recommend keeping payloads ≤ 4 KiB per escape sequence.
     pub const KITTY_CHUNK_SIZE: usize = 4096;
 
+    /// Color registers the in-process SIXEL encoder may use.
+    ///
+    /// SIXEL addresses colors with 8 bits, so 256 is the format's own ceiling —
+    /// which is why replacing chafa changed no color budget: chafa's `-c full`
+    /// emits at most 255 registers on this path regardless (measured; see
+    /// `progress/2026-10-03-encoder-and-terminal-compat.md`).
+    pub const SIXEL_MAX_COLORS: u16 = 256;
+
+    /// Floyd–Steinberg error-diffusion strength for the SIXEL encoder, 0.0–1.0.
+    ///
+    /// 0.875 (7/8) is the encoder's own default and its recommendation for
+    /// photographs with smooth gradients, which is what cover art is. Lower
+    /// values trade banding for sharper edges on flat graphics.
+    pub const SIXEL_DIFFUSION: f32 = 0.875;
+
     /// Cell pixel size assumed when the terminal reports one through neither
     /// `TIOCGWINSZ` nor `CSI 16 t` (tmux, some multiplexers).
     ///
-    /// Two consumers have to agree on this number: the cover box (which needs
-    /// the cell's shape to keep the artwork's aspect) and chafa's own sixel
-    /// layout. chafa falls back to 10×20 px per cell when it can read no pixel
-    /// size from the terminal — measured on chafa 1.18.2, where a piped run of
-    /// `-s 20x10 --stretch` emits exactly 200×200 px — so tmper assumes the
-    /// same cell and the raster still lands on the box.
+    /// The cover box needs the cell's *shape* to keep the artwork's aspect, and
+    /// the SIXEL payload is sized in these same pixels — so this number is now
+    /// used on one side only, by the one process that draws the cover.
     pub const FALLBACK_CELL_PX: (u16, u16) = (10, 20);
 
     // ── FFT ──

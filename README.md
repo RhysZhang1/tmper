@@ -20,9 +20,10 @@
 ### 封面图显示
 - **三层渐进渲染**：
   1. **Kitty 图形协议** — 原生像素渲染（Kitty、WezTerm、Ghostty）
-  2. **SIXEL** — 通过 `chafa` 子进程（Konsole Plasma 6+，可选）
+  2. **SIXEL** — 程序内编码（Konsole Plasma 6+），无外部依赖
   3. **半块字符** — Lanczos3 缩放 + Floyd-Steinberg 误差扩散抖动（通用回退）
-- SIXEL 只在封面变化时发送一次；chafa 以 `--probe off` 运行（避免终端颜色探测注入伪按键）
+- SIXEL 只在封面变化时发送一次；栅格尺寸就是封面矩形的像素尺寸，与半块字符图层共用同一个盒子
+- 启动时用 `CSI c`（DA1）询问终端是否支持 SIXEL，只有终端明确回答支持才会发送图形载荷
 - 自动读取内嵌封面（ID3v2 APIC / Vorbis Comments / MP4）
 
 ### 元数据
@@ -60,8 +61,7 @@
 
 - **Linux** 操作系统（Arch、Ubuntu、Debian、Fedora 等）
 - 音频输出设备（PulseAudio / PipeWire / ALSA）
-- **Rust** 编译工具链 1.70+
-- **可选**：`chafa` 命令行工具（提供 Konsole 等终端的 SIXEL 封面图渲染）
+- **Rust** 编译工具链 1.70+（封面图的 SIXEL 编码在程序内完成，无需 `chafa` 等外部工具）
 
 ---
 
@@ -97,22 +97,7 @@ cargo install --path .
 export PATH="$HOME/path/to/tmper/target/release:$PATH"
 ```
 
-### 第四步（可选）：安装 chafa（封面图 SIXEL 渲染）
-
-```bash
-# Arch
-sudo pacman -S chafa
-
-# Ubuntu/Debian
-sudo apt install chafa
-
-# Fedora
-sudo dnf install chafa
-```
-
-没有 chafa 也能正常使用——封面图会使用半块字符渲染。
-
-### 运行
+### 第四步：运行
 
 ```bash
 tmper                      # 交互模式
@@ -279,7 +264,7 @@ down = "j"
 
 需要满足以下条件之一：
 - **Kitty / WezTerm / Ghostty 终端**：自动使用原生像素渲染
-- **Konsole (Plasma 6+)**：安装 `chafa` 包后自动使用 SIXEL 渲染
+- **Konsole (Plasma 6+)**：自动使用 SIXEL 渲染（无需额外安装任何东西）
 - 其他终端：使用半块字符渲染（▄ + fg/bg 两倍垂直分辨率）
 
 封面区域会按图片宽高比自动调整，并读取终端上报的单元格像素尺寸来对齐原生图像，因此在
@@ -287,8 +272,13 @@ down = "j"
 （xterm 的 `CSI 16 t`，Konsole 走这条；拿不到就用 `CSI 14 t` ÷ `CSI 18 t`），探测结果写在
 日志里：`grep "cell size" ~/.local/state/tmper/tmper.log`。两个来源都不上报的终端（`tmux`
 的部分配置、少数模拟器）会退回 10×20 的假设值，封面比例仍然正确但可能小一圈，此时在
-`config.toml` 里指定 `cell_px = [宽, 高]` 即可。`tmux` / `screen` 下图形协议默认被吞掉，
-程序会自动退回到 chafa（若可用）或半块字符。
+`config.toml` 里指定 `cell_px = [宽, 高]` 即可。
+
+同一次探测还会用 `CSI c`（DA1）问终端支不支持 SIXEL——终端明确回答支持才会发送 SIXEL
+载荷，否则一律使用半块字符封面。这是 VTE 系终端（GNOME Terminal、xfce4-terminal）、
+Alacritty 上的正常路径：它们不支持 SIXEL，封面会以字符画呈现。`tmux` / `screen` 下图形
+协议默认被吞掉，程序同样退回字符画（`grep "graphics" ~/.local/state/tmper/tmper.log`
+可以看到这次判断的结果）。
 
 ### Q: 歌词不显示？
 
@@ -379,7 +369,7 @@ tmper/
 ```bash
 cargo build                        # 调试编译
 cargo build --release              # 发布编译（资源已内嵌的可执行文件）
-cargo test                         # 默认：全部无需音频设备的测试（347 个）
+cargo test                         # 默认：全部无需音频设备的测试（353 个）
 cargo test audio_output_ -- --ignored --test-threads=1  # 需要真实/虚拟设备（6 个）
 cargo clippy -- -D warnings        # 代码检查
 cargo fmt --all                    # 格式化

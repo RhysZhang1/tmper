@@ -37,6 +37,11 @@ encoding_rs = "0.8"
 unicode-width = "0.2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 base64 = "0.22.1"
+# SIXEL encoding in-process (pure Rust, MIT/Apache-2.0). Replaced the `chafa`
+# subprocess: the raster is now exactly the pixel box we ask for instead of a
+# second program's guess at the cell size, and it is ~7x faster. See
+# progress/2026-10-03-encoder-and-terminal-compat.md.
+icy_sixel = "0.5"
 # poll(2) for the terminal cell-size probe: waiting on the tty *without*
 # consuming from it is the whole point, and std has no timeout-aware read.
 libc = "0.2"

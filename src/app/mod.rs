@@ -180,11 +180,14 @@ impl App {
         // One tty round trip, here and nowhere else: `enter` has just put the
         // tty in raw mode (so the answer is readable at all) and the input
         // thread below does not exist yet (so nothing else can swallow it).
-        // The probe is the only source that is right on every terminal —
-        // Konsole fills in TIOCGWINSZ's pixel fields on some windows and
-        // leaves them zero on others — and without it the cover is laid out
-        // from a guessed cell size: the wrong scale and the wrong shape.
-        crate::ui::cover::probe_cell_px_once();
+        // The cell size it returns is the only source that is right on every
+        // terminal — Konsole fills in TIOCGWINSZ's pixel fields on some
+        // windows and leaves them zero on others — and without it the cover is
+        // laid out from a guessed cell size: the wrong scale and the wrong
+        // shape. The same round trip asks whether the terminal can display
+        // SIXEL at all, which is what decides between a graphics payload and
+        // the half-block art.
+        crate::ui::cover::probe_terminal_once();
 
         let (library_scan_tx, mut library_scan_rx) =
             tokio::sync::mpsc::unbounded_channel::<ScanUpdate>();
@@ -357,7 +360,7 @@ impl App {
                     // renderer compares it against what it sent for.
                     blocks_suppressed: self.ui_state.native_cover.get(),
                 };
-                // Dispatch to the active protocol (Kitty or chafa SIXEL).
+                // Dispatch to the active protocol (Kitty or SIXEL).
                 self.cover_renderer.render(&cover_params);
                 self.ui_state
                     .native_cover

@@ -3,7 +3,7 @@
 //!
 //! Rendering priority chain:
 //!   Kitty protocol (Kitty / WezTerm / Ghostty)
-//!   → SIXEL via chafa subprocess (Konsole Plasma 6+)
+//!   → SIXEL encoded in-process (Konsole Plasma 6+)
 //!   → half-block characters (fallback in player_view.rs)
 //!
 //! Design: SIXEL/Kitty images are a *persistent graphics layer* on modern
@@ -51,55 +51,49 @@ pub struct CoverParams {
 }
 
 /// Converts cover image bytes into a terminal graphics payload (e.g. SIXEL).
-/// Abstracted so tests can stub the chafa subprocess.
+/// Abstracted so tests can stub the encoder.
 ///
 /// `Send` keeps `CoverRenderer` (and thus `App`) `Send` for the multi-threaded
 /// tokio runtime.
 trait SixelEncoder: Send {
-    /// Returns the payload to write to the terminal, or a human-readable error.
-    fn encode(&self, cover: &[u8], cols: u16, rows: u16) -> Result<Vec<u8>, String>;
+    /// Encode `cover` (the raw embedded image, any size) into a payload that
+    /// covers exactly `px` pixels. Returns the payload to write to the
+    /// terminal, or a human-readable error.
+    fn encode(&self, cover: &[u8], px: (u16, u16)) -> Result<Vec<u8>, String>;
 }
 
-/// Default encoder: runs `chafa` as a subprocess (Konsole SIXEL).
-struct ChafaEncoder;
+/// Default encoder: SIXEL, encoded in-process by `icy_sixel`.
+///
+/// This used to shell out to `chafa`. Two things changed with the swap: the
+/// raster is now the pixel box tmper asks for (rather than a cell count
+/// multiplied back up by a *second* program's idea of a cell — the mismatch
+/// behind `progress/2026-10-03-chafa-cell-units.md`), and the color ceiling is
+/// unchanged, because SIXEL addresses colors with 8 bits and chafa capped its
+/// own output at 255 registers anyway. Measured against chafa at the same
+/// raster, this encoder is at or ahead on MAE/PSNR and ~7× faster; the
+/// numbers are in `progress/2026-10-03-encoder-and-terminal-compat.md`.
+struct IcySixelEncoder;
 
-impl SixelEncoder for ChafaEncoder {
-    fn encode(&self, cover: &[u8], cols: u16, rows: u16) -> Result<Vec<u8>, String> {
-        // `--probe off` is critical: by default chafa probes the controlling
-        // terminal for capabilities (incl. background color via OSC 10/11
-        // queries through `/dev/tty`) and waits up to 5s for the response.
-        // The response lands on the same PTY as tmper's stdin, so it is read
-        // as phantom key events, and the 5s wait blocks the main thread.
-        // We already know the terminal supports SIXEL — no probing needed.
-        let mut child = std::process::Command::new("chafa")
-            .arg("--probe")
-            .arg("off")
-            .arg("-f")
-            .arg("sixels")
-            .arg("-c")
-            .arg("full")
-            // chafa keeps the aspect ratio by default and letterboxes into the
-            // size it was given. The box below is already sized to the
-            // artwork, so the letterbox was pure slack — and the slack was
-            // filled by whatever the half-block layer had drawn there.
-            .arg("--stretch")
-            .arg("-s")
-            .arg(format!("{cols}x{rows}"))
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("chafa spawn failed: {e}"))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(cover);
-        }
-        let out = child
-            .wait_with_output()
-            .map_err(|e| format!("chafa wait failed: {e}"))?;
-        if !out.stderr.is_empty() {
-            tracing::warn!("chafa stderr: {}", String::from_utf8_lossy(&out.stderr));
-        }
-        Ok(out.stdout)
+impl SixelEncoder for IcySixelEncoder {
+    fn encode(&self, cover: &[u8], px: (u16, u16)) -> Result<Vec<u8>, String> {
+        let (w, h) = (px.0.max(1) as u32, px.1.max(1) as u32);
+        let img =
+            image::load_from_memory(cover).map_err(|e| format!("cover decode failed: {e}"))?;
+        // Stretched to the box rather than fitted inside it: the box is
+        // already aspect-fitted to the artwork (`player_view::fit_cover_rect`),
+        // so filling it is exact, and letterboxing here would only re-open the
+        // slack the cover panel used to show.
+        let rgba = img
+            .resize_exact(w, h, image::imageops::FilterType::Lanczos3)
+            .to_rgba8();
+        let opts = icy_sixel::EncodeOptions {
+            max_colors: runtime::SIXEL_MAX_COLORS,
+            diffusion: runtime::SIXEL_DIFFUSION,
+            quantize_method: icy_sixel::QuantizeMethod::Wu,
+        };
+        icy_sixel::sixel_encode(rgba.as_raw(), w as usize, h as usize, &opts)
+            .map(String::into_bytes)
+            .map_err(|e| format!("sixel encode failed: {e}"))
     }
 }
 
@@ -110,21 +104,24 @@ impl SixelEncoder for ChafaEncoder {
 pub struct CoverRenderer {
     out: Box<dyn Write + Send>,
     encoder: Box<dyn SixelEncoder>,
-    /// Whether the `chafa` binary is usable (checked once at construction).
-    chafa_available: bool,
+    /// Whether the terminal can display SIXEL. `None` (production) defers to
+    /// the startup probe, which cannot run yet: `CoverRenderer::new` is called
+    /// from `App::new`, and the probe needs the tty in raw mode, which
+    /// `App::run` sets up afterwards. Tests pin the value instead.
+    sixel_available: Option<bool>,
     /// Whether the terminal speaks the Kitty graphics protocol (resolved once
     /// at construction; see `is_kitty_graphics_compatible`).
     kitty_available: bool,
     /// Cached SIXEL payload — re-sent only when the cover or area changes.
-    chafa_sixel_cache: Option<Vec<u8>>,
+    sixel_cache: Option<Vec<u8>>,
     /// Cover identity the cached SIXEL payload was rendered for.
-    last_chafa_gen: u64,
+    last_sixel_gen: u64,
     /// Last area (x,y,w,h) the SIXEL payload was rendered for.
-    last_chafa_rect: Option<(u16, u16, u16, u16)>,
-    /// Sticky: encoding produced no usable payload. Stops per-frame chafa
-    /// spawns until the cover or area changes (a terminal that doesn't
-    /// support SIXEL won't start supporting it mid-session).
-    chafa_failed: bool,
+    last_sixel_rect: Option<(u16, u16, u16, u16)>,
+    /// Sticky: encoding produced no usable payload. Stops per-frame encodes
+    /// until the cover or area changes (a terminal that rejects SIXEL won't
+    /// start accepting it mid-session).
+    sixel_failed: bool,
     /// Value of `CoverParams::blocks_suppressed` on the frame the current
     /// payload was sent for. A change means the cover cells were rewritten by
     /// the UI, which erases the graphics layer — so the payload is re-sent.
@@ -147,28 +144,29 @@ pub struct CoverRenderer {
 impl CoverRenderer {
     /// Create the production renderer writing to stdout.
     pub fn new() -> Self {
-        let mut renderer = Self::with_writer(Box::new(std::io::stdout()), Box::new(ChafaEncoder));
-        renderer.chafa_available = which_chafa();
+        let mut renderer =
+            Self::with_writer(Box::new(std::io::stdout()), Box::new(IcySixelEncoder));
+        renderer.sixel_available = None; // ask the startup probe
         renderer.kitty_available = is_kitty_graphics_compatible();
         renderer
     }
 
     /// Test constructor — inject a writer and an encoder. The injected encoder
-    /// is assumed to work, so `chafa_available` is forced on — the real `chafa`
-    /// binary is not installed on CI runners, and the tests stub the encoder
-    /// anyway. `kitty_available` starts off and is switched on by the tests
-    /// that exercise that path: terminal detection reads the environment, which
+    /// is assumed to work, so SIXEL is forced on: a test process has no
+    /// terminal to probe and the tests stub the encoder anyway.
+    /// `kitty_available` starts off and is switched on by the tests that
+    /// exercise that path: terminal detection reads the environment, which
     /// cannot be varied per-test without racing the other tests.
     fn with_writer(out: Box<dyn Write + Send>, encoder: Box<dyn SixelEncoder>) -> Self {
         Self {
             out,
             encoder,
-            chafa_available: true,
+            sixel_available: Some(true),
             kitty_available: false,
-            chafa_sixel_cache: None,
-            last_chafa_gen: 0,
-            last_chafa_rect: None,
-            chafa_failed: false,
+            sixel_cache: None,
+            last_sixel_gen: 0,
+            last_sixel_rect: None,
+            sixel_failed: false,
             last_blocks_suppressed: false,
             clear_pending: false,
             kitty_active: false,
@@ -184,18 +182,25 @@ impl CoverRenderer {
         if self.kitty_available {
             self.kitty_active
         } else {
-            self.chafa_sixel_cache.is_some()
+            self.sixel_cache.is_some()
         }
     }
 
+    /// Whether this terminal can display SIXEL — the probe's answer when the
+    /// renderer is the production one, the pinned value in tests.
+    fn sixel_supported(&self) -> bool {
+        self.sixel_available
+            .unwrap_or_else(|| terminal_caps().sixel)
+    }
+
     /// Render the cover via whichever protocol this terminal supports:
-    /// Kitty if available, otherwise chafa SIXEL. Mutually exclusive — the
-    /// two graphics layers would otherwise fight over the same area.
+    /// Kitty if available, otherwise SIXEL. Mutually exclusive — the two
+    /// graphics layers would otherwise fight over the same area.
     pub fn render(&mut self, params: &CoverParams) {
         if self.kitty_available {
             self.render_kitty(params);
         } else {
-            self.render_chafa(params);
+            self.render_sixel(params);
         }
     }
 
@@ -331,24 +336,24 @@ impl CoverRenderer {
         }
     }
 
-    // ── chafa SIXEL (Konsole Plasma 6+) ──
+    // ── SIXEL (Konsole Plasma 6+) ──
 
-    fn render_chafa(&mut self, params: &CoverParams) {
+    fn render_sixel(&mut self, params: &CoverParams) {
         // Only render on the player view; hide under overlays.
         if params.active_view != ViewMode::Player
             || params.show_help
             || params.command_mode
             || params.search_active
         {
-            self.reset_chafa();
+            self.reset_sixel();
             return;
         }
         // Cover hidden → clear any previously displayed SIXEL.
         if !params.show_cover_art {
-            self.reset_chafa();
+            self.reset_sixel();
             return;
         }
-        if !self.chafa_available {
+        if !self.sixel_supported() {
             return;
         }
 
@@ -357,7 +362,7 @@ impl CoverRenderer {
         let cover = match &params.cover_art {
             Some(c) => c.clone(),
             None => {
-                self.reset_chafa();
+                self.reset_sixel();
                 return;
             }
         };
@@ -366,33 +371,40 @@ impl CoverRenderer {
         let rect = params.cover_rect;
 
         // A previously-failed encode only retries when the cover or area
-        // actually changed — no per-frame chafa spawns on terminals that
-        // don't support SIXEL.
-        if self.chafa_failed && self.last_chafa_gen == gen && self.last_chafa_rect == Some(rect) {
+        // actually changed — no per-frame encodes on terminals that reject
+        // SIXEL.
+        if self.sixel_failed && self.last_sixel_gen == gen && self.last_sixel_rect == Some(rect) {
             return;
         }
 
         // SIXEL is a persistent graphics layer on Konsole: one send per
         // change is enough. Re-sending every frame was the root cause of
         // phantom key events and UI lag (see progress/2026-08-01).
-        let dirty = self.chafa_sixel_cache.is_none()
-            || gen != self.last_chafa_gen
-            || self.last_chafa_rect != Some(rect)
+        let dirty = self.sixel_cache.is_none()
+            || gen != self.last_sixel_gen
+            || self.last_sixel_rect != Some(rect)
             // The UI rewrote the cover cells (the block layer was suppressed),
             // which paints over the SIXEL underneath.
             || self.last_blocks_suppressed != params.blocks_suppressed;
         if !dirty {
             return;
         }
-        self.chafa_failed = false;
-        self.last_chafa_gen = gen;
-        self.last_chafa_rect = Some(rect);
+        self.sixel_failed = false;
+        self.last_sixel_gen = gen;
+        self.last_sixel_rect = Some(rect);
         self.last_blocks_suppressed = params.blocks_suppressed;
 
-        let (box_w, box_h) = chafa_box(rect, params.cell_px, chafa_cell_px());
-        match self.encoder.encode(&cover, box_w, box_h) {
+        // The payload covers the rect's pixels exactly. There is no cell
+        // count to convert any more: the encoder is asked for the same box
+        // the half-block layer draws into, which is the whole point of
+        // encoding it here rather than in a second program.
+        let px = (
+            rect.2.saturating_mul(params.cell_px.0).max(1),
+            rect.3.saturating_mul(params.cell_px.1).max(1),
+        );
+        match self.encoder.encode(&cover, px) {
             Ok(payload) if !payload.is_empty() => {
-                self.chafa_sixel_cache = Some(payload.clone());
+                self.sixel_cache = Some(payload.clone());
                 // Position the cursor at the cover area, then send the payload
                 // once. No cursor-hide sequence: hiding the cursor is cosmetic,
                 // and a raw `\x1b[?25l` bypassing ratatui's cursor management
@@ -403,14 +415,14 @@ impl CoverRenderer {
             }
             Ok(_) => {
                 // Empty output — terminal doesn't support SIXEL.
-                tracing::warn!("chafa SIXEL output is empty — terminal may not support it");
-                self.chafa_sixel_cache = None;
-                self.chafa_failed = true;
+                tracing::warn!("SIXEL output is empty — terminal may not support it");
+                self.sixel_cache = None;
+                self.sixel_failed = true;
             }
             Err(e) => {
-                tracing::warn!("chafa failed: {e}");
-                self.chafa_sixel_cache = None;
-                self.chafa_failed = true;
+                tracing::warn!("sixel encode failed: {e}");
+                self.sixel_cache = None;
+                self.sixel_failed = true;
             }
         }
     }
@@ -418,58 +430,31 @@ impl CoverRenderer {
     /// Reset SIXEL state when leaving the player view or hiding the cover.
     /// Requests a full `terminal.clear()` so ratatui's diff buffer overwrites
     /// any SIXEL residue.
-    fn reset_chafa(&mut self) {
-        if self.chafa_sixel_cache.is_some() {
+    fn reset_sixel(&mut self) {
+        if self.sixel_cache.is_some() {
             self.clear_pending = true;
         }
-        self.chafa_sixel_cache = None;
-        self.last_chafa_gen = 0;
-        self.last_chafa_rect = None;
-        self.chafa_failed = false;
+        self.sixel_cache = None;
+        self.last_sixel_gen = 0;
+        self.last_sixel_rect = None;
+        self.sixel_failed = false;
     }
 }
 
 // ── Helpers ──
 
-/// Translate the cover rect — `rect` cells drawn with `cell_px`-sized cells —
-/// into the cell count chafa has to be asked for so that the SIXEL it emits
-/// covers the rect's *pixels*.
-///
-/// The divisor is [`chafa_cell_px`], chafa's own idea of a cell, because chafa
-/// multiplies its `--size` back up by the cell size *it* sees. Dividing by
-/// anything else scales the picture by the ratio between the two, and the
-/// result is a cover that stops short of the box: on a Konsole answering the
-/// probe (8×15 cells) but leaving chafa on its 10×20 fallback, the old
-/// division by 10/20 asked for 26×13 chafa cells inside a 33×18-cell box and
-/// got a 208×195 px raster in a 264×270 px box — a fifth of the width and a
-/// quarter of the height left blank.
-///
-/// Rounded down on purpose: a payload a few pixels short leaves a clean margin,
-/// while one that is too big would spill over the panel border.
-fn chafa_box(
-    rect: (u16, u16, u16, u16),
-    cell_px: (u16, u16),
-    chafa_cell: (u16, u16),
-) -> (u16, u16) {
-    let px_w = rect.2 as u32 * cell_px.0.max(1) as u32;
-    let px_h = rect.3 as u32 * cell_px.1.max(1) as u32;
-    let cols = px_w / chafa_cell.0.max(1) as u32;
-    let rows = px_h / chafa_cell.1.max(1) as u32;
-    (cols.max(1) as u16, rows.max(1) as u16)
-}
-
 /// Pixel size of one terminal cell.
 ///
 /// Three sources, best first:
 ///
-/// 1. [`probe_cell_px_once`]'s answer — the terminal's own font metrics,
+/// 1. [`probe_terminal_once`]'s answer — the terminal's own font metrics,
 ///    which is the only source that is right on Konsole;
 /// 2. `TIOCGWINSZ`'s `ws_xpixel`/`ws_ypixel` fields, when the terminal fills
 ///    them in (they are plain integers in the struct — no escape sequences,
 ///    no stdin involvement);
 /// 3. [`runtime::FALLBACK_CELL_PX`].
 pub fn terminal_cell_px() -> (u16, u16) {
-    if let Some(cell) = PROBED_CELL_PX.get().copied().flatten() {
+    if let Some(cell) = terminal_caps().cell_px {
         return cell;
     }
     match crossterm::terminal::window_size() {
@@ -477,23 +462,6 @@ pub fn terminal_cell_px() -> (u16, u16) {
             .unwrap_or(runtime::FALLBACK_CELL_PX),
         Err(_) => runtime::FALLBACK_CELL_PX,
     }
-}
-
-/// The cell size *chafa* will lay its sixel out on — the divisor its `--size`
-/// is measured in.
-///
-/// chafa reads the terminal's pixel size itself, from the same `TIOCGWINSZ`
-/// fields [`cell_px_from_window`] reads, and falls back to
-/// [`runtime::FALLBACK_CELL_PX`] when the terminal reports none. What it does
-/// *not* see is the startup probe's answer, so this is deliberately not
-/// [`terminal_cell_px`]: on a terminal that answers `CSI 16 t` while leaving
-/// the window's pixel fields at zero, chafa is still on its 10×20 fallback
-/// even though the cover box was measured with the probed cell.
-fn chafa_cell_px() -> (u16, u16) {
-    crossterm::terminal::window_size()
-        .ok()
-        .and_then(|ws| cell_px_from_window((ws.columns, ws.rows, ws.width, ws.height)))
-        .unwrap_or(runtime::FALLBACK_CELL_PX)
 }
 
 /// Sanity-check a reported window size and reduce it to a cell size.
@@ -522,98 +490,138 @@ fn cell_px_from_window(ws: (u16, u16, u16, u16)) -> Option<(u16, u16)> {
     Some((w, h))
 }
 
-// ── Cell size probe ──
+// ── Startup terminal probe ──
+
+/// What the terminal told us about itself at startup.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TerminalCaps {
+    /// Cell size in pixels, when the terminal reported one.
+    pub cell_px: Option<(u16, u16)>,
+    /// The terminal advertised SIXEL graphics in its primary device
+    /// attributes reply (DA1, parameter 4).
+    pub sixel: bool,
+}
 
 /// xterm's "report character cell size in pixels" (`CSI 16 t`), plus the pair
 /// of text-area reports (`CSI 14 t` / `CSI 18 t`) for terminals that implement
-/// only those: their quotient gives the same answer.
-const CELL_SIZE_QUERY: &[u8] = b"\x1b[16t\x1b[14t\x1b[18t";
+/// only those — their quotient gives the same answer — and finally the primary
+/// device attributes request (`CSI c`).
+///
+/// DA1 goes **last** on purpose. Replies come back in the order the queries
+/// were sent and every terminal answers DA1, so a complete DA1 reply is a
+/// barrier: everything asked before it has already arrived.
+const TERMINAL_QUERY: &[u8] = b"\x1b[16t\x1b[14t\x1b[18t\x1b[c";
 
 /// How long the terminal gets to answer before we settle for `TIOCGWINSZ`.
 ///
 /// A local tty answers in well under a millisecond; this budget only ever runs
 /// out on terminals that ignore the query, where it costs a few frames of
 /// startup and nothing else.
-const CELL_SIZE_QUERY_BUDGET: Duration = Duration::from_millis(80);
+const TERMINAL_QUERY_BUDGET: Duration = Duration::from_millis(80);
 
-/// The cell size the terminal reported at startup, if it answered at all.
-static PROBED_CELL_PX: OnceLock<Option<(u16, u16)>> = OnceLock::new();
+/// What the probe learned, once it has run.
+static PROBED_CAPS: OnceLock<TerminalCaps> = OnceLock::new();
 
-/// Ask the terminal for its cell size, once, and remember the answer.
+/// The capabilities probed at startup. Empty (no cell size, no SIXEL) until
+/// [`probe_terminal_once`] has run, and in any process without a tty.
+pub fn terminal_caps() -> TerminalCaps {
+    PROBED_CAPS.get().copied().unwrap_or_default()
+}
+
+/// Ask the terminal what it is — cell size and graphics support — once.
 ///
-/// This is the only source that works on Konsole: it leaves the
+/// The cell size is the only source that works on Konsole: it leaves the
 /// `ws_xpixel`/`ws_ypixel` fields of `TIOCGWINSZ` at zero, so without the probe
 /// the cover is sized from a 10×20 guess — the wrong *scale*, and (because
 /// `fit_cover_rect` divides the panel up using the same numbers) the wrong
-/// *shape*.
+/// *shape*. The SIXEL answer decides whether a graphics payload is written at
+/// all; a terminal that cannot display one must keep the half-block art.
 ///
 /// Must be called with the tty already in raw mode and before anything else
 /// reads stdin. In canonical mode the reply never becomes readable at all —
 /// the line discipline holds it back until a newline that never comes — and a
 /// concurrent reader could swallow it. `App::run` satisfies both: it calls this
 /// right after `TerminalGuard::enter`, which is where raw mode is set.
-pub fn probe_cell_px_once() -> Option<(u16, u16)> {
-    *PROBED_CELL_PX.get_or_init(|| {
+pub fn probe_terminal_once() -> TerminalCaps {
+    *PROBED_CAPS.get_or_init(|| {
         // Every exit from here logs, including the ones that detect nothing:
         // this is the single place that knows why the cover came out the size
         // it did, and `grep "cell size" ~/.local/state/tmper/tmper.log` is what
         // `config.toml`'s `cell_px` comment tells the user to run.
         if !std::io::stdin().is_terminal() {
-            tracing::info!("stdin is not a tty: no cell-size probe, no cover sizing");
-            return None;
+            tracing::info!("stdin is not a tty: no terminal probe, no cover sizing");
+            return TerminalCaps::default();
         }
-        match query_cell_px(CELL_SIZE_QUERY_BUDGET) {
-            Some((w, h)) => {
-                tracing::info!("terminal cell size: {w}x{h} px (CSI 16t)");
-                Some((w, h))
-            }
-            None => {
-                tracing::info!(
-                    "terminal answered no cell-size query; TIOCGWINSZ reports {:?}",
-                    crossterm::terminal::window_size()
-                        .map(|ws| (ws.columns, ws.rows, ws.width, ws.height))
-                );
-                None
-            }
+        let caps = query_terminal(TERMINAL_QUERY_BUDGET);
+        match caps.cell_px {
+            Some((w, h)) => tracing::info!("terminal cell size: {w}x{h} px (CSI 16t)"),
+            None => tracing::info!(
+                "terminal answered no cell-size query; TIOCGWINSZ reports {:?}",
+                crossterm::terminal::window_size()
+                    .map(|ws| (ws.columns, ws.rows, ws.width, ws.height))
+            ),
         }
+        // Konsole answers `CSI ? 62 ; 1 ; 4 c` — "a VT2xx with 132 columns and
+        // Sixel". Terminals that omit the 4 cannot display a sixel and say so
+        // here rather than by silently swallowing the payload.
+        tracing::info!(
+            "terminal graphics: sixel {} (DA1)",
+            if caps.sixel { "yes" } else { "no" }
+        );
+        caps
     })
 }
 
-/// Send the cell-size query and collect the reply, giving up after `budget`.
+/// Send the probe's queries and collect the replies, giving up after `budget`.
 ///
 /// `poll(2)` is what makes this safe to do at all: it waits *without
 /// consuming*, so a terminal that never answers leaves the input queue exactly
 /// as it found it and costs nothing but the timeout. A blocking read — even on
 /// a helper thread — would sit on the tty and could steal a later keystroke.
 ///
-/// Should the reply arrive too late for this window it lands on the input
-/// thread instead, where it is harmless: crossterm's parser ends
-/// `CSI <n> ; … t` in `parse_csi_modifier_key_code`, which only knows `A B C D
-/// F H P Q R S` and errors on anything else, and `read()` is called with
-/// `if let Ok(..)`. A stray report cannot become a key event.
-fn query_cell_px(budget: Duration) -> Option<(u16, u16)> {
+/// Should a reply arrive too late for this window it lands on the input thread
+/// instead, where it is harmless. crossterm's parser ends `CSI <n> ; … t` in
+/// `parse_csi_modifier_key_code`, which only knows `A B C D F H P Q R S` and
+/// errors on anything else — and `read()` is called with `if let Ok(..)` — so a
+/// stray report cannot become a key event. A DA1 reply is even quieter: it maps
+/// to `InternalEvent::PrimaryDeviceAttributes`, which has no public `Event`
+/// counterpart and is dropped by the reader.
+fn query_terminal(budget: Duration) -> TerminalCaps {
     let mut out = std::io::stdout();
-    query_cell_px_on(&mut out, std::io::stdin().as_raw_fd(), budget)
+    query_terminal_on(&mut out, std::io::stdin().as_raw_fd(), budget)
 }
 
-/// [`query_cell_px`] with the terminal passed in.
+/// [`query_terminal`] with the terminal passed in.
 ///
 /// The wait and the parse are the whole of the probe's logic, and neither cares
 /// that the far end is a tty — only that bytes go out and the reply comes back.
 /// Taking the descriptor as a parameter is what lets the tests drive that loop
 /// over a pipe, where "data is waiting" and "nothing ever arrives" are both
 /// reproducible without a terminal.
-fn query_cell_px_on(out: &mut dyn Write, fd: RawFd, budget: Duration) -> Option<(u16, u16)> {
-    out.write_all(CELL_SIZE_QUERY).ok()?;
-    out.flush().ok()?;
+fn query_terminal_on(out: &mut dyn Write, fd: RawFd, budget: Duration) -> TerminalCaps {
+    let mut caps = TerminalCaps::default();
+    if out
+        .write_all(TERMINAL_QUERY)
+        .and_then(|_| out.flush())
+        .is_err()
+    {
+        return caps;
+    }
 
     let deadline = Instant::now() + budget;
     let mut seen = Vec::with_capacity(32);
     let mut chunk = [0u8; 64];
     loop {
+        // The DA1 reply is the barrier: it was asked last, so once it is
+        // complete every earlier answer is already in `seen`. Waiting longer
+        // would only slow startup down.
+        if let Some(sixel) = parse_da1_sixel(&seen) {
+            caps.sixel = sixel;
+            break;
+        }
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            return None;
+            break;
         }
         let mut pfd = libc::pollfd {
             fd,
@@ -629,10 +637,10 @@ fn query_cell_px_on(out: &mut dyn Write, fd: RawFd, budget: Duration) -> Option<
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
-            return None;
+            break;
         }
         if ready == 0 {
-            return None;
+            break;
         }
         // SAFETY: `chunk` is a valid writable buffer of `chunk.len()` bytes.
         let n = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
@@ -640,13 +648,67 @@ fn query_cell_px_on(out: &mut dyn Write, fd: RawFd, budget: Duration) -> Option<
             continue;
         }
         if n <= 0 {
-            return None;
+            break; // EOF: nothing more is coming
         }
         seen.extend_from_slice(&chunk[..n as usize]);
-        if let Some(cell) = parse_cell_size_reply(&seen) {
-            return Some(cell);
-        }
     }
+    // Whatever arrived, parse it — a terminal may answer one query and not the
+    // other, and half an answer is still worth having.
+    caps.cell_px = parse_cell_size_reply(&seen);
+    if let Some(sixel) = parse_da1_sixel(&seen) {
+        caps.sixel = sixel;
+    }
+    caps
+}
+
+/// The SIXEL bit of a primary device attributes reply, if the reply is here.
+///
+/// `None` means "no complete DA1 reply in the buffer" — deliberately distinct
+/// from `Some(false)`, which means the terminal answered and did not claim
+/// SIXEL. The caller uses the difference to stop reading early.
+///
+/// DA1 parameter 4 is xterm's "Sixel graphics" attribute, and it is what
+/// Konsole (`CSI ? 62 ; 1 ; 4 c`), foot (`CSI ? 62 ; 4 ; 22 ; 28 ; 52 c`) and
+/// xterm itself report when sixel is compiled in and enabled.
+fn parse_da1_sixel(bytes: &[u8]) -> Option<bool> {
+    let mut i = 0;
+    while i + 3 < bytes.len() {
+        // `CSI ?` …
+        if bytes[i] != 0x1b || bytes[i + 1] != b'[' || bytes[i + 2] != b'?' {
+            i += 1;
+            continue;
+        }
+        let mut end = i + 3;
+        let mut params: Vec<u16> = Vec::new();
+        let mut current: Option<u16> = None;
+        while end < bytes.len() {
+            match bytes[end] {
+                b'0'..=b'9' => {
+                    let digit = u16::from(bytes[end] - b'0');
+                    current = Some(
+                        current
+                            .unwrap_or(0)
+                            .saturating_mul(10)
+                            .saturating_add(digit),
+                    );
+                }
+                b';' => {
+                    params.push(current.unwrap_or(0));
+                    current = None;
+                }
+                _ => break,
+            }
+            end += 1;
+        }
+        if bytes.get(end) == Some(&b'c') && end > i + 3 {
+            if let Some(last) = current {
+                params.push(last);
+            }
+            return Some(params.contains(&4));
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Pull the cell size out of whatever the terminal sent back.
@@ -725,19 +787,6 @@ fn plausible_cell(w: u16, h: u16) -> Option<(u16, u16)> {
     ((1..=64).contains(&w) && (1..=128).contains(&h)).then_some((w, h))
 }
 
-/// Check if the `chafa` binary is available and working.
-fn which_chafa() -> bool {
-    let ok = std::process::Command::new("chafa")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    tracing::info!("chafa detected: {ok}");
-    ok
-}
-
 /// Returns true if the terminal supports the Kitty graphics protocol.
 /// Checks known env vars — no stdin query needed.
 fn is_kitty_graphics_compatible() -> bool {
@@ -745,7 +794,7 @@ fn is_kitty_graphics_compatible() -> bool {
     // passthrough is explicitly configured, and they fail silently. That was
     // survivable while the block art was always drawn underneath; now that the
     // blocks stand aside for a native image, guessing wrong would leave an
-    // empty panel. Fall through to chafa / blocks instead.
+    // empty panel. Fall through to SIXEL / blocks instead.
     if std::env::var_os("TMUX").is_some() || std::env::var_os("STY").is_some() {
         return false;
     }
@@ -785,14 +834,16 @@ mod tests {
 
     struct StubEncoder;
     impl SixelEncoder for StubEncoder {
-        fn encode(&self, cover: &[u8], cols: u16, rows: u16) -> Result<Vec<u8>, String> {
-            Ok(format!("SIXEL:{cols}x{rows}:{}B", cover.len()).into_bytes())
+        /// Echoes the box it was asked for, so tests can assert on the
+        /// geometry without a real encode.
+        fn encode(&self, cover: &[u8], px: (u16, u16)) -> Result<Vec<u8>, String> {
+            Ok(format!("SIXEL:{}x{}:{}B", px.0, px.1, cover.len()).into_bytes())
         }
     }
 
     struct EmptyEncoder;
     impl SixelEncoder for EmptyEncoder {
-        fn encode(&self, _cover: &[u8], _cols: u16, _rows: u16) -> Result<Vec<u8>, String> {
+        fn encode(&self, _cover: &[u8], _px: (u16, u16)) -> Result<Vec<u8>, String> {
             Ok(Vec::new()) // simulates a terminal that rejects SIXEL
         }
     }
@@ -820,35 +871,40 @@ mod tests {
         buf.0.lock().unwrap().len()
     }
 
+    /// Everything written so far, as text (the stub's payloads are ASCII).
+    fn sent(buf: &SharedBuf) -> String {
+        String::from_utf8_lossy(&buf.0.lock().unwrap()).into_owned()
+    }
+
     // ── Core invariant: one SIXEL send per change ──
 
     #[test]
-    fn chafa_sends_once_until_cover_changes() {
+    fn sixel_sends_once_until_cover_changes() {
         let buf = SharedBuf::default();
         let mut r = renderer(&buf);
         let p = params(1, (0, 0, 10, 10), Some(&[1, 2, 3]));
-        r.render_chafa(&p);
+        r.render_sixel(&p);
         let first = written(&buf);
         assert!(first > 0, "first render must send the SIXEL payload");
 
         // Same cover + same area → nothing written again.
-        r.render_chafa(&p);
+        r.render_sixel(&p);
         assert_eq!(written(&buf), first, "unchanged cover must not re-send");
 
         // A new cover (gen bump) re-sends.
-        r.render_chafa(&params(2, (0, 0, 10, 10), Some(&[4, 5])));
+        r.render_sixel(&params(2, (0, 0, 10, 10), Some(&[4, 5])));
         assert!(written(&buf) > first, "cover change must re-send");
     }
 
     #[test]
-    fn chafa_resent_on_area_change() {
+    fn sixel_resent_on_area_change() {
         let buf = SharedBuf::default();
         let mut r = renderer(&buf);
-        r.render_chafa(&params(1, (0, 0, 10, 10), Some(&[1])));
+        r.render_sixel(&params(1, (0, 0, 10, 10), Some(&[1])));
         let first = written(&buf);
 
         // Terminal resize changes the render area → re-send.
-        r.render_chafa(&params(1, (0, 0, 12, 10), Some(&[1])));
+        r.render_sixel(&params(1, (0, 0, 12, 10), Some(&[1])));
         assert!(written(&buf) > first, "resize must re-send");
     }
 
@@ -858,12 +914,12 @@ mod tests {
     fn leaving_player_view_requests_clear() {
         let buf = SharedBuf::default();
         let mut r = renderer(&buf);
-        r.render_chafa(&params(1, (0, 0, 10, 10), Some(&[1])));
+        r.render_sixel(&params(1, (0, 0, 10, 10), Some(&[1])));
         assert!(!r.needs_clear());
 
         let mut p = params(1, (0, 0, 10, 10), Some(&[1]));
         p.active_view = ViewMode::Library;
-        r.render_chafa(&p);
+        r.render_sixel(&p);
         assert!(r.needs_clear(), "leaving player view must schedule a clear");
     }
 
@@ -871,11 +927,11 @@ mod tests {
     fn hiding_cover_schedules_clear() {
         let buf = SharedBuf::default();
         let mut r = renderer(&buf);
-        r.render_chafa(&params(1, (0, 0, 10, 10), Some(&[1])));
+        r.render_sixel(&params(1, (0, 0, 10, 10), Some(&[1])));
 
         let mut p = params(1, (0, 0, 10, 10), Some(&[1]));
         p.show_cover_art = false;
-        r.render_chafa(&p);
+        r.render_sixel(&p);
         assert!(r.needs_clear(), "hiding the cover must schedule a clear");
     }
 
@@ -883,75 +939,90 @@ mod tests {
     fn coverless_track_clears_stale_sixel() {
         let buf = SharedBuf::default();
         let mut r = renderer(&buf);
-        r.render_chafa(&params(1, (0, 0, 10, 10), Some(&[1])));
+        r.render_sixel(&params(1, (0, 0, 10, 10), Some(&[1])));
         assert!(!r.needs_clear());
 
         // Next track has no embedded cover — the stale SIXEL must not linger.
-        r.render_chafa(&params(2, (0, 0, 10, 10), None));
+        r.render_sixel(&params(2, (0, 0, 10, 10), None));
         assert!(
             r.needs_clear(),
             "stale SIXEL must be cleared on a coverless track"
         );
     }
 
-    // ── chafa geometry ──
+    // ── Geometry: the payload covers the rect's pixels ──
 
-    /// When chafa sees the same cell tmper measured the box with — the normal
-    /// case, both read the same terminal — one requested chafa cell is one
-    /// terminal cell, and the raster comes out exactly the box.
+    /// The encoder is asked for the rect's own pixels — cells × cell size —
+    /// and nothing else. Under chafa this was a *cell count*, converted
+    /// through a second program's idea of a cell, and that conversion is what
+    /// used to shrink the cover to 0.8 × 0.75 of its box.
     #[test]
-    fn chafa_box_is_the_rect_when_chafa_sees_the_same_cell() {
-        assert_eq!(chafa_box((0, 0, 33, 18), (8, 15), (8, 15)), (33, 18));
-        assert_eq!(chafa_box((0, 0, 10, 10), (10, 20), (10, 20)), (10, 10));
-        assert_eq!(chafa_box((0, 0, 10, 10), (20, 20), (20, 20)), (10, 10));
+    fn the_encoder_is_asked_for_the_rects_pixels() {
+        // `params` carries a 10×20 cell.
+        let buf = SharedBuf::default();
+        renderer(&buf).render_sixel(&params(1, (0, 0, 33, 18), Some(&[1])));
+        assert!(sent(&buf).contains("SIXEL:330x360:"), "{}", sent(&buf));
+
+        // The same box on Konsole's 8×15 cell is a smaller raster — the cell
+        // size is the only thing that varies between terminals.
+        let konsole = SharedBuf::default();
+        let mut p = params(1, (0, 0, 33, 18), Some(&[1]));
+        p.cell_px = (8, 15);
+        renderer(&konsole).render_sixel(&p);
+        assert!(
+            sent(&konsole).contains("SIXEL:264x270:"),
+            "{}",
+            sent(&konsole)
+        );
     }
 
-    /// The two disagree when the probe answered but `TIOCGWINSZ` did not:
-    /// chafa stays on its 10×20 fallback while the box was measured with the
-    /// probed cell. The request then has to shrink, or the raster overshoots.
+    /// Degenerate geometry must stay encodable: a zero-pixel request asks the
+    /// encoder for nothing at all, and a cover panel can be one cell wide
+    /// before the layout refuses to draw it.
     #[test]
-    fn chafa_box_rescales_when_chafa_assumes_a_different_cell() {
-        // A Konsole 8×15 cover panel: 33 cells wide, 18 tall.
-        assert_eq!(chafa_box((0, 0, 33, 18), (8, 15), (10, 20)), (26, 13));
-        // Half-width cells: 8 px over chafa's 10 leaves one chafa column per
-        // terminal column only once there are enough of them to add up.
-        assert_eq!(chafa_box((0, 0, 5, 4), (8, 17), (10, 20)), (4, 3));
+    fn a_degenerate_rect_never_asks_for_zero_pixels() {
+        let buf = SharedBuf::default();
+        let mut p = params(1, (0, 0, 0, 0), Some(&[1]));
+        p.cell_px = (0, 0);
+        renderer(&buf).render_sixel(&p);
+        assert!(sent(&buf).contains("SIXEL:1x1:"), "{}", sent(&buf));
     }
 
-    /// Rounded down, never up: a payload a few pixels short leaves a clean
-    /// margin, one that is too big spills over the panel border.
+    // ── The real encoder ──
+
+    /// PNG bytes in, a SIXEL payload whose raster header names the exact box
+    /// asked for. That property is what chafa could not be held to — it sized
+    /// the raster from its own reading of the terminal.
     #[test]
-    fn chafa_box_never_overflows_the_rect() {
-        let cells = [(10u16, 20u16), (8, 15), (8, 17), (12, 24), (20, 20)];
-        for chafa_cell in cells {
-            for cell in cells {
-                for (w, h) in [(13u16, 7u16), (40, 20), (3, 30), (4, 4)] {
-                    let (bw, bh) = chafa_box((0, 0, w, h), cell, chafa_cell);
-                    let px_w = bw as u32 * chafa_cell.0.max(1) as u32;
-                    let px_h = bh as u32 * chafa_cell.1.max(1) as u32;
-                    assert!(
-                        px_w <= w as u32 * cell.0.max(1) as u32,
-                        "box {bw} cells wide overflows {w} columns at cell {cell:?} \
-                         (chafa cell {chafa_cell:?})"
-                    );
-                    assert!(px_h <= h as u32 * cell.1.max(1) as u32);
-                    assert!(bw >= 1 && bh >= 1, "chafa needs a non-zero box");
-                }
-            }
-        }
+    fn the_encoder_emits_the_requested_raster() {
+        let out = IcySixelEncoder
+            .encode(&png_cover(40, 30), (24, 40))
+            .expect("encode a real PNG");
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.starts_with("\x1bP"), "a DCS introducer opens it");
+        assert!(
+            text.contains("\"1;1;24;40"),
+            "raster attributes must name the box: {:?}",
+            &text[..40.min(text.len())]
+        );
     }
 
-    /// chafa cannot draw less than one of its cells, so a cover rect narrower
-    /// than that is the one case the box overshoots. Degenerate terminals are
-    /// refused by `render` long before a cover panel gets that small; what
-    /// matters here is that it stays usable rather than collapsing to zero.
+    /// Cover bytes come out of other people's tags; a file that is not an
+    /// image at all is an error to report, not a panic.
     #[test]
-    fn chafa_box_stays_usable_for_a_sub_cell_rect() {
-        assert_eq!(chafa_box((0, 0, 1, 1), (10, 20), (10, 20)), (1, 1));
+    fn the_encoder_rejects_bytes_that_are_not_an_image() {
+        assert!(IcySixelEncoder.encode(b"not an image", (8, 8)).is_err());
+    }
 
-        // A zero cell size is clamped to one pixel per cell rather than
-        // dividing by zero: the rect's cells become chafa's cells.
-        assert_eq!(chafa_box((0, 0, 4, 4), (0, 0), (0, 0)), (4, 4));
+    /// A captioned PNG of the given size, built in memory.
+    fn png_cover(w: u32, h: u32) -> Vec<u8> {
+        let img =
+            image::RgbImage::from_fn(w, h, |x, y| image::Rgb([(x * 5) as u8, (y * 7) as u8, 160]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .expect("encode the test PNG");
+        out.into_inner()
     }
 
     // ── Cell size detection ──
@@ -1082,21 +1153,20 @@ mod tests {
         assert_eq!(n, bytes.len() as isize, "short write to the test pipe");
     }
 
-    /// The happy path: the query goes out, the reply comes back through
-    /// `poll(2)` + `read(2)`, and the cell size falls out of it.
+    /// The happy path: the queries go out, the replies come back through
+    /// `poll(2)` + `read(2)`, and both answers fall out of them. Konsole's real
+    /// DA1 reply is the sixel line here.
     #[test]
     fn probe_asks_and_reads_the_answer() {
         let (read_end, write_end) = Fd::pipe();
-        write_fd(write_end.0, b"\x1b[6;15;8t");
+        write_fd(write_end.0, b"\x1b[6;15;8t\x1b[?62;1;4c");
 
         let mut sent = Vec::new();
-        let cell = query_cell_px_on(&mut sent, read_end.0, Duration::from_secs(5));
+        let caps = query_terminal_on(&mut sent, read_end.0, Duration::from_secs(5));
 
-        assert_eq!(cell, Some((8, 15)));
-        assert_eq!(
-            sent, CELL_SIZE_QUERY,
-            "the query is what opens the exchange"
-        );
+        assert_eq!(caps.cell_px, Some((8, 15)));
+        assert!(caps.sixel, "DA1 parameter 4 advertises sixel");
+        assert_eq!(sent, TERMINAL_QUERY, "the query is what opens the exchange");
     }
 
     /// A tty is free to hand the reply over in pieces, and the pieces need not
@@ -1111,14 +1181,15 @@ mod tests {
         let tail_fd = write_end.0;
         let tail = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(30));
-            write_fd(tail_fd, b"5;8t");
+            write_fd(tail_fd, b"5;8t\x1b[?62;1;4c");
         });
 
         let mut sent = Vec::new();
-        let cell = query_cell_px_on(&mut sent, read_end.0, Duration::from_secs(5));
+        let caps = query_terminal_on(&mut sent, read_end.0, Duration::from_secs(5));
         tail.join().expect("writer thread");
 
-        assert_eq!(cell, Some((8, 15)));
+        assert_eq!(caps.cell_px, Some((8, 15)));
+        assert!(caps.sixel);
     }
 
     /// A terminal that ignores the query costs the budget and nothing else —
@@ -1129,11 +1200,11 @@ mod tests {
 
         let started = Instant::now();
         let mut sent = Vec::new();
-        let cell = query_cell_px_on(&mut sent, read_end.0, Duration::from_millis(40));
+        let caps = query_terminal_on(&mut sent, read_end.0, Duration::from_millis(40));
         let waited = started.elapsed();
 
-        assert_eq!(cell, None);
-        assert_eq!(sent, CELL_SIZE_QUERY, "it still asks");
+        assert_eq!(caps, TerminalCaps::default());
+        assert_eq!(sent, TERMINAL_QUERY, "it still asks");
         assert!(
             waited >= Duration::from_millis(20),
             "it waited for the answer instead of giving up on arrival: {waited:?}"
@@ -1141,6 +1212,94 @@ mod tests {
         assert!(
             waited < Duration::from_secs(3),
             "the wait is bounded by the budget, not by the terminal: {waited:?}"
+        );
+    }
+
+    /// DA1 is asked last and answered by every terminal, so a complete reply to
+    /// it means the answers before it are already in hand — no reason to sit
+    /// out the rest of the budget. This is what keeps the probe from adding
+    /// startup latency on a terminal that answers only some of the queries.
+    #[test]
+    fn probe_stops_at_the_da1_barrier() {
+        let (read_end, write_end) = Fd::pipe();
+        write_fd(write_end.0, b"\x1b[?62;1;4c"); // no cell-size answer at all
+
+        let started = Instant::now();
+        let mut sent = Vec::new();
+        let caps = query_terminal_on(&mut sent, read_end.0, Duration::from_secs(30));
+        let waited = started.elapsed();
+
+        assert_eq!(caps.cell_px, None, "it did not answer the cell query");
+        assert!(caps.sixel);
+        assert!(
+            waited < Duration::from_secs(3),
+            "the DA1 reply should end the wait: {waited:?}"
+        );
+    }
+
+    /// The negative answer is an answer: a terminal that lists its attributes
+    /// without the sixel one must not be sent a graphics payload.
+    #[test]
+    fn probe_reports_no_sixel_when_da1_omits_it() {
+        let (read_end, write_end) = Fd::pipe();
+        write_fd(write_end.0, b"\x1b[6;15;8t\x1b[?62;1;2;6;9;15;18;21;22;29c");
+
+        let mut sent = Vec::new();
+        let caps = query_terminal_on(&mut sent, read_end.0, Duration::from_secs(5));
+
+        assert_eq!(caps.cell_px, Some((8, 15)));
+        assert!(!caps.sixel);
+    }
+
+    // ── DA1 parsing ──
+
+    /// Attribute 4 is xterm's "Sixel graphics". Konsole answers exactly this;
+    /// without it tmper would be writing DCS payloads at a terminal that has no
+    /// idea what to do with them.
+    #[test]
+    fn da1_sixel_attribute_is_read() {
+        assert_eq!(parse_da1_sixel(b"\x1b[?62;1;4c"), Some(true));
+        assert_eq!(parse_da1_sixel(b"\x1b[?62;4c"), Some(true));
+        // foot 1.27's reply, real and complete.
+        assert_eq!(parse_da1_sixel(b"\x1b[?62;4;22;28;52c"), Some(true));
+    }
+
+    /// A terminal that answers without the attribute is not a sixel terminal —
+    /// and "24" is not "4": the parameters are matched as numbers, not as
+    /// substrings.
+    #[test]
+    fn da1_without_the_attribute_is_a_no() {
+        assert_eq!(parse_da1_sixel(b"\x1b[?1;2c"), Some(false));
+        assert_eq!(
+            parse_da1_sixel(b"\x1b[?62;1;2;6;9;15;18;21;22;29c"),
+            Some(false)
+        );
+        assert_eq!(parse_da1_sixel(b"\x1b[?62;24;1c"), Some(false));
+        assert_eq!(parse_da1_sixel(b"\x1b[?62;c"), Some(false));
+    }
+
+    /// `None` — no reply yet — is deliberately not `Some(false)`: the read
+    /// loop uses the difference to decide whether it may stop waiting.
+    #[test]
+    fn an_incomplete_da1_reply_is_not_an_answer() {
+        assert_eq!(parse_da1_sixel(b""), None);
+        assert_eq!(parse_da1_sixel(b"\x1b[?62;1;4"), None, "no final byte");
+        assert_eq!(parse_da1_sixel(b"\x1b[6;15;8t"), None, "another report");
+        assert_eq!(parse_da1_sixel(b"abc"), None);
+    }
+
+    /// The reply shares the queue with the cell-size reports and whatever else
+    /// the terminal sent, in any order.
+    #[test]
+    fn da1_is_found_among_other_traffic() {
+        assert_eq!(
+            parse_da1_sixel(b"\x1b[6;15;8t\x1b[?62;1;4c\x1b[4;480;800t"),
+            Some(true)
+        );
+        assert_eq!(
+            parse_da1_sixel(b"\x1b[?62;1;4c\x1b[6;15;8t"),
+            Some(true),
+            "DA1 first is not how a terminal answers, but it parses"
         );
     }
 
@@ -1154,10 +1313,10 @@ mod tests {
 
         let started = Instant::now();
         let mut sent = Vec::new();
-        let cell = query_cell_px_on(&mut sent, read_end.0, Duration::from_secs(30));
+        let caps = query_terminal_on(&mut sent, read_end.0, Duration::from_secs(30));
         let waited = started.elapsed();
 
-        assert_eq!(cell, None);
+        assert_eq!(caps, TerminalCaps::default());
         assert!(
             waited < Duration::from_secs(5),
             "EOF ended the wait instead of the budget: {waited:?}"
@@ -1173,19 +1332,19 @@ mod tests {
     fn suppressing_the_block_layer_resends_the_sixel() {
         let buf = SharedBuf::default();
         let mut r = renderer(&buf);
-        r.render_chafa(&params(1, (0, 0, 10, 10), Some(&[1])));
+        r.render_sixel(&params(1, (0, 0, 10, 10), Some(&[1])));
         let placed = written(&buf);
         assert!(r.native_active(), "a payload was sent");
 
         // Blocks still drawn, nothing changed → the image persists.
-        r.render_chafa(&params(1, (0, 0, 10, 10), Some(&[1])));
+        r.render_sixel(&params(1, (0, 0, 10, 10), Some(&[1])));
         assert_eq!(written(&buf), placed, "no change, no re-send");
 
         // The UI suppressed the blocks this frame: ratatui wrote over the
         // cover rect, so the payload is sent again.
         let mut suppressed = params(1, (0, 0, 10, 10), Some(&[1]));
         suppressed.blocks_suppressed = true;
-        r.render_chafa(&suppressed);
+        r.render_sixel(&suppressed);
         assert!(
             written(&buf) > placed,
             "the rewritten cells erase the SIXEL"
@@ -1193,7 +1352,7 @@ mod tests {
 
         // ...and then it settles: no further re-sends while nothing changes.
         let settled = written(&buf);
-        r.render_chafa(&suppressed);
+        r.render_sixel(&suppressed);
         assert_eq!(written(&buf), settled, "stable once the blocks are gone");
     }
 
@@ -1204,7 +1363,7 @@ mod tests {
     fn native_active_is_false_when_the_encode_produced_nothing() {
         let buf = SharedBuf::default();
         let mut r = CoverRenderer::with_writer(Box::new(buf.clone()), Box::new(EmptyEncoder));
-        r.render_chafa(&params(1, (0, 0, 10, 10), Some(&[1])));
+        r.render_sixel(&params(1, (0, 0, 10, 10), Some(&[1])));
         assert!(!r.native_active());
     }
 
@@ -1214,12 +1373,12 @@ mod tests {
     fn native_active_tracks_the_clear_on_view_change() {
         let buf = SharedBuf::default();
         let mut r = renderer(&buf);
-        r.render_chafa(&params(1, (0, 0, 10, 10), Some(&[1])));
+        r.render_sixel(&params(1, (0, 0, 10, 10), Some(&[1])));
         assert!(r.native_active());
 
         let mut away = params(1, (0, 0, 10, 10), Some(&[1]));
         away.active_view = ViewMode::Library;
-        r.render_chafa(&away);
+        r.render_sixel(&away);
         assert!(!r.native_active());
     }
 
@@ -1229,12 +1388,12 @@ mod tests {
     fn empty_sixel_output_is_not_retried_every_frame() {
         let buf = SharedBuf::default();
         let mut r = CoverRenderer::with_writer(Box::new(buf.clone()), Box::new(EmptyEncoder));
-        r.render_chafa(&params(1, (0, 0, 10, 10), Some(&[1])));
+        r.render_sixel(&params(1, (0, 0, 10, 10), Some(&[1])));
         let first = written(&buf);
         assert_eq!(first, 0, "empty payload writes nothing");
 
-        // Terminal rejects SIXEL → must not spawn chafa on every frame.
-        r.render_chafa(&params(1, (0, 0, 10, 10), Some(&[1])));
+        // Terminal rejects SIXEL → must not re-encode on every frame.
+        r.render_sixel(&params(1, (0, 0, 10, 10), Some(&[1])));
         assert_eq!(
             written(&buf),
             0,
@@ -1262,7 +1421,7 @@ mod tests {
 
     /// The terminal-detection path reads the environment, which a test cannot
     /// vary without racing every other test in the process, so the resolved
-    /// flag is switched on directly — the same way `chafa_available` is.
+    /// flag is switched on directly — the same way `sixel_available` is.
     fn kitty_renderer(buf: &SharedBuf) -> CoverRenderer {
         let mut r = renderer(buf);
         r.kitty_available = true;
@@ -1324,7 +1483,7 @@ mod tests {
     #[test]
     fn search_overlay_clears_the_sixel_layer() {
         let buf = SharedBuf::default();
-        let mut r = renderer(&buf); // chafa path
+        let mut r = renderer(&buf); // the SIXEL path (kitty off)
 
         r.render(&params(1, (0, 0, 10, 10), Some(&[1, 2, 3])));
         assert!(!r.needs_clear(), "nothing to clear after a fresh send");
