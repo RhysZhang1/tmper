@@ -45,20 +45,24 @@ pub mod runtime {
     /// Kitty terminals recommend keeping payloads ≤ 4 KiB per escape sequence.
     pub const KITTY_CHUNK_SIZE: usize = 4096;
 
-    /// Pixel size chafa uses for one cell of a SIXEL payload.
+    /// Pixel size of one chafa "cell" in a SIXEL payload.
     ///
     /// chafa cannot see this terminal (all three stdio streams are pipes, and
-    /// `--probe off` disables the escape-sequence query), so its SIXEL geometry
-    /// is a pure function of `--size`: 20 px per requested column, 20 px per
-    /// requested row rounded down to a multiple of 6. Measured against chafa
-    /// 1.18 — `-s 20x10` yields 400×198 px whatever the real terminal reports,
-    /// and `--font-ratio` does not change it. We therefore ask for the number
-    /// of chafa-cells that spans the cover rect's *pixels*, not its cells.
-    pub const CHAFA_SIXEL_CELL_PX: u32 = 20;
+    /// `--probe off` disables its escape-sequence query), so its SIXEL geometry
+    /// is a pure function of `--size`: **10 px per requested column, 20 px per
+    /// requested row** — chafa's own fallback cell, whatever the real terminal
+    /// reports. Measured against chafa 1.18.2 with `--stretch`, which is how we
+    /// call it: `-s 20x10` → 200×200 px, `-s 40x20` → 400×400, `-s 100x50` →
+    /// 1000×1000, for square, 2:1 and 1:2 artwork alike; neither `--stretch`
+    /// nor `--font-ratio` moves the ratio. We therefore ask for the number of
+    /// chafa-cells spanning the cover rect's *pixels*, not its cells.
+    pub const CHAFA_SIXEL_CELL_W: u32 = 10;
+    pub const CHAFA_SIXEL_CELL_H: u32 = 20;
 
-    /// Cell pixel size assumed when the terminal does not report one
-    /// (`window_size()` returns 0 — tmux, some multiplexers). 10×20 is the
-    /// common xterm/Konsole cell and the model the Kitty path already used.
+    /// Cell pixel size assumed when the terminal reports one through neither
+    /// `TIOCGWINSZ` nor `CSI 16 t` (tmux, some multiplexers). 10×20 is the
+    /// common xterm cell — and, not coincidentally, chafa's own fallback, so
+    /// the SIXEL lands on the rect's cell count unchanged.
     pub const FALLBACK_CELL_PX: (u16, u16) = (10, 20);
 
     // ── FFT ──

@@ -244,6 +244,10 @@ smoothing = 0.35
 [ui]
 theme = "tokyo-night"
 show_cover_art = true
+# 终端单元格的像素尺寸。留空表示自动探测：先用 TIOCGWINSZ，再用 xterm 的
+# CSI 16 t（Konsole 只认后者）。两者都不上报时封面会按 10×20 的假设值排版，
+# 此时可手动指定，例如 cell_px = [10, 20]
+# cell_px = [10, 20]
 ```
 
 ### ~/.config/tmper/keybindings.toml
@@ -279,8 +283,12 @@ down = "j"
 - 其他终端：使用半块字符渲染（▄ + fg/bg 两倍垂直分辨率）
 
 封面区域会按图片宽高比自动调整，并读取终端上报的单元格像素尺寸来对齐原生图像，因此在
-不同长宽比的窗口中都不会出现图像旁边多出一块像素的错位。`tmux` / `screen` 下图形协议默认
-被吞掉，程序会自动退回到 chafa（若可用）或半块字符。
+不同长宽比的窗口中都不会出现图像旁边多出一块像素的错位。单元格尺寸在启动时探测一次
+（xterm 的 `CSI 16 t`，Konsole 走这条；拿不到就用 `CSI 14 t` ÷ `CSI 18 t`），探测结果写在
+日志里：`grep "cell size" ~/.local/state/tmper/tmper.log`。两个来源都不上报的终端（`tmux`
+的部分配置、少数模拟器）会退回 10×20 的假设值，封面比例仍然正确但可能小一圈，此时在
+`config.toml` 里指定 `cell_px = [宽, 高]` 即可。`tmux` / `screen` 下图形协议默认被吞掉，
+程序会自动退回到 chafa（若可用）或半块字符。
 
 ### Q: 歌词不显示？
 

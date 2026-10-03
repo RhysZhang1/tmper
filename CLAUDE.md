@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Terminal music player (codename: **tmper**) — a terminal-native music player for Arch Linux/KDE Plasma. Written in Rust with ratatui TUI framework. Supports multi-format audio decoding, metadata display, cover art, LRC lyrics syncing, spectrum visualizer, playlist management, a SQLite library index, and Vim-style keyboard navigation.
 
-The project is **implemented and working** (~15,000 lines of Rust, 337 tests + 6 device-gated). The source of truth for the architecture is `DESIGN.md`; `STATUS.md` holds current capabilities/limits/plan; per-session change logs live in `progress/`. All docs (CLAUDE.md / README.md / DESIGN.md / STATUS.md) were reconciled with the code on 2026-10-03.
+The project is **implemented and working** (~15,000 lines of Rust, 346 tests + 6 device-gated). The source of truth for the architecture is `DESIGN.md`; `STATUS.md` holds current capabilities/limits/plan; per-session change logs live in `progress/`. All docs (CLAUDE.md / README.md / DESIGN.md / STATUS.md) were reconciled with the code on 2026-10-03.
 
 ## Layout
 
@@ -72,11 +72,11 @@ src/
 - **Immutable-ish updates**: state structs use `Default` + `..Default::default()`; version counters use `Cell` (`cover_gen`, `visible_rows`).
 - **Error handling**: `AppResult<T>` / `AppError` (thiserror) for public APIs; background-thread errors go to `tracing` logs (never panics).
 - **Config priority**: CLI args > `$XDG_CONFIG_HOME/tmper/config.toml` > compiled-in defaults. Unknown keys are ignored (no `deny_unknown_fields`).
-- **Config reality check**: only `default_volume`, `seek_step_small_secs`, `num_bars`, `frame_rate`, `smoothing`, `theme`, `show_cover_art` are live. Do not re-add speculative keys without a consuming implementation.
+- **Config reality check**: only `default_volume`, `seek_step_small_secs`, `num_bars`, `frame_rate`, `smoothing`, `theme`, `show_cover_art`, `cell_px` are live. Do not re-add speculative keys without a consuming implementation.
 
 ## Known Architectural Debt (do NOT re-litigate without a dedicated plan)
 
-- **Cover art rendering** (`src/ui/cover/mod.rs`): writes Kitty/SIXEL escape sequences directly to stdout outside ratatui's buffer — inherent to native terminal graphics. Now stable: payloads are sent once per change and the protocols are mutually exclusive (see `progress/2026-08-03-cover-refactor.md`). The chafa subprocess runs with `--probe off` — its default OSC 10/11 terminal probe was the root cause of the phantom keys (responses landed on stdin; commit `3a03ac0`). The half-block art and the graphics layer are placed against the *same* aspect-fitted box (`player_view::fit_cover_rect`) and the blocks stand aside while a native image is up; the box and chafa's geometry both depend on the terminal's real cell pixel size, measured per frame — see `progress/2026-10-03-cover-aspect-fit.md` for why assuming 10×20 was not enough.
+- **Cover art rendering** (`src/ui/cover/mod.rs`): writes Kitty/SIXEL escape sequences directly to stdout outside ratatui's buffer — inherent to native terminal graphics. Now stable: payloads are sent once per change and the protocols are mutually exclusive (see `progress/2026-08-03-cover-refactor.md`). The chafa subprocess runs with `--probe off` — its default OSC 10/11 terminal probe was the root cause of the phantom keys (responses landed on stdin; commit `3a03ac0`). The half-block art and the graphics layer are placed against the *same* aspect-fitted box (`player_view::fit_cover_rect`) and the blocks stand aside while a native image is up; the box and chafa's geometry both depend on the terminal's real cell pixel size. That size comes from a one-shot `CSI 16 t` probe at startup (`probe_cell_px_once`, falling back to `TIOCGWINSZ` and then 10×20, overridable with `[ui] cell_px`), and chafa's own grid is **10px per column × 20px per row** — dividing both axes by the same number halves the cover's width. See `progress/2026-10-03-cover-aspect-fit.md` and `progress/2026-10-03-cell-size-probe.md`.
 - `tmper play <directory>` is NOT implemented — the CLI accepts a single file. Directories enter the library through the file browser instead (`a` scans the highlighted directory incrementally; `c` cancels).
 - **Library ingestion is index-based**: `scan_incremental` prunes the index on a completed walk, so it is gated on a `complete` flag — a partial walk (unreadable subtree) must never prune, and prefix queries must not use `LIKE` (wildcards + ASCII case-insensitivity over-match, and every over-match deletes a real track).
 - MPRIS2, EQ, online lyrics, notifications are not implemented.
@@ -120,10 +120,11 @@ cargo llvm-cov --all-features --workspace # prints per-module line coverage + a 
 - The default suite is **device-free**: App/engine tests build a headless engine (`App::new_headless` → `AudioEngine::new_headless` → `Sink::new_idle()`), so `cargo test` passes with no sound card. Exactly 6 tests touch real output; they are named `audio_output_*` and marked `#[ignore]`
 - Logical modules have `#[cfg(test)] mod tests { ... }` inline
 - Tests follow Arrange-Act-Assert pattern; cover normal paths + boundary conditions
-- **Line coverage 88.22%** (measured 2026-10-03 via `cargo llvm-cov`; a few timing-sensitive tests
+- **Line coverage 88.17%** (measured 2026-10-03 via `cargo llvm-cov`; a few timing-sensitive tests
   make this wobble by ~0.3% between runs). What remains is structural, not neglected:
   `audio/engine.rs` (73% — the six `#[ignore]`d device tests count as uncovered, plus `new` and
   `play_file` need a real sound card), `app/mod.rs` (62% — `TerminalGuard` and the `run` event loop
-  need a real tty), `paths.rs` (29% — the non-test XDG branches are not compiled under `cfg(test)`),
-  `main.rs` (0% — the binary entry point). Do not claim "covered" from test counts alone — run
-  `cargo llvm-cov --all-features --workspace`.
+  need a real tty; the cell-size probe is called from there), `paths.rs` (29% — the non-test XDG
+  branches are not compiled under `cfg(test)`), `main.rs` (0% — the binary entry point). The probe's
+  read loop is covered anyway: `query_cell_px_on` takes its fd, so the tests drive it over a pipe.
+  Do not claim "covered" from test counts alone — run `cargo llvm-cov --all-features --workspace`.

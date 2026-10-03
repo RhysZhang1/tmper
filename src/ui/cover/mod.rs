@@ -15,8 +15,10 @@
 //! `progress/2026-08-01-cover-rollback.md`. Sending once also makes the old
 //! defense stack (frame suppression, blanket input guard) unnecessary.
 
-use std::io::Write;
-use std::sync::Arc;
+use std::io::{IsTerminal, Write};
+use std::os::fd::{AsRawFd, RawFd};
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use image::GenericImageView;
@@ -432,28 +434,37 @@ impl CoverRenderer {
 /// Translate the cover rect from terminal cells into the cell counts chafa has
 /// to be asked for, so that the SIXEL it emits covers the rect's *pixels*.
 ///
-/// chafa sizes its output at [`runtime::CHAFA_SIXEL_CELL_PX`] per requested
-/// cell and cannot see this terminal, so passing the rect's own cell counts —
-/// what the code used to do — was only correct on a terminal whose cells
-/// happen to be that size. Everywhere else the payload came out the wrong
-/// size, and the half-block art drawn underneath showed around it.
+/// chafa sizes its output at [`runtime::CHAFA_SIXEL_CELL_W`] ×
+/// [`runtime::CHAFA_SIXEL_CELL_H`] px per requested cell and cannot see this
+/// terminal, so passing the rect's own cell counts — what the code used to do —
+/// was only correct on a terminal whose cells happen to be that size. Everywhere
+/// else the payload came out the wrong size, and the half-block art drawn
+/// underneath showed around it.
 ///
 /// Rounded down on purpose: a payload a few pixels short leaves a clean margin,
 /// while one that is too big would spill over the panel border.
 fn chafa_box(rect: (u16, u16, u16, u16), cell_px: (u16, u16)) -> (u16, u16) {
-    let cell = runtime::CHAFA_SIXEL_CELL_PX;
     let px_w = rect.2 as u32 * cell_px.0.max(1) as u32;
     let px_h = rect.3 as u32 * cell_px.1.max(1) as u32;
-    ((px_w / cell).max(1) as u16, (px_h / cell).max(1) as u16)
+    let cols = px_w / runtime::CHAFA_SIXEL_CELL_W;
+    let rows = px_h / runtime::CHAFA_SIXEL_CELL_H;
+    (cols.max(1) as u16, rows.max(1) as u16)
 }
 
-/// Pixel size of one terminal cell, or [`runtime::FALLBACK_CELL_PX`] when the
-/// terminal does not report one.
+/// Pixel size of one terminal cell.
 ///
-/// `window_size()` is a plain ioctl on the tty. Unlike an escape-sequence
-/// query it writes nothing to stdin, so it cannot produce the phantom key
-/// events that `chafa --probe off` exists to avoid.
+/// Three sources, best first:
+///
+/// 1. [`probe_cell_px_once`]'s answer — the terminal's own font metrics,
+///    which is the only source that is right on Konsole;
+/// 2. `TIOCGWINSZ`'s `ws_xpixel`/`ws_ypixel` fields, when the terminal fills
+///    them in (they are plain integers in the struct — no escape sequences,
+///    no stdin involvement);
+/// 3. [`runtime::FALLBACK_CELL_PX`].
 pub fn terminal_cell_px() -> (u16, u16) {
+    if let Some(cell) = PROBED_CELL_PX.get().copied().flatten() {
+        return cell;
+    }
     match crossterm::terminal::window_size() {
         Ok(ws) => cell_px_from_window((ws.columns, ws.rows, ws.width, ws.height))
             .unwrap_or(runtime::FALLBACK_CELL_PX),
@@ -477,12 +488,217 @@ fn cell_px_from_window(ws: (u16, u16, u16, u16)) -> Option<(u16, u16)> {
     let w = px_w / cols;
     let h = px_h / rows;
     // A cell is taller than it is wide, but not arbitrarily: outside this
-    // range the terminal's numbers are not describing a text grid.
+    // range the terminal's numbers are not describing a text grid. The lower
+    // bound is 1.0 rather than something rounder because square cells are
+    // real — a wide font at a large size gives e.g. 20×20.
     let ratio = h as f32 / w.max(1) as f32;
-    if w == 0 || h == 0 || !(1.2..=4.0).contains(&ratio) {
+    if w == 0 || h == 0 || !(1.0..=6.0).contains(&ratio) {
         return None;
     }
     Some((w, h))
+}
+
+// ── Cell size probe ──
+
+/// xterm's "report character cell size in pixels" (`CSI 16 t`), plus the pair
+/// of text-area reports (`CSI 14 t` / `CSI 18 t`) for terminals that implement
+/// only those: their quotient gives the same answer.
+const CELL_SIZE_QUERY: &[u8] = b"\x1b[16t\x1b[14t\x1b[18t";
+
+/// How long the terminal gets to answer before we settle for `TIOCGWINSZ`.
+///
+/// A local tty answers in well under a millisecond; this budget only ever runs
+/// out on terminals that ignore the query, where it costs a few frames of
+/// startup and nothing else.
+const CELL_SIZE_QUERY_BUDGET: Duration = Duration::from_millis(80);
+
+/// The cell size the terminal reported at startup, if it answered at all.
+static PROBED_CELL_PX: OnceLock<Option<(u16, u16)>> = OnceLock::new();
+
+/// Ask the terminal for its cell size, once, and remember the answer.
+///
+/// This is the only source that works on Konsole: it leaves the
+/// `ws_xpixel`/`ws_ypixel` fields of `TIOCGWINSZ` at zero, so without the probe
+/// the cover is sized from a 10×20 guess — the wrong *scale*, and (because
+/// `fit_cover_rect` divides the panel up using the same numbers) the wrong
+/// *shape*.
+///
+/// Must be called with the tty already in raw mode and before anything else
+/// reads stdin. In canonical mode the reply never becomes readable at all —
+/// the line discipline holds it back until a newline that never comes — and a
+/// concurrent reader could swallow it. `App::run` satisfies both: it calls this
+/// right after `TerminalGuard::enter`, which is where raw mode is set.
+pub fn probe_cell_px_once() -> Option<(u16, u16)> {
+    *PROBED_CELL_PX.get_or_init(|| {
+        // Every exit from here logs, including the ones that detect nothing:
+        // this is the single place that knows why the cover came out the size
+        // it did, and `grep "cell size" ~/.local/state/tmper/tmper.log` is what
+        // `config.toml`'s `cell_px` comment tells the user to run.
+        if !std::io::stdin().is_terminal() {
+            tracing::info!("stdin is not a tty: no cell-size probe, no cover sizing");
+            return None;
+        }
+        match query_cell_px(CELL_SIZE_QUERY_BUDGET) {
+            Some((w, h)) => {
+                tracing::info!("terminal cell size: {w}x{h} px (CSI 16t)");
+                Some((w, h))
+            }
+            None => {
+                tracing::info!(
+                    "terminal answered no cell-size query; TIOCGWINSZ reports {:?}",
+                    crossterm::terminal::window_size()
+                        .map(|ws| (ws.columns, ws.rows, ws.width, ws.height))
+                );
+                None
+            }
+        }
+    })
+}
+
+/// Send the cell-size query and collect the reply, giving up after `budget`.
+///
+/// `poll(2)` is what makes this safe to do at all: it waits *without
+/// consuming*, so a terminal that never answers leaves the input queue exactly
+/// as it found it and costs nothing but the timeout. A blocking read — even on
+/// a helper thread — would sit on the tty and could steal a later keystroke.
+///
+/// Should the reply arrive too late for this window it lands on the input
+/// thread instead, where it is harmless: crossterm's parser ends
+/// `CSI <n> ; … t` in `parse_csi_modifier_key_code`, which only knows `A B C D
+/// F H P Q R S` and errors on anything else, and `read()` is called with
+/// `if let Ok(..)`. A stray report cannot become a key event.
+fn query_cell_px(budget: Duration) -> Option<(u16, u16)> {
+    let mut out = std::io::stdout();
+    query_cell_px_on(&mut out, std::io::stdin().as_raw_fd(), budget)
+}
+
+/// [`query_cell_px`] with the terminal passed in.
+///
+/// The wait and the parse are the whole of the probe's logic, and neither cares
+/// that the far end is a tty — only that bytes go out and the reply comes back.
+/// Taking the descriptor as a parameter is what lets the tests drive that loop
+/// over a pipe, where "data is waiting" and "nothing ever arrives" are both
+/// reproducible without a terminal.
+fn query_cell_px_on(out: &mut dyn Write, fd: RawFd, budget: Duration) -> Option<(u16, u16)> {
+    out.write_all(CELL_SIZE_QUERY).ok()?;
+    out.flush().ok()?;
+
+    let deadline = Instant::now() + budget;
+    let mut seen = Vec::with_capacity(32);
+    let mut chunk = [0u8; 64];
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: `pfd` is an initialised pollfd and the count is its length.
+        let ready =
+            unsafe { libc::poll(&mut pfd, 1, left.as_millis().min(i32::MAX as u128) as i32) };
+        if ready < 0 {
+            // A signal (SIGWINCH, SIGCHLD) interrupts the wait; the budget,
+            // not the signal, is what should end it.
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return None;
+        }
+        if ready == 0 {
+            return None;
+        }
+        // SAFETY: `chunk` is a valid writable buffer of `chunk.len()` bytes.
+        let n = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
+        if n < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        if n <= 0 {
+            return None;
+        }
+        seen.extend_from_slice(&chunk[..n as usize]);
+        if let Some(cell) = parse_cell_size_reply(&seen) {
+            return Some(cell);
+        }
+    }
+}
+
+/// Pull the cell size out of whatever the terminal sent back.
+///
+/// Accepts the direct answer (`CSI 6 ; <height> ; <width> t`) and, failing
+/// that, the `CSI 4 ; <height> ; <width> t` / `CSI 8 ; <rows> ; <cols> t` pair
+/// whose quotient is the same thing.
+fn parse_cell_size_reply(bytes: &[u8]) -> Option<(u16, u16)> {
+    let mut cell = None;
+    // The text-area reports are in pixels and cells respectively, so they are
+    // magnitudes apart from a cell size and get their own plausibility test
+    // (non-zero) before being divided.
+    let mut area_px: Option<(u32, u32)> = None;
+    let mut area_cells: Option<(u32, u32)> = None;
+    for params in csi_reports(bytes) {
+        match params.as_slice() {
+            [6, h, w] => cell = cell.or_else(|| plausible_cell(*w, *h)),
+            [4, h, w] if *w > 0 && *h > 0 => area_px = Some((u32::from(*w), u32::from(*h))),
+            [8, rows, cols] if *cols > 0 && *rows > 0 => {
+                area_cells = Some((u32::from(*cols), u32::from(*rows)));
+            }
+            _ => {}
+        }
+    }
+    cell.or_else(|| {
+        let (px_w, px_h) = area_px?;
+        let (cols, rows) = area_cells?;
+        plausible_cell(
+            u16::try_from(px_w / cols).ok()?,
+            u16::try_from(px_h / rows).ok()?,
+        )
+    })
+}
+
+/// Every complete `CSI <params> t` report in `bytes`, as parameter lists.
+///
+/// The queue can legitimately hold other bytes — the user typing during
+/// startup, a terminal answering some other query — so anything that is not
+/// one of these is stepped over rather than treated as an error.
+fn csi_reports(bytes: &[u8]) -> Vec<Vec<u16>> {
+    let mut reports = Vec::new();
+    let mut i = 0;
+    while i + 2 < bytes.len() {
+        if bytes[i] != 0x1b || bytes[i + 1] != b'[' {
+            i += 1;
+            continue;
+        }
+        let mut end = i + 2;
+        while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b';') {
+            end += 1;
+        }
+        if end == i + 2 || bytes.get(end) != Some(&b't') {
+            i += 1;
+            continue;
+        }
+        let params: Option<Vec<u16>> =
+            std::str::from_utf8(&bytes[i + 2..end])
+                .ok()
+                .and_then(|text| {
+                    text.split(';')
+                        .map(str::parse::<u16>)
+                        .collect::<Result<Vec<u16>, _>>()
+                        .ok()
+                });
+        if let Some(params) = params {
+            reports.push(params);
+        }
+        i = end + 1;
+    }
+    reports
+}
+
+/// Reject values that cannot describe a text cell rather than sizing the cover
+/// from them.
+fn plausible_cell(w: u16, h: u16) -> Option<(u16, u16)> {
+    ((1..=64).contains(&w) && (1..=128).contains(&h)).then_some((w, h))
 }
 
 /// Check if the `chafa` binary is available and working.
@@ -656,14 +872,18 @@ mod tests {
 
     // ── chafa geometry ──
 
-    /// chafa emits a fixed 20 px per requested cell and cannot see this
-    /// terminal, so the rect has to be converted into chafa's own units. On a
-    /// 10×20 cell, ten columns of terminal are five cells of chafa.
+    /// chafa emits a fixed 10×20 px per requested cell — its own fallback cell,
+    /// which it cannot correct for because it cannot see this terminal — so the
+    /// rect has to be converted into chafa's units. A 10×20 terminal cell *is*
+    /// chafa's cell, so that case maps one-to-one; a 20×20 one needs twice as
+    /// many chafa columns to span the same pixels.
     #[test]
     fn chafa_box_converts_cells_to_chafa_pixels() {
-        assert_eq!(chafa_box((0, 0, 10, 10), (10, 20)), (5, 10));
-        // A terminal with 20×20 cells maps one-to-one — the size chafa assumes.
-        assert_eq!(chafa_box((0, 0, 10, 10), (20, 20)), (10, 10));
+        assert_eq!(chafa_box((0, 0, 10, 10), (10, 20)), (10, 10));
+        assert_eq!(chafa_box((0, 0, 10, 10), (20, 20)), (20, 10));
+        // Half-width cells: 8 px over chafa's 10 leaves one chafa column per
+        // terminal column only once there are enough of them to add up.
+        assert_eq!(chafa_box((0, 0, 5, 4), (8, 17)), (4, 3));
     }
 
     /// Rounded down, never up: a payload a few pixels short leaves a clean
@@ -673,8 +893,8 @@ mod tests {
         for cell in [(10u16, 20u16), (8, 17), (12, 24), (20, 20)] {
             for (w, h) in [(13u16, 7u16), (40, 20), (3, 30), (4, 4)] {
                 let (bw, bh) = chafa_box((0, 0, w, h), cell);
-                let px_w = bw as u32 * runtime::CHAFA_SIXEL_CELL_PX;
-                let px_h = bh as u32 * runtime::CHAFA_SIXEL_CELL_PX;
+                let px_w = bw as u32 * runtime::CHAFA_SIXEL_CELL_W;
+                let px_h = bh as u32 * runtime::CHAFA_SIXEL_CELL_H;
                 assert!(
                     px_w <= w as u32 * cell.0.max(1) as u32,
                     "box {bw} cells wide overflows {w} columns at cell {cell:?}"
@@ -725,6 +945,186 @@ mod tests {
         // 1000 px over 100 columns is 10 px wide but 1 px tall — not a text
         // grid, and trusting it would make every cover box absurd.
         assert_eq!(cell_px_from_window((100, 800, 1000, 800)), None);
+    }
+
+    /// Square cells are unusual but real (a wide font at a large size), and
+    /// rejecting them would silently mis-size every cover on such a terminal.
+    #[test]
+    fn cell_size_accepts_square_cells() {
+        assert_eq!(cell_px_from_window((80, 40, 1600, 800)), Some((20, 20)));
+    }
+
+    // ── Cell size probe (`CSI 16 t`) ──
+
+    /// The direct answer: `CSI 6 ; <height> ; <width> t`, width and height in
+    /// the order the cover code wants them.
+    #[test]
+    fn probe_reads_the_cell_size_report() {
+        assert_eq!(parse_cell_size_reply(b"\x1b[6;26;12t"), Some((12, 26)));
+    }
+
+    /// The reply shares the queue with whatever else the terminal sent — a
+    /// device-attributes answer, another report, the user typing during
+    /// startup — and arrives in as many pieces as the tty feels like.
+    #[test]
+    fn probe_ignores_what_is_not_its_reply() {
+        assert_eq!(parse_cell_size_reply(b"abc\x1b[6;17;8txyz"), Some((8, 17)));
+        assert_eq!(
+            parse_cell_size_reply(b"\x1b[?62;c\x1b[6;17;8t"),
+            Some((8, 17)),
+            "a device-attributes reply must not confuse it"
+        );
+        assert_eq!(parse_cell_size_reply(b"\x1b[6;2"), None, "half a reply");
+        assert_eq!(parse_cell_size_reply(b"\x1b[6;26;"), None, "half a reply");
+        assert_eq!(parse_cell_size_reply(b"\x1b[6;17;8"), None, "no final byte");
+        assert_eq!(
+            parse_cell_size_reply(b"\x1b[6;17;8u"),
+            None,
+            "not our report"
+        );
+        assert_eq!(
+            parse_cell_size_reply(b"\x1b[6;0;0t"),
+            None,
+            "zero-sized cell"
+        );
+        assert_eq!(parse_cell_size_reply(b"\x1b[6;99999;8t"), None, "not a u16");
+        assert_eq!(parse_cell_size_reply(b""), None);
+    }
+
+    /// Terminals that implement only the text-area reports still answer: the
+    /// quotient of `CSI 4 t` and `CSI 8 t` is the same cell size.
+    #[test]
+    fn probe_derives_the_cell_from_the_text_area_reports() {
+        // 800x480 px of text area over 80x24 cells is a 10x20 cell.
+        assert_eq!(
+            parse_cell_size_reply(b"\x1b[4;480;800t\x1b[8;24;80t"),
+            Some((10, 20))
+        );
+        // Either half on its own says nothing.
+        assert_eq!(parse_cell_size_reply(b"\x1b[4;480;800t"), None);
+        assert_eq!(parse_cell_size_reply(b"\x1b[8;24;80t"), None);
+        // The direct answer wins when both arrive.
+        assert_eq!(
+            parse_cell_size_reply(b"\x1b[4;480;800t\x1b[8;24;80t\x1b[6;26;12t"),
+            Some((12, 26))
+        );
+    }
+
+    // ── The probe's read loop, on a pipe ──
+    //
+    // `query_cell_px_on` is the only part of the probe that touches a live
+    // terminal, and it does not care that the far end is one: all it needs is
+    // bytes going out and a reply coming back. A pipe provides both — plus a
+    // deterministic "nothing ever arrives" and a deterministic EOF, which no
+    // terminal emulator will give you on demand.
+
+    /// Owns a raw descriptor so a test closes it on every path out.
+    struct Fd(RawFd);
+
+    impl Fd {
+        /// A connected pair: writing to `.1` makes `.0` readable.
+        fn pipe() -> (Fd, Fd) {
+            let mut fds = [0 as RawFd; 2];
+            // SAFETY: `fds` has room for the two descriptors `pipe` writes.
+            assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe failed");
+            (Fd(fds[0]), Fd(fds[1]))
+        }
+    }
+
+    impl Drop for Fd {
+        fn drop(&mut self) {
+            // SAFETY: the descriptor came from `pipe` and is closed once.
+            unsafe { libc::close(self.0) };
+        }
+    }
+
+    /// Write the whole buffer to a raw descriptor.
+    fn write_fd(fd: RawFd, bytes: &[u8]) {
+        // SAFETY: `bytes` is a valid readable buffer of `bytes.len()` bytes.
+        let n = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+        assert_eq!(n, bytes.len() as isize, "short write to the test pipe");
+    }
+
+    /// The happy path: the query goes out, the reply comes back through
+    /// `poll(2)` + `read(2)`, and the cell size falls out of it.
+    #[test]
+    fn probe_asks_and_reads_the_answer() {
+        let (read_end, write_end) = Fd::pipe();
+        write_fd(write_end.0, b"\x1b[6;15;8t");
+
+        let mut sent = Vec::new();
+        let cell = query_cell_px_on(&mut sent, read_end.0, Duration::from_secs(5));
+
+        assert_eq!(cell, Some((8, 15)));
+        assert_eq!(
+            sent, CELL_SIZE_QUERY,
+            "the query is what opens the exchange"
+        );
+    }
+
+    /// A tty is free to hand the reply over in pieces, and the pieces need not
+    /// be split on report boundaries. Reading until the parse succeeds is what
+    /// makes that a non-event.
+    #[test]
+    fn probe_joins_a_reply_split_across_reads() {
+        let (read_end, write_end) = Fd::pipe();
+        // The first half is in the pipe before the call, so the first read is
+        // guaranteed to return only that much.
+        write_fd(write_end.0, b"\x1b[6;1");
+        let tail_fd = write_end.0;
+        let tail = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            write_fd(tail_fd, b"5;8t");
+        });
+
+        let mut sent = Vec::new();
+        let cell = query_cell_px_on(&mut sent, read_end.0, Duration::from_secs(5));
+        tail.join().expect("writer thread");
+
+        assert_eq!(cell, Some((8, 15)));
+    }
+
+    /// A terminal that ignores the query costs the budget and nothing else —
+    /// this is the case that has to stay bounded, since it runs at startup.
+    #[test]
+    fn probe_gives_up_when_nothing_answers() {
+        let (read_end, _write_end) = Fd::pipe();
+
+        let started = Instant::now();
+        let mut sent = Vec::new();
+        let cell = query_cell_px_on(&mut sent, read_end.0, Duration::from_millis(40));
+        let waited = started.elapsed();
+
+        assert_eq!(cell, None);
+        assert_eq!(sent, CELL_SIZE_QUERY, "it still asks");
+        assert!(
+            waited >= Duration::from_millis(20),
+            "it waited for the answer instead of giving up on arrival: {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_secs(3),
+            "the wait is bounded by the budget, not by the terminal: {waited:?}"
+        );
+    }
+
+    /// stdin at EOF (a closed pty, a multiplexer that went away) reports
+    /// readable forever. Waiting out the full budget there would be pure
+    /// startup latency.
+    #[test]
+    fn probe_returns_promptly_at_eof() {
+        let (read_end, write_end) = Fd::pipe();
+        drop(write_end);
+
+        let started = Instant::now();
+        let mut sent = Vec::new();
+        let cell = query_cell_px_on(&mut sent, read_end.0, Duration::from_secs(30));
+        let waited = started.elapsed();
+
+        assert_eq!(cell, None);
+        assert!(
+            waited < Duration::from_secs(5),
+            "EOF ended the wait instead of the budget: {waited:?}"
+        );
     }
 
     // ── Block-layer suppression ──

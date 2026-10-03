@@ -13,3 +13,7 @@ smoothing = 0.35
 [ui]
 theme = "tokyo-night"
 show_cover_art = true
+# 终端单元格的像素尺寸。留空表示自动探测：先用 TIOCGWINSZ，再用 xterm 的
+# CSI 16 t（Konsole 只认后者）。两者都不上报时封面会按 10×20 的假设值排版，
+# 此时可手动指定，例如 cell_px = [10, 20]
+# cell_px = [10, 20]

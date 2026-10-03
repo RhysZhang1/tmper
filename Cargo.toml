@@ -37,3 +37,6 @@ encoding_rs = "0.8"
 unicode-width = "0.2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 base64 = "0.22.1"
+# poll(2) for the terminal cell-size probe: waiting on the tty *without*
+# consuming from it is the whole point, and std has no timeout-aware read.
+libc = "0.2"

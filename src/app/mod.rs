@@ -177,6 +177,15 @@ impl App {
     pub async fn run(&mut self, cli: Cli) -> crate::error::AppResult<()> {
         let mut terminal_guard = TerminalGuard::enter()?;
 
+        // One tty round trip, here and nowhere else: `enter` has just put the
+        // tty in raw mode (so the answer is readable at all) and the input
+        // thread below does not exist yet (so nothing else can swallow it).
+        // The probe is the only source that is right on every terminal —
+        // Konsole fills in TIOCGWINSZ's pixel fields on some windows and
+        // leaves them zero on others — and without it the cover is laid out
+        // from a guessed cell size: the wrong scale and the wrong shape.
+        crate::ui::cover::probe_cell_px_once();
+
         let (library_scan_tx, mut library_scan_rx) =
             tokio::sync::mpsc::unbounded_channel::<ScanUpdate>();
         self.library_scan_tx = Some(library_scan_tx);
@@ -315,11 +324,15 @@ impl App {
                     self.cover_renderer.clear_done();
                 }
 
-                // Re-read the cell size each frame — a resize changes it, and
-                // both the cover box and the chafa geometry depend on it.
-                self.ui_state
-                    .cell_px
-                    .set(crate::ui::cover::terminal_cell_px());
+                // Re-read the cell size each frame on the off chance the
+                // terminal reports it through TIOCGWINSZ; the probed value is
+                // cached and costs nothing. Either way a config override wins.
+                self.ui_state.cell_px.set(
+                    self.config
+                        .ui
+                        .cell_px
+                        .unwrap_or_else(crate::ui::cover::terminal_cell_px),
+                );
 
                 if let Err(e) = terminal_guard
                     .terminal_mut()

@@ -560,11 +560,11 @@ pub async fn run(&mut self, cli: Cli) -> AppResult<()> {
 pub struct Config {
     pub playback: PlaybackConfig,     // default_volume, seek_step_small_secs
     pub visualizer: VisualizerConfig, // num_bars, frame_rate, smoothing
-    pub ui: UiConfig,                 // theme, show_cover_art
+    pub ui: UiConfig,                 // theme, show_cover_art, cell_px
 }
 ```
 
-> `[library]` / `[lyrics]` 配置段及 `gapless`、`resume_on_startup`、`color_scheme` 等键均已移除，仅保留以上 7 个键。
+> `[library]` / `[lyrics]` 配置段及 `gapless`、`resume_on_startup`、`color_scheme` 等键均已移除，仅保留以上 8 个键。`cell_px` 是可选覆盖（`Option<(u16, u16)>`，默认 `None`），只在终端既不上报 `TIOCGWINSZ` 像素字段也不回答 `CSI 16 t` 时才有意义——见 §9.3 第 6 条。
 
 **加载**：首次运行由内嵌模板生成 XDG `config.toml`；随后读取并解析，失败则使用 `Default::default()`。旧项目目录数据只复制迁移，不删除源文件。
 
@@ -645,9 +645,10 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 2. **协议互斥**：Kitty 与 chafa SIXEL 按终端环境检测二选一，避免两者同时写入争抢同一区域。
 3. **输入零防御**：不再需要 guard / 帧抑制 / 控制字符过滤等防御层。`handle_key_event` 不拦截任何按键。
 4. **清理**：离开播放器视图、隐藏封面、或新曲目无封面时，置 `clear_pending` → 事件循环 `terminal.clear()` 覆盖 SIXEL 残留（Konsole 对 ED 清 SIXEL 的 workaround）。
-5. **几何对齐**（2026-10-03，详见 `progress/2026-10-03-cover-aspect-fit.md`）：封面矩形由 `player_view::fit_cover_rect` 按图片**像素**宽高比收缩居中，两个图层共用这一个盒子；chafa 的 `--size` 由「矩形像素 ÷ `CHAFA_SIXEL_CELL_PX`（实测每请求格 20px）」换算并配 `--stretch`。单元格像素每帧经 `terminal_cell_px()`（`window_size()` ioctl，不写 stdin）读取，不上报时退回 `FALLBACK_CELL_PX`。
-6. **字符画让位**：原生图像生效时（`CoverRenderer::native_active`）用 `Clear` 抹掉封面矩形内的半块字符，而不是不画——`Block` 只重置样式，保留的 `▄▀` 会以默认色露出成像素块。因写入单元格会擦除下层图形层，`blocks_suppressed` 并入 SIXEL 缓存键，在被改写的那一帧重发一次。
-7. 渲染器经注入式 writer + encoder 可测试，状态机由 15 个单元测试锁定（`src/ui/cover/mod.rs`）。
+5. **几何对齐**（2026-10-03，详见 `progress/2026-10-03-cover-aspect-fit.md`）：封面矩形由 `player_view::fit_cover_rect` 按图片**像素**宽高比收缩居中，两个图层共用这一个盒子；chafa 的 `--size` 由「矩形像素 ÷ chafa 网格」换算并配 `--stretch`。chafa 的网格是**宽 10px × 高 20px**（`CHAFA_SIXEL_CELL_W` / `_H`，实测 chafa 1.18；两个轴同除一个数会让输出只有一半宽——见 `progress/2026-10-03-cell-size-probe.md`）。单元格像素每帧经 `terminal_cell_px()` 读取，优先级：启动探测值 → `TIOCGWINSZ` 的 `ws_xpixel`/`ws_ypixel`（ioctl，不写 stdin）→ `FALLBACK_CELL_PX`（10×20）。
+6. **单元格像素探测**（2026-10-03，同上）：`probe_cell_px_once()` 在 `App::run` 里 `TerminalGuard::enter()` 之后、输入线程启动之前**只问一次**——此时 tty 刚进 raw 模式（否则行规程会扣住回复），且没有第二个读者。查询为 `CSI 16 t`（Konsole/xterm/foot/kitty 等），拿不到则用 `CSI 14 t` ÷ `CSI 18 t`。等待用 `poll(2)` + 80ms 预算：只看不取，不回答的终端只损失预算、绝不吞按键；迟到的回复落在输入线程上也只是被 crossterm 丢弃（终字节 `t` 不在其解析表内，`read()` 用 `if let Ok`）。结果缓存进 `OnceLock`，并在日志里留下「测到多少」或「为什么没测到」。两者都不上报的终端可用 `[ui] cell_px` 手工指定（clamp 丢弃非单元格值）。
+7. **字符画让位**：原生图像生效时（`CoverRenderer::native_active`）用 `Clear` 抹掉封面矩形内的半块字符，而不是不画——`Block` 只重置样式，保留的 `▄▀` 会以默认色露出成像素块。因写入单元格会擦除下层图形层，`blocks_suppressed` 并入 SIXEL 缓存键，在被改写的那一帧重发一次。
+8. 渲染器经注入式 writer + encoder 可测试，探测的读循环经注入式 fd 在管道上可测试（`query_cell_px_on`），共 26 个单元测试锁定（`src/ui/cover/mod.rs`）。
 
 ### 9.4 全局快捷键
 
@@ -706,7 +707,7 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 | input/keymap.rs | 5 | 单字符/^X/特殊名称、非 ASCII 单字符不再静默变空格、未知名称回退 |
 | playlist.rs | — | （v3.5 后仅存 `PlaylistData` 数据模型，逻辑并入 playlist_view） |
 | paths.rs | 2 | XDG 目录拼接、测试期重定向到临时根（三个目录都隔离） |
-| config.rs | 10 | 模板与代码默认值一致、clamp 上下界与放行、f32 两位小数序列化、往返、部分/空/含未知键的文档解析 |
+| config.rs | 11 | 模板与代码默认值一致、clamp 上下界与放行、`cell_px` 覆盖的读取与校验、f32 两位小数序列化、往返、部分/空/含未知键的文档解析 |
 | app/mod.rs | 14 | 视图切换、音量、循环、加载播放、停止、命令模式、搜索、文本输入模式旁路集合（含 4 个 tokio 集成式） |
 | app/playback.rs | 17 | 陈旧歌单游标下 prev/next 不越界、空歌单 no-op、曲终三模式（歌单与全局两条路径）、全局队列两端停住、shuffle 落在范围内、FFT 取最新样本窗口、播放选中项 |
 | app/persistence.rs | 11 | state 往返与部分字段恢复、缺失/损坏文件、歌单往返且丢弃已不存在的歌曲、库路径往返与去重、写入内容 |
@@ -721,10 +722,10 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 | ui/views/lyrics_view.rs | 4 | 空提示、歌词+当前高亮、offset 标签、滚动保持当前行可见 |
 | ui/views/playlist_view.rs | 8 | flat-model 行数/行号/解析、styled lines（展开/输入/播放前缀）、渲染与通知弹出 |
 | ui/views/settings_view.rs | 3 | rebuild_settings 布局与配置值、渲染冒烟（含 scroll clamp） |
-| ui/views/player_view.rs | 20 | cover 块渲染（空字节/零面积/内存 PNG）、封面矩形自适应（正方形/带余量的一边/宽图/竖图/退化输入/永不越界）、原生图层生效时字符画让位、渲染冒烟、搜索命中与无匹配、迷你歌单、歌词区（空/当前行/跟随滚动）、歌曲信息各槽位、控制栏进度与零时长 |
-| ui/cover/mod.rs | 15 | 一次性发送不变量、区域重发、视图切换/隐藏/无封面清除、chafa 失败不重试、Kitty 尺寸变化重发、搜索覆盖层清理两个协议、chafa 请求盒换算与不溢出、单元格尺寸解析与回退、抑制字符画时的重发（注入式 writer/encoder） |
+| ui/views/player_view.rs | 21 | cover 块渲染（空字节/零面积/内存 PNG）、封面矩形自适应（正方形/带余量的一边/宽图/竖图/退化输入/永不越界）、原生图层生效时字符画让位、渲染冒烟、搜索命中与无匹配、迷你歌单、歌词区（空/当前行/跟随滚动）、歌曲信息各槽位、控制栏进度与零时长 |
+| ui/cover/mod.rs | 26 | 一次性发送不变量、区域重发、视图切换/隐藏/无封面清除、chafa 失败不重试、Kitty 尺寸变化重发、搜索覆盖层清理两个协议、chafa 请求盒换算（按 10/20 网格分轴）与不溢出、单元格尺寸解析与回退、探测读循环（管道：应答/半包拼接/超时/EOF）与查询写入、抑制字符画时的重发（注入式 writer/encoder/fd） |
 | ui/widgets/help_popup.rs | 4 | 帮助文案与当前键位/XDG 路径一致、绘制、滚动到底后 clamp、小于自身边距的终端 |
-| **总计** | **326** | **320 默认运行 + 6 设备门控（`#[ignore]`）** |
+| **总计** | **352** | **346 默认运行 + 6 设备门控（`#[ignore]`）** |
 
 #### 测试分层
 

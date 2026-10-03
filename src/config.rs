@@ -42,6 +42,16 @@ pub struct UiConfig {
     pub theme: String,
     #[serde(default = "default_true")]
     pub show_cover_art: bool,
+    /// Override the terminal's cell size in pixels, e.g. `cell_px = [10, 20]`.
+    ///
+    /// Only needed where the terminal reports neither `TIOCGWINSZ`'s pixel
+    /// fields nor `CSI 16 t` (tmux, a few emulators): tmper then sizes the
+    /// cover from a 10×20 guess, which is visibly wrong if the real cell is
+    /// something else. What tmper detected is logged at startup, so
+    /// `grep "cell size" ~/.local/state/tmper/tmper.log` says whether this
+    /// needs setting at all.
+    #[serde(default)]
+    pub cell_px: Option<(u16, u16)>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -120,6 +130,12 @@ impl Config {
         self.visualizer.frame_rate = self.visualizer.frame_rate.clamp(1, 120);
         self.visualizer.num_bars = self.visualizer.num_bars.clamp(1, 256);
         self.visualizer.smoothing = self.visualizer.smoothing.clamp(0.0, 1.0);
+        // `cell_px` is hand-written; a zero or absurd value would divide the
+        // panel into a nonsense grid, so drop anything that is not a cell.
+        self.ui.cell_px = self
+            .ui
+            .cell_px
+            .filter(|(w, h)| (1..=64).contains(w) && (1..=128).contains(h));
     }
 }
 
@@ -145,6 +161,7 @@ impl Default for UiConfig {
         Self {
             theme: default_theme(),
             show_cover_art: default_true(),
+            cell_px: None,
         }
     }
 }
@@ -178,6 +195,28 @@ mod tests {
         assert_eq!(template.visualizer.smoothing, defaults.visualizer.smoothing);
         assert_eq!(template.ui.theme, defaults.ui.theme);
         assert_eq!(template.ui.show_cover_art, defaults.ui.show_cover_art);
+        assert_eq!(template.ui.cell_px, defaults.ui.cell_px);
+    }
+
+    /// `cell_px` is the escape hatch for terminals that report no cell size at
+    /// all, so what a hand-written value does matters more than usual.
+    #[test]
+    fn cell_px_override_is_read_and_validated() {
+        let parse = |toml: &str| {
+            let mut config: Config = toml::from_str(toml).expect("parses");
+            config.clamp();
+            config.ui.cell_px
+        };
+
+        assert_eq!(parse("[ui]\ncell_px = [8, 17]"), Some((8, 17)));
+        assert_eq!(
+            parse("[ui]\ncell_px = [0, 20]"),
+            None,
+            "a zero-sized cell is not a cell"
+        );
+        assert_eq!(parse("[ui]\ncell_px = [200, 20]"), None, "absurd width");
+        assert_eq!(parse("[ui]\ncell_px = [8, 400]"), None, "absurd height");
+        assert_eq!(parse("[ui]\ntheme = \"nord\""), None, "absent means detect");
     }
 
     // ── clamp ──
