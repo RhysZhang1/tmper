@@ -506,7 +506,7 @@ tmper/
 ├── themes/                       # 编译进程序的五套主题
 ├── progress/                     # 历史开发记录，不代表当前实现
 │
-├── src/                          # 源代码（约 24,750 行 Rust，单 binary）
+├── src/                          # 源代码（约 25,200 行 Rust，单 binary）
 │   ├── main.rs                   #   入口：按动词分流（daemon / 一次性命令 / TUI）
 │   ├── cli.rs                    #   命令行解析
 │   ├── client.rs                 #   一次性动词：连上、发一条、打印、退出
@@ -556,7 +556,7 @@ tmper/
 ```bash
 cargo build                        # 调试编译
 cargo build --release              # 发布编译（资源已内嵌的单文件）
-cargo test                         # 默认：全部无需音频设备的测试（524 个）
+cargo test                         # 默认：全部无需音频设备的测试（527 个）
 cargo test audio_output_ -- --ignored --test-threads=1  # 需要真实/虚拟设备（6 个）
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all
@@ -574,8 +574,8 @@ cargo llvm-cov --all-features --workspace # 输出各模块行覆盖率与总计
 本地句柄，所以没有声卡也能 `cargo test` 全绿。只有 6 个测试真的碰音频输出，它们叫
 `audio_output_*` 并标了 `#[ignore]`。
 
-覆盖率现状 **89.96% 行 / 90.61% 区域 / 88.63% 函数**（2026-10-03 实测，共 531 个 =
-524 默认运行 + 7 忽略，其中 6 个是设备门控、1 个是生成上面那张截图的工具）。剩下的未覆盖部分是结构性的，不是遗漏——细节见
+覆盖率现状 **89.44% 行 / 90.35% 区域 / 88.44% 函数**（2026-10-04 实测，共 534 个 =
+527 默认运行 + 7 忽略，其中 6 个是设备门控、1 个是生成上面那张截图的工具）。剩下的未覆盖部分是结构性的，不是遗漏——细节见
 [DESIGN.md §10](DESIGN.md)。
 
 ### 重新生成 README 里的截图

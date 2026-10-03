@@ -492,7 +492,7 @@ tmper/
 ├── themes/                       # five palettes, compiled into the binary
 ├── progress/                     # historical development notes; not current truth
 │
-├── src/                          # ~24,750 lines of Rust, one binary
+├── src/                          # ~25,200 lines of Rust, one binary
 │   ├── main.rs                   #   entry: dispatch on the verb
 │   ├── cli.rs                    #   clap verbs
 │   ├── client.rs                 #   one-shot verbs: connect, send, print, exit
@@ -526,7 +526,7 @@ tmper/
 ```bash
 cargo build                        # debug
 cargo build --release              # release (a single self-contained file)
-cargo test                         # default: device-free tests (524)
+cargo test                         # default: device-free tests (527)
 cargo test audio_output_ -- --ignored --test-threads=1  # needs a real/virtual device (6)
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all
@@ -544,8 +544,8 @@ cargo llvm-cov --all-features --workspace
 the TUI tests drive a local handle, so `cargo test` is green with no sound card. Exactly six tests
 touch real output; they are named `audio_output_*` and marked `#[ignore]`.
 
-Coverage is **89.96% lines / 90.61% regions / 88.63% functions** (measured 2026-10-03 across 531 tests
-= 521 default + 7 ignored: 6 device-gated and the screenshot tool above). What remains uncovered is structural rather than
+Coverage is **89.44% lines / 90.35% regions / 88.44% functions** (measured 2026-10-04 across 534 tests
+= 527 default + 7 ignored: 6 device-gated and the screenshot tool above). What remains uncovered is structural rather than
 neglected — see [DESIGN.md §10](DESIGN.md).
 
 ### Regenerating the screenshot

@@ -293,7 +293,7 @@ pub struct AudioDecoder {
 
 **流程**：`symphonia::default::get_probe()` 探测容器 → 创建解码器 → `read_packet()` 循环输出 `Vec<f32>` PCM。使用 `SampleBuffer` 统一转换为 f32。
 
-**测试**：`test_decode_wav`（440Hz 正弦波，44100Hz 验证）、`test_decode_nonexistent`（错误处理）。
+**测试**：`test_decode_wav`（440Hz 正弦波，44100Hz 验证）、`test_open_nonexistent_file`（错误处理）、`test_seek_to_secs_yields_samples`（seek 之后仍拿得到样本）。
 
 #### output.rs — Rodio Sink 封装
 
@@ -404,7 +404,7 @@ pub struct LyricMetadata {
 
 **编码检测**：BOM → UTF-8 → GBK → Shift-JIS（使用 `encoding_rs`）
 
-**测试**：7 个测试覆盖标准 LRC、元数据、多时间戳、逐字时间戳、空文件、损坏行、排序。
+**测试**：16 个测试覆盖标准 LRC、元数据、多时间戳、逐字时间戳、空文件、损坏行、排序，以及编码检测（BOM 选编码、UTF-8 直通、GBK 与 Shift-JIS 回退、调用方的回退顺序、无法解码的字节变成替换字符而不是报错、不给回退时才报错）与文件读取（正常、文件不存在）。
 
 #### engine.rs — 查找与同步
 
@@ -467,7 +467,7 @@ pub struct TrackRow { /* 对应 tracks 主表全部字段 */ }
 
 通过 `WalkDir` 递归发现音频文件，默认不跟随符号链接。扫描线程对比 `file_size + mtime` 指纹，只解析新增或变化文件的元数据，通过 Tokio channel 将结果交回主线程写入 SQLite；支持进度、取消以及扫描完成后的缺失文件清理。
 
-**测试**：扩展名过滤验证（1 个）。
+**测试**：10 个测试：扩展名过滤（大小写不敏感、拒绝非音频）与扫描过滤、根或子目录不可读时列表标记为不完整（**部分遍历绝不冒充完整**）、指纹变化才重读而未变化的只列出不重发、元数据读不了计入 failed 但不影响 complete、取消同时上报 incomplete 与 cancelled、每百个文件上报一次进度。
 
 #### playlist_manager.rs — M3U 导入导出
 
@@ -859,20 +859,25 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 
 > 下表统计的是**测试用例数量**，不是**行覆盖率**。行覆盖率需用 `cargo llvm-cov` 单独测量
 > （见 [10.3 行覆盖率](#103-行覆盖率)）。
-> **现状（2026-10-03 实测）**：总行覆盖率 **89.96%**（函数 88.63%、
-> 区域 90.61%；少数计时敏感测试会让该数字每次浮动 ~0.3%）。同日先是把测试从
-> 80.09% 补到 88.87%（补齐 `input/handler.rs`、`library/scanner.rs`、`config.rs` 等此前零测试的
-> 模块），随后守护进程拆分新增的模块——`ipc/`（`mod.rs` 99%、`proto.rs` 100%）、`daemon.rs`、
-> `player/*`、`app/handle.rs`、`client.rs`——在**继续涨**的情况下把总数推到
-> 89.96%。拆分新增的代码里覆盖率最低的是 `player/mpris.rs`
-> （82.22%：zbus 的接口层需要一条真总线才能跑到，能测的映射/diff/镜像逻辑都测了）。
+> **现状（2026-10-04 实测）**：总行覆盖率 **89.44%**（函数 88.44%、
+> 区域 90.35%；少数计时敏感测试会让该数字每次浮动 ~0.3%）。它比 10-03 记录的 89.96% 略低，
+> 但那不是回归：两次测量之间代码和测试都动过（主视图新增了曲目行，`main.rs` 新增了日志轮转），
+> 两个数字各自对应当天的那棵树，不能直接相减。
+>
+> 更早的两次：10-03 先是把测试从 80.09% 补到 88.87%（补齐 `input/handler.rs`、
+> `library/scanner.rs`、`config.rs` 等此前零测试的模块），随后守护进程拆分新增的模块——
+> `ipc/`（`mod.rs` 99%、`proto.rs` 100%）、`daemon.rs`、`player/*`、`app/handle.rs`、
+> `client.rs`——在**继续涨**的情况下把总数推到 89.96%。10-04 把 `open_log` 从 `init_logging`
+> 里拆出来（subscriber 一个进程只能初始化一次，不拆就没法测），`main.rs` 因此从 0% 到 58.06%。
 >
 > 剩余的未覆盖部分是**结构性**的，不是遗漏：
-> `audio/engine.rs` 77.25%（6 个 `#[ignore]` 设备测试的函数体本身计入未覆盖，
-> 另有 `new`/`play_file` 需要真实声卡）、`audio/output.rs` 65.15%（`new` 要开真实设备，
-> headless 路径已覆盖）、`app/mod.rs` 70.02%（`TerminalGuard` 与 `run` 事件循环需要
-> 真实 tty）、`paths.rs` 53.38%（非 `cfg(test)` 分支在测试构建下根本不参与编译）、
-> `main.rs` 0%（二进制入口）。**测试数不是覆盖率**——要说「覆盖了」就跑
+> `audio/engine.rs` 77.66%（6 个 `#[ignore]` 设备测试的函数体本身计入未覆盖，
+> 另有 `new`/`play_file` 需要真实声卡）、`audio/output.rs` 66.29%（`new` 要开真实设备，
+> headless 路径已覆盖）、`app/mod.rs` 71.59%（`TerminalGuard` 与 `run` 事件循环需要
+> 真实 tty）、`paths.rs` 59.31%（非 `cfg(test)` 分支在测试构建下根本不参与编译）、
+> `player/mpris.rs` 86.34%（zbus 的接口层需要一条真总线才能跑到，能测的映射/diff/镜像逻辑都测了）、
+> `main.rs` 58.06%（入口本身与 subscriber 装配要有真实一次运行；`open_log` 已直接测）。
+> **测试数不是覆盖率**——要说「覆盖了」就跑
 > `cargo llvm-cov --all-features --workspace`。
 
 | 模块 | 测试数 | 覆盖内容 |
@@ -881,8 +886,10 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 | ipc/mod.rs | 11 | 行分隔封帧：往返、载荷内的换行、超过读缓冲的长行重组、第二行等它自己那次读、EOF 在行间是干净的结束而在行中是错误、坏 JSON、超长行不缓冲就先拒绝、CRLF 容忍、空行、非 UTF-8 |
 | daemon.rs | 21 | 新客户端一次拿齐镜像（快照+队列+路径+歌单）、客户端 id 不复用、命令广播到每个客户端、离场客户端的命令被忽略、频谱只发给订阅者、FFT 跟随最后一个订阅者、卡住的客户端从不被等待、错过事实的客户端被丢弃、有人连着或出声就不空闲、暂停也算空闲、空闲计时被打断后重来、`Shutdown` 向所有人道别并结束循环、Hello 握手与版本拒绝、静默连接从不注册 |
 | client.rs | 6 | `tmper status` 的输出（播放中/空载/失败各一条）、每个控制动词都有对应的 `Request`、越界音量被夹住而不是照做 |
+| main.rs | 3 | `open_log`：**已有内容不被截断**（TUI 正跑着时一条 `tmper status` 不再抹掉它的日志）、超过 `LOG_MAX_BYTES` 时**改名**为 `.log.1` 而不是截断（截断会在上限处把刚修掉的 bug 请回来）、未超限不动文件。直接打 `open_log` 而不是 `init_logging`——后者要装配全局 subscriber，一个进程只能来一次 |
+| cli.rs | 1 | `--version` 有答案（clap 只在 derive 标了 `version` 时才长出这个 flag；缺了它，最该回答的那个命令会以 unexpected argument 退出） |
 | player/mod.rs | 37 | 队列与续播策略：播放即入队且去重、队列版本只在队列真变了时动、`Toggle`/`Stop`/`Resume`/seek 语义、删曲目时 `playing_index` 的移动、循环三模式、活动歌单优先于队列且两端环绕、shuffle 落在活动列表内、订阅才产频谱、曲库请求与回带 key 的答复（艺术家/专辑/曲目/搜索）、加路径与索引队列、扫描事件、`Shutdown` 只报一次 |
-| player/library.rs | 14 | 艺术家→专辑→曲目查询、前缀搜索、忘掉目录/单文件删行、**不完整或取消的扫描不剪枝**而完整扫描才剪枝、扫描索引目录并报告完成、路径列表往返并丢掉已消失的、同一路径加两次只留一条 |
+| player/library.rs | 13 | 艺术家→专辑→曲目查询、前缀搜索、忘掉目录/单文件删行、**不完整或取消的扫描不剪枝**而完整扫描才剪枝、扫描索引目录并报告完成、没有运行时上下文时拒绝扫描、取消的扫描自报取消、路径列表往返并丢掉已消失的、同一路径加两次只留一条 |
 | player/playlists.rs | 12 | id 随歌单往返、载入时丢弃已不存在的歌、无 id 的文件补号并写回、重复 id 重新编号、同曲去重、按位置删曲、对不存在的 id 编辑是 no-op、**id 永不复用**、导入成为编号歌单、读不了的导入会报告、不指名歌曲的歌单仍是歌单、损坏文件被忽略 |
 | player/persistence.rs | 11 | state 往返与部分字段恢复、缺失/损坏文件、恢复后停在同曲同一秒、`resume` 从停驻处继续、`stop` 之后停驻位置不再生效、存盘记下队列与实时位置、**shutdown 先存盘后静音**（把顺序调回去这条会红）、越界 `queue_index` 被丢弃 |
 | player/cover.rs | 8 | PNG/JPEG 按扩展名落盘、未知格式不缓存、同曲复用同一文件、不同曲不同文件、缓存不随听歌历史增长、指纹稳定且互异、非 UTF-8 路径也有名字 |
@@ -907,7 +914,7 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 | visualizer/fft.rs | 1 | 440Hz 峰值检测 |
 | visualizer/processor.rs | 2 | 桶数量、平滑收敛 |
 | visualizer/render.rs | 6 | 渲染输出、颜色渐变、行宽恰为 width（含 num_bars > width）、`bar_at_column` 跨过居中留白、绘制与配色逐列对齐 |
-| ui/mod.rs | 10 | 最小支持尺寸渲染（七个视图）、极窄终端不 panic、通知弹窗绘制与过期、**连接横幅**（双宽字形按格写，所以按字符逐个断言）、播放器还在时不画横幅、命令面板、帮助覆盖层优先级、全屏频谱画出**带颜色的**柱 |
+| ui/mod.rs | 11 | 最小支持尺寸渲染（七个视图）、极窄终端不 panic、通知弹窗绘制与过期、**连接横幅**（双宽字形按格写，所以按字符逐个断言）、播放器还在时不画横幅、命令面板、帮助覆盖层优先级、全屏频谱画出**带颜色的**柱；另有 `print_the_player_view`（生成 README 截图的工具，`#[ignore]`） |
 | ui/theme.rs | 5 | hex 颜色解析（有效/无效回退）、多字节输入不 panic、缺失主题回退默认、真实主题 13 色槽加载 |
 | ui/views/file_browser_view.rs | 3 | 空/填充渲染、聚焦样式 |
 | ui/views/library_view.rs | 6 | 三面板标题、数据行、搜索栏、光标闪烁、长列表滚动保持选中行可见 |
@@ -923,7 +930,7 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 | paths.rs | 5 | XDG 目录拼接、测试期重定向到临时根、运行时目录的优先级（覆盖变量 → XDG_RUNTIME_DIR → 状态目录下的 `run`）、socket 落在运行时目录里、`ensure_runtime_dir` 幂等；另有测试用的 `config_file_lock()`（不是测试，是给共用 `config.toml` 的测试串行化的锁） |
 | config.rs | 11 | 模板与代码默认值一致、clamp 上下界与放行、`cell_px` 覆盖的读取与校验、f32 两位小数序列化、往返、部分/空/含未知键的文档解析 |
 | playlist.rs | — | （仅存 `PlaylistData` 数据模型，逻辑在 `player/playlists.rs`） |
-| **总计** | **531** | **524 默认运行 + 7 忽略（6 个设备门控 + 1 个生成 README 截图的工具）** |
+| **总计** | **534** | **527 默认运行 + 7 忽略（6 个设备门控 + 1 个生成 README 截图的工具）** |
 
 #### 测试分层
 
