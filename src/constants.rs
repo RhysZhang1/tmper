@@ -72,6 +72,39 @@ pub mod runtime {
     /// used on one side only, by the one process that draws the cover.
     pub const FALLBACK_CELL_PX: (u16, u16) = (10, 20);
 
+    // ── Daemon ──
+
+    /// How long the daemon stays alive with no client attached and nothing
+    /// playing before it exits.
+    ///
+    /// Paused counts as playing, so this only runs while the player is
+    /// genuinely silent — leaving a paused queue behind and coming back to it
+    /// is exactly the behaviour the daemon exists for.
+    pub const DAEMON_IDLE_EXIT_SECS: u64 = 300;
+
+    /// Messages one client may be behind by before the daemon gives up on it.
+    ///
+    /// The steady state is a handful: snapshots and spectrum frames arrive
+    /// together at the frame rate, and the client drains both every tick. This
+    /// is the backstop for a client that has stopped reading altogether, and
+    /// it is sized so that reaching it means seconds of total silence, not a
+    /// slow frame.
+    pub const DAEMON_CLIENT_QUEUE: usize = 256;
+
+    /// How long a freshly spawned daemon is given to answer on its socket
+    /// before the client gives up and reports the failure.
+    pub const DAEMON_START_TIMEOUT_MS: u64 = 3000;
+
+    /// Gap between connection attempts while waiting for a daemon to come up.
+    pub const DAEMON_CONNECT_RETRY_MS: u64 = 25;
+
+    /// How long the client waits for `Event::Welcome` after sending `Hello`.
+    ///
+    /// A daemon that accepts a connection and then says nothing is
+    /// indistinguishable from a hung one, and the TUI must not start into a
+    /// frozen state because of it.
+    pub const DAEMON_HELLO_TIMEOUT_MS: u64 = 2000;
+
     // ── FFT ──
 
     /// Number of PCM samples fed into the FFT analyzer per frame.

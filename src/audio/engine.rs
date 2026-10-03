@@ -45,6 +45,17 @@ impl PlaybackState {
     pub fn is_active(&self) -> bool {
         matches!(self, Self::Loading | Self::Playing | Self::Seeking)
     }
+
+    /// The user is somewhere in the middle of a track: playing it, or paused
+    /// inside it.
+    ///
+    /// What the daemon keys its idle exit off. A paused player is a session
+    /// waiting to be resumed, not an idle one — leaving a queue paused and
+    /// coming back to it is exactly the behaviour the daemon exists for, so it
+    /// counts as being busy. A stopped, finished or failed one is not.
+    pub fn is_engaged(&self) -> bool {
+        self.is_active() || matches!(self, Self::Paused)
+    }
 }
 
 /// Events produced by the active decoder and consumed by the app tick.

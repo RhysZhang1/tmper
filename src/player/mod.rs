@@ -211,9 +211,9 @@ impl Player {
         }
     }
 
-    /// Whether a [`Request::Shutdown`] has arrived. Read by the daemon's
-    /// accept loop, which is the next commit; nothing else can act on it.
-    #[allow(dead_code)]
+    /// Whether a [`Request::Shutdown`] has arrived — `tmper quit`, `:quit!`,
+    /// or eventually MPRIS `Quit`. The daemon reads it after every command and
+    /// stops when it is set.
     pub fn should_shutdown(&self) -> bool {
         self.shutdown
     }

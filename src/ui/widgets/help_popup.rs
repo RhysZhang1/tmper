@@ -86,7 +86,8 @@ fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         ),
         gap(),
         sec(theme, "▎命令模式（按 : 进入，Vim 风格）"),
-        key(theme, ":q / :quit", "退出程序"),
+        key(theme, ":q / :quit", "退出界面（音乐继续播放）"),
+        key(theme, ":q! / :quit!", "停止播放器并退出"),
         key(theme, ":help", "显示本帮助"),
         key(theme, ":version", "显示版本号"),
         key(
@@ -320,6 +321,11 @@ mod tests {
 
         assert!(text.contains("按 8 或 Esc 关闭帮助"));
         assert!(text.contains("$XDG_CONFIG_HOME/tmper/keybindings.toml"));
+        // The two quits do different things, and the help is where a user
+        // finds that out.
+        assert!(text.contains(":q / :quit"));
+        assert!(text.contains("退出界面（音乐继续播放）"));
+        assert!(text.contains(":q! / :quit!"));
         assert!(text.contains("添加当前目录并启动增量扫描"));
         assert!(text.contains("搜索标题、艺术家、专辑和流派"));
         assert!(!text.contains("config/config.toml"));

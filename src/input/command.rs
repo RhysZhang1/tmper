@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Command {
+    /// Leave the TUI. The player is a separate process and carries on.
     Quit,
+    /// Leave the TUI *and* stop the player: `:quit!`, or `tmper quit`.
+    QuitAll,
     Help,
     Version,
     Theme(String),
@@ -24,6 +27,9 @@ pub fn parse_command(input: &str) -> Command {
 
     match cmd.as_str() {
         "q" | "quit" | "wq" => Command::Quit,
+        // The bang is the whole difference, and it is worth a whole variant:
+        // one of these leaves the music playing and the other stops it.
+        "q!" | "quit!" | "wq!" => Command::QuitAll,
         "help" => Command::Help,
         "version" => Command::Version,
         "theme" => Command::Theme(arg.unwrap_or("").to_string()),
@@ -51,9 +57,21 @@ mod tests {
 
     #[test]
     fn test_parse_quit() {
-        match parse_command(":q") {
-            Command::Quit => {}
-            _ => panic!("Expected Quit"),
+        assert!(matches!(parse_command(":q"), Command::Quit));
+        assert!(matches!(parse_command(":quit"), Command::Quit));
+        assert!(matches!(parse_command(":wq"), Command::Quit));
+    }
+
+    /// The bang is not decoration: `:quit` leaves the music playing and
+    /// `:quit!` stops it, so a parser that folded the two together would
+    /// silently cut the sound on the wrong keypress.
+    #[test]
+    fn test_parse_quit_all() {
+        for input in [":q!", ":quit!", ":wq!", ":QUIT!"] {
+            assert!(
+                matches!(parse_command(input), Command::QuitAll),
+                "{input} should be the one that stops the player"
+            );
         }
     }
 

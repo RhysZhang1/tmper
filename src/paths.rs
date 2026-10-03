@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::error::{AppError, AppResult};
+
 const APP_NAME: &str = "tmper";
 
 // Only the non-test branches below resolve real XDG locations; under
@@ -77,6 +79,61 @@ pub fn state_dir() -> PathBuf {
             })
             .unwrap_or_else(|| home_fallback(".local/state"))
     }
+}
+
+/// Runtime directory: `$TMPER_RUNTIME_DIR`, else `$XDG_RUNTIME_DIR/tmper`,
+/// else `state_dir()/run`.
+///
+/// This is where the daemon's socket lives. `XDG_RUNTIME_DIR` is per-user and
+/// already mode 0700, which is what makes it the right home for a socket that
+/// takes orders to play audio; the `state_dir()/run` fallback exists for
+/// sessions that have no runtime dir at all (a bare ssh login, some service
+/// managers), and is created 0700 explicitly because nothing else guarantees it.
+pub fn runtime_dir() -> PathBuf {
+    #[cfg(test)]
+    {
+        test_root().join("run")
+    }
+    #[cfg(not(test))]
+    {
+        pick_runtime_dir(
+            env_path("TMPER_RUNTIME_DIR"),
+            env_path("XDG_RUNTIME_DIR").map(with_app_name),
+            state_dir().join("run"),
+        )
+    }
+}
+
+/// The first of the candidates that is set. Split out from [`runtime_dir`]
+/// because the function that reads the environment is `#[cfg(not(test))]` and
+/// therefore never runs under `cargo test` — the branch order would otherwise
+/// be untested.
+fn pick_runtime_dir(
+    override_dir: Option<PathBuf>,
+    xdg: Option<PathBuf>,
+    fallback: PathBuf,
+) -> PathBuf {
+    override_dir.or(xdg).unwrap_or(fallback)
+}
+
+/// Path of the daemon's socket. Its directory must exist first
+/// ([`ensure_runtime_dir`]); the socket itself is created by the daemon.
+pub fn socket_path() -> PathBuf {
+    runtime_dir().join("socket")
+}
+
+/// Create [`runtime_dir`] if absent, mode 0700, and return it.
+pub fn ensure_runtime_dir() -> AppResult<PathBuf> {
+    let dir = runtime_dir();
+    if !dir.exists() {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .map_err(|e| AppError::Ipc(format!("failed to create {dir:?}: {e}")))?;
+    }
+    Ok(dir)
 }
 
 /// Source-tree root used only to migrate pre-XDG installations.
@@ -241,5 +298,36 @@ mod tests {
         assert_eq!(config_dir(), root.join("config"));
         assert_eq!(data_dir(), root.join("data"));
         assert_eq!(state_dir(), root.join("state"));
+        assert_eq!(runtime_dir(), root.join("run"));
+    }
+
+    /// The socket lives in the runtime dir, and the test env var wins over the
+    /// XDG one (a portable install overrides both).
+    #[test]
+    fn the_runtime_dir_prefers_the_override_then_xdg_then_state() {
+        let fallback = PathBuf::from("/state/run");
+        assert_eq!(
+            pick_runtime_dir(Some(PathBuf::from("/override")), None, fallback.clone()),
+            PathBuf::from("/override")
+        );
+        assert_eq!(
+            pick_runtime_dir(None, Some(PathBuf::from("/xdg/tmper")), fallback.clone()),
+            PathBuf::from("/xdg/tmper")
+        );
+        assert_eq!(pick_runtime_dir(None, None, fallback.clone()), fallback);
+    }
+
+    #[test]
+    fn the_socket_lives_in_the_runtime_dir() {
+        assert_eq!(socket_path(), runtime_dir().join("socket"));
+    }
+
+    #[test]
+    fn ensure_runtime_dir_creates_it_once() {
+        let dir = ensure_runtime_dir().expect("create");
+        assert_eq!(dir, runtime_dir());
+        assert!(dir.is_dir());
+        // Idempotent: a second call is a no-op, not an error.
+        assert_eq!(ensure_runtime_dir().expect("create"), dir);
     }
 }

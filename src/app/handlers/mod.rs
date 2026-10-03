@@ -473,8 +473,14 @@ impl App {
         match cmd {
             crate::input::command::Command::Quit => {
                 // Leaving the TUI is not stopping the music: the player is a
-                // separate process, and it stays. `:quit!` is the one that
-                // takes the daemon down with it.
+                // separate process, and it stays.
+                self.should_quit = true;
+            }
+            crate::input::command::Command::QuitAll => {
+                // The bang: take the player down too. Leaving is immediate
+                // rather than waiting for the daemon's `Bye`, because the user
+                // asked for the TUI to go and a round trip is not owed them.
+                self.dispatch(Request::Shutdown);
                 self.should_quit = true;
             }
             crate::input::command::Command::Help => {
@@ -1082,13 +1088,32 @@ mod tests {
     }
 
     #[test]
-    fn command_quit_requests_shutdown() {
+    fn command_quit_leaves_the_player_alone() {
         let mut app = test_app();
         assert!(!app.should_quit);
 
         run_command(&mut app, "quit");
 
         assert!(app.should_quit, ":quit must end the session");
+        assert!(
+            !app.player().should_shutdown(),
+            "and it must not take the music with it"
+        );
+    }
+
+    /// `:quit!` is the one that stops the player as well. The daemon acts on
+    /// it; the local handle here is the same code path.
+    #[test]
+    fn command_quit_all_stops_the_player_too() {
+        let mut app = test_app();
+
+        run_command(&mut app, "quit!");
+
+        assert!(app.should_quit);
+        assert!(
+            app.player().should_shutdown(),
+            ":quit! must stop the player, not just the TUI"
+        );
     }
 
     #[test]

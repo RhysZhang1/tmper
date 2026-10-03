@@ -16,6 +16,11 @@ pub enum AppError {
 
     #[error("Lyrics error: {0}")]
     Lyrics(String),
+
+    /// Talking to (or starting) the daemon: connect refused, handshake
+    /// mismatch, a socket that answers with nonsense.
+    #[error("IPC error: {0}")]
+    Ipc(String),
 }
 
 pub type AppResult<T> = anyhow::Result<T>;

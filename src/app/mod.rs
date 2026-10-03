@@ -104,9 +104,15 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(config: &Config) -> crate::error::AppResult<Self> {
-        let player = crate::player::Player::new(config)?;
-        Self::with_player(config, Box::new(handle::LocalHandle::new(player)))
+    /// The shipped TUI: the player is a process of its own, started on demand
+    /// and outliving this one.
+    ///
+    /// Everything the TUI used to do to an `AudioEngine` it now asks for over a
+    /// socket, which is why constructing one opens no audio device — a second
+    /// TUI attaches to the player that is already playing.
+    pub async fn connect(config: &Config) -> crate::error::AppResult<Self> {
+        let player = handle::DaemonHandle::connect_or_spawn().await?;
+        Self::with_player(config, Box::new(player))
     }
 
     /// Device-free app for tests: the player is in-process but silent.
@@ -351,7 +357,7 @@ impl App {
         }
         self.load_library_paths();
         self.load_playlists();
-        if let Some(Command::Play { file }) = cli.command {
+        if let Some(Command::Play { file: Some(file) }) = cli.command {
             self.dispatch(Request::Play { path: file });
         }
         // The visualizer stream is subscription-based: nothing computes a

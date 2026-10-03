@@ -11,8 +11,15 @@
 //! latency aside. A second, "synchronous" path for tests would make green mean
 //! nothing.
 
-use crate::error::AppResult;
-use crate::ipc::proto::{Event, Request};
+use std::time::Duration;
+
+use tokio::io::BufReader;
+use tokio::sync::mpsc;
+
+use crate::constants::runtime;
+use crate::error::{AppError, AppResult};
+use crate::ipc::proto::{Event, NoticeLevel, Request, PROTOCOL_VERSION};
+#[cfg(test)]
 use crate::player::Player;
 
 /// A player the TUI can talk to, wherever it lives.
@@ -73,18 +80,25 @@ pub trait PlayerHandle {
 
 /// The in-process player: the whole engine, queue and policy, right here.
 ///
-/// Used by tests, and by any future `tmper --standalone`; the shipped TUI uses
-/// the socket handle so the music outlives it.
+/// Only the tests build one. The shipped TUI uses the socket handle, because
+/// the whole point of the split is that the music outlives the window — and an
+/// in-process player cannot sound after the process that owns it is gone. It
+/// stays because it is what keeps ~150 app tests synchronous, and because the
+/// daemon's own tests would otherwise have no way to drive a player without a
+/// socket.
+#[cfg(test)]
 pub struct LocalHandle {
     player: Player,
 }
 
+#[cfg(test)]
 impl LocalHandle {
     pub fn new(player: Player) -> Self {
         Self { player }
     }
 }
 
+#[cfg(test)]
 impl PlayerHandle for LocalHandle {
     fn dispatch(&mut self, request: Request) -> Vec<Event> {
         self.player.execute(request)
@@ -114,15 +128,218 @@ impl PlayerHandle for LocalHandle {
         Ok(())
     }
 
-    #[cfg(test)]
     fn local(&self) -> Option<&Player> {
         Some(&self.player)
     }
 
-    #[cfg(test)]
     fn local_mut(&mut self) -> Option<&mut Player> {
         Some(&mut self.player)
     }
+}
+
+/// The socket client: the player is in another process, and this is the end of
+/// the wire that holds the TUI's end of it.
+///
+/// Neither half of the connection is ever touched from here. Reading is a task
+/// that fills [`DaemonHandle::inbox`]; writing is a task fed by
+/// [`DaemonHandle::outbox`]. That is what lets [`PlayerHandle::dispatch`] stay
+/// synchronous — it is called from a key handler, which cannot wait, and a
+/// socket write to a daemon that has stopped reading would be exactly the wait
+/// this design exists to avoid.
+pub struct DaemonHandle {
+    outbox: mpsc::Sender<Request>,
+    inbox: mpsc::Receiver<Event>,
+}
+
+impl DaemonHandle {
+    /// Connect to a running daemon. Fails if there is none — use
+    /// [`DaemonHandle::connect_or_spawn`] to start one.
+    pub async fn connect() -> AppResult<Self> {
+        let socket = crate::paths::socket_path();
+        let stream = std::os::unix::net::UnixStream::connect(&socket).map_err(|e| {
+            AppError::Ipc(format!(
+                "no player is running at {} ({e})",
+                socket.display()
+            ))
+        })?;
+
+        // The handshake is the one exchange that blocks, and it happens before
+        // there is a TUI to block: a peer that accepts a connection and then
+        // says nothing must not turn into a TUI that never draws. Everything
+        // after this point is a task.
+        stream
+            .set_read_timeout(Some(Duration::from_millis(
+                runtime::DAEMON_HELLO_TIMEOUT_MS,
+            )))
+            .map_err(ipc_error)?;
+        let mut stream = stream;
+        crate::ipc::write_message(
+            &mut stream,
+            &Request::Hello {
+                proto: PROTOCOL_VERSION,
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            },
+        )
+        .map_err(ipc_error)?;
+        let mut greeting = std::io::BufReader::new(&stream);
+        let welcome: Option<Event> = crate::ipc::read_message(&mut greeting).map_err(ipc_error)?;
+        drop(greeting);
+
+        match welcome {
+            Some(Event::Welcome { proto, .. }) if proto == PROTOCOL_VERSION => {}
+            Some(Event::Welcome { proto, .. }) => {
+                return Err(AppError::Ipc(format!(
+                    "the player speaks protocol {proto}; this client speaks {PROTOCOL_VERSION}"
+                ))
+                .into());
+            }
+            // A daemon that refused us sends the reason in words; passing it
+            // on is the difference between a user who can fix it and one who
+            // cannot.
+            Some(Event::Notice { message, .. }) => return Err(AppError::Ipc(message).into()),
+            other => {
+                return Err(AppError::Ipc(format!("unexpected greeting: {other:?}")).into());
+            }
+        }
+
+        stream.set_read_timeout(None).map_err(ipc_error)?;
+        stream.set_nonblocking(true).map_err(ipc_error)?;
+        let stream = tokio::net::UnixStream::from_std(stream).map_err(ipc_error)?;
+        let (read_half, write_half) = stream.into_split();
+
+        let (outbox, outbox_rx) = mpsc::channel::<Request>(runtime::DAEMON_CLIENT_QUEUE);
+        tokio::spawn(write_requests(write_half, outbox_rx));
+
+        // Bounded, and deliberately the same bound the daemon applies on its
+        // side: a client that stops draining its inbox applies backpressure
+        // all the way to the daemon's mailbox, which is what makes "this
+        // client is too far behind" a judgement both ends agree on.
+        let (inbox_tx, inbox) = mpsc::channel::<Event>(runtime::DAEMON_CLIENT_QUEUE);
+        tokio::spawn(read_events(read_half, inbox_tx));
+
+        Ok(Self { outbox, inbox })
+    }
+
+    /// Connect to a running daemon, starting one if there is none.
+    ///
+    /// Bounded on purpose: a player that cannot come up — no sound card, a
+    /// socket it cannot bind — has to surface as an error the user can read,
+    /// not as a TUI that hangs on a blank screen.
+    pub async fn connect_or_spawn() -> AppResult<Self> {
+        if let Ok(handle) = Self::connect().await {
+            return Ok(handle);
+        }
+        crate::daemon::spawn_detached()?;
+
+        let deadline =
+            std::time::Instant::now() + Duration::from_millis(runtime::DAEMON_START_TIMEOUT_MS);
+        let mut last = None;
+        while std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(runtime::DAEMON_CONNECT_RETRY_MS)).await;
+            match Self::connect().await {
+                Ok(handle) => return Ok(handle),
+                Err(error) => last = Some(error),
+            }
+        }
+        Err(AppError::Ipc(format!(
+            "the player did not start within {}s ({}) — see {}",
+            runtime::DAEMON_START_TIMEOUT_MS / 1000,
+            last.map(|e| e.to_string()).unwrap_or_default(),
+            crate::paths::state_dir().join("tmper-daemon.log").display()
+        ))
+        .into())
+    }
+
+    /// The next event, waiting for it. For the one-shot verbs, which have
+    /// nothing else to do while the daemon answers.
+    pub async fn next_event(&mut self) -> Option<Event> {
+        self.inbox.recv().await
+    }
+}
+
+impl PlayerHandle for DaemonHandle {
+    fn dispatch(&mut self, request: Request) -> Vec<Event> {
+        // A full outbox means the daemon has stopped reading. Dropping the
+        // command is the honest outcome: the alternative is blocking the key
+        // handler on a process that may never come back.
+        if self.outbox.try_send(request).is_err() {
+            tracing::warn!("The player is not taking commands");
+        }
+        Vec::new()
+    }
+
+    fn poll(&mut self) -> Vec<Event> {
+        let mut events = Vec::new();
+        while let Ok(event) = self.inbox.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    /// The daemon has its own clock and runs it whether or not anyone is
+    /// attached; a client ticking one would be a second clock to keep in step.
+    fn tick(&mut self) -> Vec<Event> {
+        Vec::new()
+    }
+}
+
+/// Write requests until the daemon stops listening.
+async fn write_requests(
+    mut writer: tokio::net::unix::OwnedWriteHalf,
+    mut outbox: mpsc::Receiver<Request>,
+) {
+    while let Some(request) = outbox.recv().await {
+        if crate::ipc::write_message_async(&mut writer, &request)
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
+/// Read events until the daemon is gone, and report that as an event.
+///
+/// A client whose player has died has nothing left to control: the `Bye` tells
+/// [`crate::app::App`] to leave, and the notice in front of it says why, which
+/// is the difference between a TUI that vanished and one that explained
+/// itself.
+async fn read_events(read_half: tokio::net::unix::OwnedReadHalf, inbox: mpsc::Sender<Event>) {
+    let mut reader = BufReader::new(read_half);
+    loop {
+        match crate::ipc::read_message_async::<_, Event>(&mut reader).await {
+            Ok(Some(event)) => {
+                if inbox.send(event).await.is_err() {
+                    break;
+                }
+            }
+            Ok(None) => {
+                let _ = inbox
+                    .send(Event::Notice {
+                        level: NoticeLevel::Error,
+                        message: "The player has gone; restart tmper to reconnect".into(),
+                    })
+                    .await;
+                let _ = inbox.send(Event::Bye).await;
+                break;
+            }
+            Err(error) => {
+                tracing::warn!("Lost the player connection: {error}");
+                let _ = inbox
+                    .send(Event::Notice {
+                        level: NoticeLevel::Error,
+                        message: format!("Lost the player connection: {error}"),
+                    })
+                    .await;
+                let _ = inbox.send(Event::Bye).await;
+                break;
+            }
+        }
+    }
+}
+
+fn ipc_error(error: std::io::Error) -> crate::error::AppError {
+    AppError::Ipc(error.to_string())
 }
 
 #[cfg(test)]
