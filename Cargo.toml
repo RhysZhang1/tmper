@@ -45,3 +45,9 @@ icy_sixel = "0.5"
 # poll(2) for the terminal cell-size probe: waiting on the tty *without*
 # consuming from it is the whole point, and std has no timeout-aware read.
 libc = "0.2"
+# MPRIS2, so Plasma's media widget and the media keys can drive the daemon.
+# Server-side only, over zbus (already the D-Bus stack on this machine); the
+# `tokio` feature is required because the daemon's runtime is tokio's, not
+# zbus's default async-io. Its absence is not an error — no session bus, no
+# widget, music carries on (see `player/mpris.rs`).
+mpris-server = { version = "0.10.0", features = ["tokio"] }

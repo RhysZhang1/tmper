@@ -186,6 +186,7 @@ mod tests {
             queue_rev: 4,
             lyrics_offset_ms: 0,
             active_playlist: None,
+            cover_path: None,
         }
     }
 

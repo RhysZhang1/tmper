@@ -81,6 +81,26 @@ pub fn state_dir() -> PathBuf {
     }
 }
 
+/// Cache directory: `$TMPER_CACHE_DIR`, else `$XDG_CACHE_HOME/tmper`
+/// (usually `~/.cache/tmper`).
+///
+/// Holds the cover art MPRIS points `mpris:artUrl` at. A cache, in the XDG
+/// sense: everything in it is derived from something else and can be deleted
+/// with no loss, which is exactly why it does not belong in the state
+/// directory next to `state.json`.
+pub fn cache_dir() -> PathBuf {
+    #[cfg(test)]
+    {
+        test_root().join("cache")
+    }
+    #[cfg(not(test))]
+    {
+        env_path("TMPER_CACHE_DIR")
+            .or_else(|| dirs::cache_dir().map(with_app_name))
+            .unwrap_or_else(|| home_fallback(".cache"))
+    }
+}
+
 /// Runtime directory: `$TMPER_RUNTIME_DIR`, else `$XDG_RUNTIME_DIR/tmper`,
 /// else `state_dir()/run`.
 ///
@@ -299,6 +319,7 @@ mod tests {
         assert_eq!(config_dir(), root.join("config"));
         assert_eq!(data_dir(), root.join("data"));
         assert_eq!(state_dir(), root.join("state"));
+        assert_eq!(cache_dir(), root.join("cache"));
         assert_eq!(runtime_dir(), root.join("run"));
     }
 

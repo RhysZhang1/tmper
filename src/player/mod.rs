@@ -7,8 +7,10 @@
 //! and the client's in-process handle both drive this same function, so the
 //! tested path and the shipped path are the same path.
 
+pub mod cover;
 pub mod fft;
 pub mod library;
+pub mod mpris;
 pub mod persistence;
 pub mod playlists;
 
@@ -36,6 +38,10 @@ struct NowPlaying {
     year: String,
     codec: String,
     duration_secs: f64,
+    /// Where this track's cover art was cached for the desktop to fetch, if
+    /// the tags carried any. Read off the file when it is started, because
+    /// that is the only moment the bytes are in hand.
+    cover_path: Option<PathBuf>,
 }
 
 impl NowPlaying {
@@ -55,6 +61,7 @@ impl NowPlaying {
             year: String::new(),
             codec: String::new(),
             duration_secs: track.duration_secs,
+            cover_path: None,
         }
     }
 }
@@ -410,6 +417,7 @@ impl Player {
                 .duration_secs()
                 .or_else(|| now.map(|n| n.duration_secs))
                 .unwrap_or(0.0),
+            cover_path: now.and_then(|n| n.cover_path.clone()),
             position_secs: self.position_secs(),
             volume: self.volume,
             repeat: self.repeat,
@@ -658,6 +666,14 @@ impl Player {
 
         match self.engine.play_file_at(path, offset_secs) {
             Ok(()) => {
+                // The cover goes to disk here and nowhere else: these bytes
+                // came off the tags a moment ago, and the only other reader of
+                // them is a media widget in another process, which wants a URL
+                // rather than a payload.
+                let cover_path = info
+                    .cover_art
+                    .as_deref()
+                    .and_then(|bytes| cover::store(&crate::paths::cache_dir(), &info.path, bytes));
                 self.now_playing = Some(NowPlaying {
                     path: info.path,
                     title,
@@ -667,6 +683,7 @@ impl Player {
                     year: info.year.map(|y| y.to_string()).unwrap_or_default(),
                     codec: info.codec,
                     duration_secs,
+                    cover_path,
                 });
                 self.engine.set_volume(self.volume);
                 tracing::info!("Now playing: {path:?}");
@@ -1301,6 +1318,7 @@ mod tests {
             year: String::new(),
             codec: "wav".into(),
             duration_secs: 1.0,
+            cover_path: None,
         }
     }
 

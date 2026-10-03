@@ -367,6 +367,15 @@ pub struct StateSnapshot {
     pub position_secs: f64,
     pub volume: f32,
     pub repeat: RepeatMode,
+    /// Where the daemon cached this track's cover art, when it has any.
+    ///
+    /// A path rather than bytes: the cache file exists for the desktop's
+    /// benefit (`mpris:artUrl` has to be a URL) and a client that wants the
+    /// picture can open the same file — the cover never has to cross the
+    /// socket. `None` covers both "no cover" and "a restored session, whose
+    /// tags have not been read yet".
+    #[serde(default)]
+    pub cover_path: Option<PathBuf>,
     /// Index into the queue, if the current track is in it.
     pub playing_index: Option<usize>,
     pub queue_rev: u64,
@@ -392,6 +401,7 @@ impl Default for StateSnapshot {
             position_secs: 0.0,
             volume: 1.0,
             repeat: RepeatMode::Sequential,
+            cover_path: None,
             playing_index: None,
             queue_rev: 0,
             lyrics_offset_ms: 0,
@@ -514,6 +524,7 @@ mod tests {
                 position_secs: 12.25,
                 volume: 0.8,
                 repeat: RepeatMode::Shuffle,
+                cover_path: Some(PathBuf::from("/cache/abc.png")),
                 playing_index: Some(3),
                 queue_rev: 7,
                 lyrics_offset_ms: -500,

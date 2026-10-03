@@ -33,6 +33,7 @@ use crate::error::{AppError, AppResult};
 use crate::ipc::proto::{Event, NoticeLevel, Request, PROTOCOL_VERSION};
 use crate::ipc::{read_message_async, write_message_async};
 use crate::paths;
+use crate::player::mpris;
 use crate::player::Player;
 
 /// What a connection task tells the loop.
@@ -108,6 +109,10 @@ pub struct Daemon {
     /// When the daemon first found itself with nothing to do. Cleared the
     /// moment there is a reason to stay.
     idle_since: Option<Instant>,
+    /// The desktop's view of the player, when there is a session bus to tell.
+    /// Absent on a machine with no desktop, in tests, and whenever the bus
+    /// refused the name — none of which is a reason to stop playing music.
+    mpris: Option<mpris::Handle>,
 }
 
 /// Give the player's scanner a runtime to walk on.
@@ -134,6 +139,7 @@ impl Daemon {
             clients: HashMap::new(),
             next_id: 0,
             idle_since: None,
+            mpris: None,
         })
     }
 
@@ -146,7 +152,15 @@ impl Daemon {
             clients: HashMap::new(),
             next_id: 0,
             idle_since: None,
+            mpris: None,
         }
+    }
+
+    /// Report to the desktop from here on. Called by [`run`] once the bus has
+    /// answered; a test attaches nothing, and the routing below is then a
+    /// no-op rather than a branch.
+    pub fn attach_mpris(&mut self, handle: mpris::Handle) {
+        self.mpris = Some(handle);
     }
 
     /// Claim the id for a connection that has not finished its handshake yet.
@@ -229,6 +243,20 @@ impl Daemon {
         }
     }
 
+    /// Apply one command from the desktop bus.
+    ///
+    /// The same path a client's command takes, minus the client: MPRIS is not
+    /// attached, so it has no mailbox to fill and no id — everything it causes
+    /// is routed to whoever *is* attached, exactly as if a key had been
+    /// pressed.
+    pub fn handle_mpris(&mut self, request: Request) {
+        self.apply_to_player(request);
+
+        if self.player.should_shutdown() {
+            self.broadcast(Event::Bye);
+        }
+    }
+
     /// Advance the player's clock and pass on what it produced.
     pub fn tick(&mut self) {
         for event in self.player.tick() {
@@ -270,9 +298,21 @@ impl Daemon {
     // ── Plumbing ──
 
     /// Hand a command to the player and route whatever it produced.
+    ///
+    /// The seek is the one command whose *result* is invisible to a watcher:
+    /// a track change is in the metadata and a pause is in the status, but a
+    /// jump leaves every property exactly as it was. MPRIS has a separate
+    /// signal for precisely that, so it is sent after the state it applies to
+    /// — a client that then re-read `Position` gets the new one.
     fn apply_to_player(&mut self, request: Request) {
+        let seek = matches!(request, Request::SeekRelative { .. });
         for event in self.player.execute(request) {
             self.route(event);
+        }
+        if seek {
+            if let Some(mpris) = self.mpris.as_ref() {
+                mpris.seeked(self.player.position_secs());
+            }
         }
     }
 
@@ -281,6 +321,12 @@ impl Daemon {
     }
 
     fn route(&mut self, event: Event) {
+        // The desktop hears about a snapshot the same way a client does, and
+        // from the same place: the state the widget shows and the state the
+        // TUI shows are one state, published once.
+        if let (Event::Snapshot(snapshot), Some(mpris)) = (&event, self.mpris.as_ref()) {
+            mpris.apply(snapshot);
+        }
         let spectrum = matches!(event, Event::Visualizer { .. });
         self.clients.retain(|id, client| {
             if spectrum && !client.visualizer {
@@ -331,6 +377,17 @@ pub async fn run() -> AppResult<()> {
     // from the process umask, which is not necessarily anything.
     let _ = std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600));
 
+    // After the socket, and never fatally: the desktop is a bonus, and a
+    // session bus that will not answer must not be able to keep the player
+    // from starting.
+    let mut from_mpris = match mpris::start().await {
+        Some((handle, requests)) => {
+            daemon.attach_mpris(handle);
+            Some(requests)
+        }
+        None => None,
+    };
+
     tracing::info!(
         "tmper daemon listening on {socket:?} (pid {})",
         std::process::id()
@@ -361,6 +418,7 @@ pub async fn run() -> AppResult<()> {
                 FromClient::Request { id, request } => daemon.handle(id, request),
                 FromClient::Gone { id } => daemon.client_left(id),
             },
+            Some(request) = desktop_command(&mut from_mpris) => daemon.handle_mpris(request),
             _ = ticker.tick() => daemon.tick(),
         }
 
@@ -375,6 +433,20 @@ pub async fn run() -> AppResult<()> {
     // daemon's job because the daemon is what put it there.
     let _ = std::fs::remove_file(&socket);
     Ok(())
+}
+
+/// The next command from the desktop, or a future that never resolves.
+///
+/// `select!` needs an arm that can be disarmed, and an `Option<Receiver>` is
+/// how that is spelled: with no bus there is nothing to receive from, and
+/// `pending` is a branch that simply never fires. A `Receiver` closed by its
+/// sender ends the stream, which is the same thing as having no bus — the arm
+/// stops firing for good.
+async fn desktop_command(rx: &mut Option<mpsc::UnboundedReceiver<Request>>) -> Option<Request> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Start a daemon as a process of its own.
