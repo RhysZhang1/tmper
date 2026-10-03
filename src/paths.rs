@@ -37,9 +37,37 @@ pub fn project_root() -> PathBuf {
 }
 
 pub fn data_dir() -> PathBuf {
-    project_root().join("data")
+    #[cfg(test)]
+    {
+        test_root().join("data")
+    }
+    #[cfg(not(test))]
+    {
+        project_root().join("data")
+    }
 }
 
 pub fn config_dir() -> PathBuf {
-    project_root().join("config")
+    #[cfg(test)]
+    {
+        test_root().join("config")
+    }
+    #[cfg(not(test))]
+    {
+        project_root().join("config")
+    }
+}
+
+/// Test-only root for runtime data and config. Handler tests exercise
+/// `save_playlists` / `save_library_paths` / `write_config` / M3U export,
+/// which would otherwise clobber the developer's real `data/` and
+/// `config/config.toml`. Redirecting to a per-process temp dir keeps the
+/// suite side-effect-free. `project_root()` is intentionally NOT overridden —
+/// theme loading and fixtures still resolve against the real tree.
+#[cfg(test)]
+fn test_root() -> std::path::PathBuf {
+    use std::sync::OnceLock;
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+    ROOT.get_or_init(|| std::env::temp_dir().join(format!("tmper-tests-{}", std::process::id())))
+        .clone()
 }

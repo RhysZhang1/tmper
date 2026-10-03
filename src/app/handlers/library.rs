@@ -297,3 +297,336 @@ impl App {
         s.scroll_tracks = 0;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::handlers::test_support::test_app;
+    use crate::library::database::LibraryDb;
+    use crate::ui::views::library_view::LibraryPanel;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::path::PathBuf;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        app.handle_library_key(&key(code));
+    }
+
+    fn press_char(app: &mut App, c: char) {
+        press(app, KeyCode::Char(c));
+    }
+
+    fn insert_track(db: &LibraryDb, path: &str, title: &str, artist: &str, album: &str) {
+        db.upsert(
+            path,
+            title,
+            Some(artist),
+            Some(album),
+            None,
+            Some(1),
+            Some(1),
+            Some("Rock"),
+            Some(2024),
+            200.0,
+            320,
+            44100,
+            2,
+            "FLAC",
+            10000,
+            1000,
+        )
+        .expect("upsert failed");
+    }
+
+    fn seed_memory_library(app: &mut App) {
+        app.library_db = LibraryDb::open_memory().expect("open memory db");
+    }
+
+    // ── Focus navigation ──
+
+    #[test]
+    fn test_l_focus_moves_right_and_clamps() {
+        let mut app = test_app();
+        assert_eq!(app.ui_state.library_state.focused, LibraryPanel::Artists);
+        press_char(&mut app, 'l');
+        assert_eq!(app.ui_state.library_state.focused, LibraryPanel::Albums);
+        press_char(&mut app, 'l');
+        assert_eq!(app.ui_state.library_state.focused, LibraryPanel::Tracks);
+        press_char(&mut app, 'l'); // clamps at Tracks
+        assert_eq!(app.ui_state.library_state.focused, LibraryPanel::Tracks);
+        // Tab behaves like right-arrow
+        app.ui_state.library_state.focused = LibraryPanel::Albums;
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.ui_state.library_state.focused, LibraryPanel::Tracks);
+    }
+
+    #[test]
+    fn test_h_focus_moves_left_and_clamps() {
+        let mut app = test_app();
+        app.ui_state.library_state.focused = LibraryPanel::Tracks;
+        press_char(&mut app, 'h');
+        assert_eq!(app.ui_state.library_state.focused, LibraryPanel::Albums);
+        press_char(&mut app, 'h');
+        assert_eq!(app.ui_state.library_state.focused, LibraryPanel::Artists);
+        press_char(&mut app, 'h'); // clamps at Artists
+        assert_eq!(app.ui_state.library_state.focused, LibraryPanel::Artists);
+    }
+
+    // ── Selection navigation ──
+
+    #[test]
+    fn test_j_navigates_artists_and_clamps() {
+        let mut app = test_app();
+        seed_memory_library(&mut app);
+        {
+            let s = &mut app.ui_state.library_state;
+            s.artists = vec!["A".into(), "B".into(), "C".into()];
+        }
+        press_char(&mut app, 'j');
+        assert_eq!(app.ui_state.library_state.artist_index, 1);
+        press_char(&mut app, 'j');
+        assert_eq!(app.ui_state.library_state.artist_index, 2);
+        press_char(&mut app, 'j'); // clamp
+        assert_eq!(app.ui_state.library_state.artist_index, 2);
+    }
+
+    #[test]
+    fn test_k_navigates_artists_and_saturates() {
+        let mut app = test_app();
+        seed_memory_library(&mut app);
+        {
+            let s = &mut app.ui_state.library_state;
+            s.artists = vec!["A".into(), "B".into(), "C".into()];
+            s.artist_index = 2;
+        }
+        press_char(&mut app, 'k');
+        assert_eq!(app.ui_state.library_state.artist_index, 1);
+        press_char(&mut app, 'k');
+        assert_eq!(app.ui_state.library_state.artist_index, 0);
+        press_char(&mut app, 'k'); // saturate
+        assert_eq!(app.ui_state.library_state.artist_index, 0);
+    }
+
+    #[test]
+    fn test_down_key_moves_tracks_selection() {
+        let mut app = test_app();
+        {
+            let s = &mut app.ui_state.library_state;
+            s.focused = LibraryPanel::Tracks;
+            s.track_paths = vec!["/a".into(), "/b".into(), "/c".into()];
+        }
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.ui_state.library_state.track_index, 1);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.ui_state.library_state.track_index, 2);
+    }
+
+    // ── Search mode ──
+
+    #[test]
+    fn test_slash_enters_search_mode() {
+        let mut app = test_app();
+        press_char(&mut app, '/');
+        let s = &app.ui_state.library_state;
+        assert!(s.search_mode);
+        assert!(s.search_query.is_empty());
+    }
+
+    #[test]
+    fn test_search_typing_and_backspace() {
+        let mut app = test_app();
+        seed_memory_library(&mut app);
+        press_char(&mut app, '/');
+        press_char(&mut app, 'a');
+        press_char(&mut app, 'b');
+        assert_eq!(app.ui_state.library_state.search_query, "ab");
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.ui_state.library_state.search_query, "a");
+        // Arrows are ignored while typing.
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.ui_state.library_state.search_query, "a");
+        assert!(app.ui_state.library_state.search_mode);
+    }
+
+    #[test]
+    fn test_search_backspace_at_empty_exits() {
+        let mut app = test_app();
+        seed_memory_library(&mut app);
+        press_char(&mut app, '/');
+        press(&mut app, KeyCode::Backspace);
+        let s = &app.ui_state.library_state;
+        assert!(!s.search_mode);
+        assert_eq!(s.focused, LibraryPanel::Artists);
+        assert!(s.db_loaded); // refresh ran against the memory db
+    }
+
+    #[test]
+    fn test_search_enter_populates_tracks() {
+        let mut app = test_app();
+        seed_memory_library(&mut app);
+        insert_track(
+            &app.library_db,
+            "/music/alpha.flac",
+            "Hello World",
+            "John",
+            "Debut",
+        );
+        insert_track(
+            &app.library_db,
+            "/music/beta.flac",
+            "Goodbye",
+            "Jane",
+            "Farewell",
+        );
+
+        press_char(&mut app, '/');
+        for c in ['h', 'e', 'l', 'l', 'o'] {
+            press_char(&mut app, c);
+        }
+        press(&mut app, KeyCode::Enter);
+
+        let s = &app.ui_state.library_state;
+        assert!(!s.search_mode);
+        assert!(s.search_query.is_empty());
+        assert_eq!(s.focused, LibraryPanel::Tracks);
+        assert_eq!(s.track_paths, vec!["/music/alpha.flac".to_string()]);
+        assert_eq!(s.track_titles, vec!["Hello World  -  John".to_string()]);
+        assert_eq!(s.track_index, 0);
+    }
+
+    #[test]
+    fn test_search_enter_no_match_clears_tracks() {
+        let mut app = test_app();
+        seed_memory_library(&mut app);
+        insert_track(
+            &app.library_db,
+            "/music/alpha.flac",
+            "Hello World",
+            "John",
+            "Debut",
+        );
+
+        press_char(&mut app, '/');
+        for c in ['z', 'z', 'z'] {
+            press_char(&mut app, c);
+        }
+        press(&mut app, KeyCode::Enter);
+        let s = &app.ui_state.library_state;
+        assert!(s.track_paths.is_empty());
+        assert_eq!(s.focused, LibraryPanel::Tracks);
+    }
+
+    #[test]
+    fn test_search_empty_query_enter_is_noop() {
+        let mut app = test_app();
+        seed_memory_library(&mut app);
+        press_char(&mut app, '/');
+        press(&mut app, KeyCode::Enter); // empty query → stays in search mode
+        let s = &app.ui_state.library_state;
+        assert!(s.search_mode);
+    }
+
+    // ── clamp_scroll ──
+
+    #[test]
+    fn test_clamp_scroll_forward() {
+        let mut scroll = 0usize;
+        App::clamp_scroll(15, 100, &mut scroll);
+        assert_eq!(scroll, 6); // 15 >= 0 + 10 → 15 - 10 + 1
+    }
+
+    #[test]
+    fn test_clamp_scroll_backward() {
+        let mut scroll = 5usize;
+        App::clamp_scroll(3, 100, &mut scroll);
+        assert_eq!(scroll, 3);
+    }
+
+    #[test]
+    fn test_clamp_scroll_within_window() {
+        let mut scroll = 0usize;
+        App::clamp_scroll(4, 100, &mut scroll);
+        assert_eq!(scroll, 0);
+    }
+
+    // ── ensure_library_loaded ──
+
+    #[test]
+    fn test_ensure_library_loaded_upserts_fixture() {
+        let mut app = test_app();
+        seed_memory_library(&mut app);
+        let fixture = PathBuf::from("tests/fixtures/test.flac");
+        app.ui_state.playlist_state.library_paths = vec![fixture.clone()];
+        app.ensure_library_loaded();
+        let row = app
+            .library_db
+            .get_by_path(&fixture.to_string_lossy())
+            .unwrap();
+        assert!(row.is_some());
+        assert_eq!(row.unwrap().artist.as_deref(), Some("Test Artist"));
+        let s = &app.ui_state.library_state;
+        assert!(s.db_loaded);
+        assert_eq!(s.artists, vec!["Test Artist".to_string()]);
+    }
+
+    #[test]
+    fn test_ensure_library_loaded_dedups_paths() {
+        let mut app = test_app();
+        seed_memory_library(&mut app);
+        let fixture = PathBuf::from("tests/fixtures/test.flac");
+        // Same path in three places — must be inserted once.
+        app.ui_state.playlist_state.library_paths = vec![fixture.clone()];
+        app.ui_state.file_browser_state.library_paths = vec![fixture.clone()];
+        app.ui_state.player.tracks.push(crate::ui::TrackDisplay {
+            path: fixture.clone(),
+            title: "Test Song".into(),
+            artist: "Test Artist".into(),
+            duration_secs: 2.0,
+        });
+        app.ensure_library_loaded();
+        assert_eq!(app.library_db.count().unwrap(), 1);
+    }
+
+    // ── Enter plays track ──
+
+    #[tokio::test]
+    async fn test_enter_track_plays_fixture() {
+        let mut app = test_app();
+        seed_memory_library(&mut app);
+        let fixture = PathBuf::from("tests/fixtures/test.flac");
+        app.library_db
+            .upsert(
+                &fixture.to_string_lossy(),
+                "Test Song",
+                Some("Test Artist"),
+                Some("Test Album"),
+                None,
+                Some(3),
+                Some(1),
+                Some("Rock"),
+                Some(2024),
+                2.0,
+                0,
+                44100,
+                2,
+                "FLAC",
+                20000,
+                1000,
+            )
+            .unwrap();
+        {
+            let s = &mut app.ui_state.library_state;
+            s.focused = LibraryPanel::Tracks;
+            s.track_paths = vec![fixture.to_string_lossy().to_string()];
+        }
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.ui_state.player.playing_index, Some(0));
+        assert_eq!(app.ui_state.player.selected_index, 0);
+        // Stop the engine so the async decode task drains.
+        app.engine.stop();
+    }
+}

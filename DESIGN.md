@@ -656,9 +656,10 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 
 > 下表统计的是**测试用例数量**，不是**行覆盖率**。行覆盖率需用 `cargo llvm-cov` 单独测量
 > （见 [10.3 行覆盖率](#103-行覆盖率)）。
-> **基线（2026-08-13 实测）**：总行覆盖率 **45.09%**（函数 59.51%）。`ui/views/*` 与
-> `app/handlers/*` 的渲染/分发逻辑（player_view 440 行、help_popup 192 行等）覆盖率接近 0；
-> 音频/元数据/库层较高（engine 95%、metadata 97%、database 93%）。距 80% 目标的主要缺口在 UI 与 handler 层。
+> **现状（2026-08-13 实测）**：总行覆盖率 **77.81%**（函数 83.44%、区域 77.37%）。
+> `app/handlers/*` 87 个用例（76%–97%，playlist 97% 最高）、`ui/views/*` 28 个用例
+> （library_view 100% 最高，player_view 72% 最低）。距 80% 目标的小缺口集中在
+> `app/mod.rs`（67%）与 `ui/views/player_view.rs`（72%）的封面/歌词渲染分支。
 
 | 模块 | 测试数 | 覆盖内容 |
 |------|--------|----------|
@@ -676,8 +677,19 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 | input/command.rs | 4 | quit、theme、volume、unknown |
 | playlist.rs | — | （v3.5 后仅存 `PlaylistData` 数据模型，逻辑并入 playlist_view） |
 | app/mod.rs | 13 | 视图切换、音量、循环、加载播放、停止、命令模式、搜索（含 4 个 tokio 集成式） |
+| app/handlers/mod.rs | 22 | 键位匹配、视图分发切换、滚动 clamp、test_support 辅助（test_app/seed_settings） |
+| app/handlers/browser.rs | 14 | 焦点切换、库/文件系统导航与 clamp、Enter 进入目录/加库去重、Backspace 边界、刷新过滤排序 |
+| app/handlers/library.rs | 17 | 面板导航、搜索输入/回车/回退、clamp_scroll、库加载 upsert 与去重、Enter 播放（含 1 个 tokio 集成式） |
+| app/handlers/playlist.rs | 18 | 焦点切换、新建歌单插入模式、展开/删除/重复保护、M3U 导出、flat-model 解析、clamp |
+| app/handlers/settings.rs | 16 | 布局 19 行、j/k 导航 clamp、主题/柱数/平滑/音量/步长/封面循环、跳过行、Enter 动作、M3U 导出、config 持久化 |
+| ui/views/file_browser_view.rs | 3 | 空/填充渲染、聚焦样式 |
+| ui/views/library_view.rs | 4 | 三面板标题、数据行、搜索栏、光标闪烁 |
+| ui/views/lyrics_view.rs | 4 | 空提示、歌词+当前高亮、offset 标签、滚动保持当前行可见 |
+| ui/views/playlist_view.rs | 8 | flat-model 行数/行号/解析、styled lines（展开/输入/播放前缀）、渲染与通知弹出 |
+| ui/views/settings_view.rs | 3 | rebuild_settings 布局与配置值、渲染冒烟（含 scroll clamp） |
+| ui/views/player_view.rs | 6 | cover 块渲染（空字节/零面积/内存 PNG）、渲染冒烟、搜索命中与无匹配 |
 | ui/cover/mod.rs | 6 | 一次性发送不变量、区域重发、视图切换/隐藏/无封面清除、chafa 失败不重试（注入式 writer/encoder） |
-| **总计** | **59** | **54 单元 + 5 集成** |
+| **总计** | **174** | **168 单元 + 6 集成** |
 
 ### 10.2 运行测试
 

@@ -167,3 +167,80 @@ fn render_panel(
 
     f.render_widget(list, area);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// Render the view into a 80×24 buffer and return all cell symbols.
+    fn render(state: &LibraryState) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| render_library_view(f, f.area(), &Theme::default(), state))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        buf.content().iter().map(|c| c.symbol()).collect()
+    }
+
+    #[test]
+    fn test_render_empty_has_panel_titles() {
+        let out = render(&LibraryState::default());
+        for title in ["Artists", "Albums", "Tracks"] {
+            assert!(out.contains(title), "missing panel title {title}");
+        }
+    }
+
+    #[test]
+    fn test_render_populated_panels() {
+        let mut s = LibraryState {
+            artists: vec!["Artist A".into()],
+            albums: vec!["Album 1".into()],
+            track_paths: vec!["/a.flac".into()],
+            track_titles: vec!["Song X".into()],
+            artist_index: 0,
+            album_index: 0,
+            track_index: 0,
+            focused: LibraryPanel::Tracks,
+            scroll_artists: 0,
+            scroll_albums: 0,
+            scroll_tracks: 0,
+            db_loaded: true,
+            search_mode: false,
+            search_query: String::new(),
+        };
+        let out = render(&mut s);
+        assert!(out.contains("Artist A"), "artist row rendered");
+        assert!(out.contains("Album 1"), "album row rendered");
+        assert!(out.contains("Song X"), "track row rendered");
+    }
+
+    #[test]
+    fn test_render_search_bar() {
+        let mut s = LibraryState::default();
+        s.search_mode = true;
+        s.search_query = "abc".into();
+        let out = render(&s);
+        assert!(out.contains("abc"), "query shown in search bar");
+        assert!(out.contains("Search"), "search prompt visible");
+    }
+
+    #[test]
+    fn test_render_search_cursor_blink() {
+        // Even-length query → block cursor `|`; odd → empty (blink alternation).
+        let mut even = LibraryState::default();
+        even.search_mode = true;
+        even.search_query = "ab".into();
+        assert!(render(&even).contains("|"));
+
+        let mut odd = LibraryState::default();
+        odd.search_mode = true;
+        odd.search_query = "abc".into();
+        let out = render(&odd);
+        assert!(
+            !out.contains("abc|"),
+            "no trailing cursor for odd-length query"
+        );
+    }
+}

@@ -699,3 +699,347 @@ impl App {
     //    play_selected, next_track, prev_track, on_track_ended,
     //    start_fft, load_lyrics_for_current, sync_lyrics ──
 }
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::PathBuf;
+
+    use crate::app::App;
+    use crate::config::Config;
+    use crate::playlist::PlaylistData;
+    use crate::ui::views::settings_view::rebuild_settings;
+
+    /// Construct a real `App` backed by a real (test-isolated) audio engine.
+    pub(crate) fn test_app() -> App {
+        App::new(&Config::default()).expect("construct test App")
+    }
+
+    /// Convenience playlist for tests.
+    pub(crate) fn pl(name: &str, songs: &[&str]) -> PlaylistData {
+        PlaylistData {
+            name: name.to_string(),
+            songs: songs.iter().map(PathBuf::from).collect(),
+        }
+    }
+
+    /// Mirror `switch_view(Settings)`'s setup so settings handlers can run.
+    pub(crate) fn seed_settings(app: &mut App) {
+        rebuild_settings(
+            &mut app.ui_state.settings_state,
+            &app.config,
+            &app.key_bindings,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::handlers::test_support::{pl, test_app};
+    use crate::event::AppEvent;
+    use crate::ui::{RepeatMode, TrackDisplay, ViewMode};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        app.handle_event(AppEvent::Key(key(code)));
+    }
+
+    fn press_char(app: &mut App, c: char) {
+        press(app, KeyCode::Char(c));
+    }
+
+    fn press_ctrl(app: &mut App, code: KeyCode) {
+        app.handle_event(AppEvent::Key(ctrl(code)));
+    }
+
+    fn seed_tracks(app: &mut App, n: usize) {
+        app.ui_state.player.tracks = (0..n)
+            .map(|i| TrackDisplay {
+                path: PathBuf::from(format!("/music/track{i}.flac")),
+                title: format!("Track {i}"),
+                artist: "Artist".into(),
+                duration_secs: 3.0,
+            })
+            .collect();
+    }
+
+    // ── Global keys ──
+
+    #[test]
+    fn test_g_jumps_to_last_track() {
+        let mut app = test_app();
+        seed_tracks(&mut app, 5);
+        app.ui_state.player.selected_index = 0;
+        press_char(&mut app, 'G');
+        assert_eq!(app.ui_state.player.selected_index, 4);
+    }
+
+    #[test]
+    fn test_ctrl_d_u_half_page_scroll() {
+        let mut app = test_app();
+        seed_tracks(&mut app, 30);
+        app.ui_state.player.selected_index = 20;
+        app.ui_state.player.scroll_offset = 0;
+        // Half-page is derived from runtime::VISIBLE_ROWS (10) → 5 rows.
+        press_ctrl(&mut app, KeyCode::Char('u'));
+        assert_eq!(app.ui_state.player.selected_index, 15);
+        press_ctrl(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.ui_state.player.selected_index, 20);
+    }
+
+    #[test]
+    fn test_lyrics_offset_keys() {
+        let mut app = test_app();
+        assert_eq!(app.ui_state.lyrics.lyrics_offset_ms, 0);
+        press_char(&mut app, '[');
+        assert_eq!(app.ui_state.lyrics.lyrics_offset_ms, -500);
+        press_char(&mut app, ']');
+        assert_eq!(app.ui_state.lyrics.lyrics_offset_ms, 0);
+        press_char(&mut app, '{');
+        assert_eq!(app.ui_state.lyrics.lyrics_offset_ms, -2000);
+        press_char(&mut app, '}');
+        assert_eq!(app.ui_state.lyrics.lyrics_offset_ms, 0);
+    }
+
+    #[test]
+    fn test_ctrl_r_resets_lyrics_offset() {
+        let mut app = test_app();
+        app.ui_state.lyrics.lyrics_offset_ms = 1200;
+        press_ctrl(&mut app, KeyCode::Char('r'));
+        assert_eq!(app.ui_state.lyrics.lyrics_offset_ms, 0);
+    }
+
+    #[test]
+    fn test_slash_search_only_in_player_view() {
+        let mut app = test_app();
+        app.ui_state.view.active_view = ViewMode::Lyrics;
+        press_char(&mut app, '/');
+        assert!(!app.ui_state.search_mode);
+        app.ui_state.view.active_view = ViewMode::Player;
+        press_char(&mut app, '/');
+        assert!(app.ui_state.search_mode);
+        assert!(app.ui_state.search_query.is_empty());
+    }
+
+    // ── Remove selected ──
+
+    #[test]
+    fn test_remove_selected_adjusts_playing_index() {
+        let mut app = test_app();
+        seed_tracks(&mut app, 3);
+        app.ui_state.player.selected_index = 1;
+        app.ui_state.player.playing_index = Some(2);
+        app.handle_event(AppEvent::RemoveSelected);
+        assert_eq!(app.ui_state.player.tracks.len(), 2);
+        assert_eq!(app.ui_state.player.playing_index, Some(1));
+        assert_eq!(app.ui_state.player.selected_index, 1);
+    }
+
+    #[test]
+    fn test_remove_selected_playing_track_stops() {
+        let mut app = test_app();
+        seed_tracks(&mut app, 2);
+        app.ui_state.player.selected_index = 0;
+        app.ui_state.player.playing_index = Some(0);
+        app.ui_state.player.is_playing = true;
+        app.handle_event(AppEvent::RemoveSelected);
+        assert_eq!(app.ui_state.player.tracks.len(), 1);
+        assert_eq!(app.ui_state.player.playing_index, None);
+        assert!(!app.ui_state.player.is_playing);
+    }
+
+    #[test]
+    fn test_remove_selected_playlists_view() {
+        let mut app = test_app();
+        app.ui_state.view.active_view = ViewMode::Playlists;
+        {
+            let s = &mut app.ui_state.playlist_state;
+            s.playlists = vec![pl("Alpha", &[]), pl("Beta", &[])];
+            s.selected_playlist = 2; // line 0 = "…", 1 = Alpha, 2 = Beta
+            s.expanded_playlist = None;
+        }
+        app.handle_event(AppEvent::RemoveSelected);
+        let s = &app.ui_state.playlist_state;
+        assert_eq!(s.playlists.len(), 1);
+        assert_eq!(s.playlists[0].name, "Alpha");
+        assert_eq!(s.selected_playlist, 1);
+    }
+
+    // ── Tick ──
+
+    #[test]
+    fn test_tick_dismisses_stale_notification() {
+        let mut app = test_app();
+        app.ui_state.notification = Some(("old".into(), Instant::now() - Duration::from_secs(10)));
+        app.handle_event(AppEvent::Tick);
+        assert!(app.ui_state.notification.is_none());
+    }
+
+    #[test]
+    fn test_tick_keeps_fresh_notification() {
+        let mut app = test_app();
+        app.ui_state.notification = Some(("fresh".into(), Instant::now()));
+        app.handle_event(AppEvent::Tick);
+        assert!(app.ui_state.notification.is_some());
+    }
+
+    #[test]
+    fn test_tick_syncs_show_cover_art_flag() {
+        let mut app = test_app();
+        app.config.ui.show_cover_art = false;
+        app.ui_state.player.show_cover_art = true;
+        app.handle_event(AppEvent::Tick);
+        assert!(!app.ui_state.player.show_cover_art);
+    }
+
+    // ── Player sidebar ──
+
+    #[test]
+    fn test_sidebar_down_up_clamped() {
+        let mut app = test_app();
+        {
+            let s = &mut app.ui_state.playlist_state;
+            s.playlists = vec![pl("A", &[]), pl("B", &[])];
+            s.expanded_playlist = None;
+        }
+        app.handle_player_view_sidebar_key(&key(KeyCode::Down));
+        assert_eq!(app.ui_state.playlist_state.sidebar_selected, 1);
+        app.handle_player_view_sidebar_key(&key(KeyCode::Down));
+        assert_eq!(app.ui_state.playlist_state.sidebar_selected, 1);
+        app.handle_player_view_sidebar_key(&key(KeyCode::Up));
+        assert_eq!(app.ui_state.playlist_state.sidebar_selected, 0);
+        app.handle_player_view_sidebar_key(&key(KeyCode::Up));
+        assert_eq!(app.ui_state.playlist_state.sidebar_selected, 0);
+    }
+
+    #[test]
+    fn test_sidebar_enter_toggles_playlist_expansion() {
+        let mut app = test_app();
+        {
+            let s = &mut app.ui_state.playlist_state;
+            s.playlists = vec![pl("A", &["/a.flac"])];
+            s.expanded_playlist = None;
+            s.sidebar_selected = 0;
+        }
+        assert!(app.handle_player_view_sidebar_key(&key(KeyCode::Enter)));
+        assert_eq!(app.ui_state.playlist_state.expanded_playlist, Some(0));
+        app.handle_player_view_sidebar_key(&key(KeyCode::Enter));
+        assert_eq!(app.ui_state.playlist_state.expanded_playlist, None);
+    }
+
+    #[test]
+    fn test_sidebar_other_keys_unconsumed() {
+        let mut app = test_app();
+        assert!(!app.handle_player_view_sidebar_key(&key(KeyCode::Char('x'))));
+    }
+
+    // ── Command mode ──
+
+    #[test]
+    fn test_command_version_notification() {
+        let mut app = test_app();
+        press_char(&mut app, ':');
+        for c in "version".chars() {
+            press_char(&mut app, c);
+        }
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.ui_state.notification.as_ref().map(|(m, _)| m.as_str()),
+            Some("tmper v0.1.0")
+        );
+    }
+
+    #[test]
+    fn test_command_help_shows_overlay() {
+        let mut app = test_app();
+        press_char(&mut app, ':');
+        for c in "help".chars() {
+            press_char(&mut app, c);
+        }
+        press(&mut app, KeyCode::Enter);
+        assert!(app.ui_state.view.show_help);
+    }
+
+    #[test]
+    fn test_command_view_switches() {
+        let mut app = test_app();
+        press_char(&mut app, ':');
+        for c in "view 3".chars() {
+            press_char(&mut app, c);
+        }
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.ui_state.view.active_view, ViewMode::Lyrics);
+    }
+
+    #[test]
+    fn test_command_unknown_notification() {
+        let mut app = test_app();
+        press_char(&mut app, ':');
+        for c in "bogus".chars() {
+            press_char(&mut app, c);
+        }
+        press(&mut app, KeyCode::Enter);
+        let msg = app
+            .ui_state
+            .notification
+            .as_ref()
+            .map(|(m, _)| m.clone())
+            .unwrap_or_default();
+        assert!(msg.starts_with("Unknown command: bogus"));
+    }
+
+    #[test]
+    fn test_command_repeat_mode() {
+        let mut app = test_app();
+        press_char(&mut app, ':');
+        for c in "repeat shuffle".chars() {
+            press_char(&mut app, c);
+        }
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.ui_state.repeat_mode, RepeatMode::Shuffle);
+    }
+
+    #[test]
+    fn test_repeat_key_cycles_and_notifies() {
+        let mut app = test_app();
+        assert_eq!(app.ui_state.repeat_mode, RepeatMode::Sequential);
+        press_char(&mut app, 'r');
+        assert_eq!(app.ui_state.repeat_mode, RepeatMode::Shuffle);
+        assert!(app.ui_state.notification.is_some());
+    }
+
+    // ── key_matches ──
+
+    #[test]
+    fn test_key_matches_binding() {
+        let app = test_app();
+        let binding = app.key_bindings.play_pause.clone();
+        let k = crate::input::keymap::parse_key_str(&binding);
+        assert!(app.key_matches(&KeyEvent::new(k.code, k.modifiers), &binding));
+        assert!(!app.key_matches(&key(KeyCode::Char('z')), &binding));
+    }
+
+    #[test]
+    fn test_sidebar_line_count() {
+        let mut app = test_app();
+        {
+            let s = &mut app.ui_state.playlist_state;
+            s.playlists = vec![pl("A", &["/a", "/b"]), pl("B", &[])];
+            s.expanded_playlist = Some(0);
+        }
+        // A(1) + 2 songs + B(1) = 4
+        assert_eq!(app.sidebar_line_count(), 4);
+        app.ui_state.playlist_state.expanded_playlist = None;
+        assert_eq!(app.sidebar_line_count(), 2);
+    }
+}

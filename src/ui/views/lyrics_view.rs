@@ -78,3 +78,75 @@ pub fn render_lyrics_view(
 
     f.render_widget(para, area);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lyrics::types::{LyricLine, LyricMetadata, LyricTrack};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::time::Duration;
+
+    fn make_track(lines: &[&str]) -> LyricTrack {
+        LyricTrack {
+            metadata: LyricMetadata::default(),
+            lines: lines
+                .iter()
+                .enumerate()
+                .map(|(i, t)| LyricLine {
+                    timestamp: Duration::from_secs(i as u64),
+                    text: t.to_string(),
+                    word_timestamps: Vec::new(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Render into a 80×24 buffer and return all cell symbols.
+    fn render(track: &LyricTrack, idx: usize, offset_ms: i64) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| render_lyrics_view(f, f.area(), &Theme::default(), track, idx, offset_ms))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        buf.content().iter().map(|c| c.symbol()).collect()
+    }
+
+    #[test]
+    fn test_render_empty_shows_message() {
+        let track = make_track(&[]);
+        let out = render(&track, 0, 0);
+        assert!(out.contains("No lyrics found"));
+    }
+
+    #[test]
+    fn test_render_lyric_lines_and_current_highlight() {
+        let track = make_track(&["First line", "Second line"]);
+        let out = render(&track, 1, 0);
+        assert!(out.contains("First line"), "first lyric rendered");
+        assert!(out.contains("Second line"), "current lyric rendered");
+    }
+
+    #[test]
+    fn test_render_offset_label() {
+        let track = make_track(&["line one"]);
+        let out = render(&track, 0, 1500);
+        assert!(out.contains("offset: +1.500s"));
+    }
+
+    #[test]
+    fn test_render_scrolls_to_keep_current_visible() {
+        // A long list scrolled to the end: the last line must be rendered.
+        let mut lines = vec![];
+        for i in 0..40 {
+            lines.push(format!("line {i:02}"));
+        }
+        let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        let track = make_track(&refs);
+        let out = render(&track, 39, 0);
+        assert!(
+            out.contains("line 39"),
+            "current line rendered after scroll"
+        );
+    }
+}

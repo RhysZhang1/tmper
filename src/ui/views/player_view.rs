@@ -601,3 +601,174 @@ fn render_control_bar(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
     )));
     f.render_widget(para, area);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+    use std::path::PathBuf;
+
+    use crate::ui::views::playlist_view::PlaylistManagerState;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// A tiny in-memory 8×8 PNG.
+    fn make_png() -> Vec<u8> {
+        let img = image::RgbaImage::from_fn(8, 8, |x, y| {
+            let v = ((x + y) * 32).min(255) as u8;
+            image::Rgba([v, v, v, 255])
+        });
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        bytes
+    }
+
+    // ── cover_as_colored_lines ──
+
+    #[test]
+    fn test_cover_empty_bytes_returns_none() {
+        assert!(cover_as_colored_lines(Rect::new(0, 0, 8, 8), &[]).is_none());
+    }
+
+    #[test]
+    fn test_cover_zero_area_returns_none() {
+        let png = make_png();
+        assert!(cover_as_colored_lines(Rect::new(0, 0, 0, 0), &png).is_none());
+        assert!(cover_as_colored_lines(Rect::new(0, 0, 8, 0), &png).is_none());
+    }
+
+    #[test]
+    fn test_cover_generated_png_yields_one_line_per_row() {
+        let png = make_png();
+        let lines = cover_as_colored_lines(Rect::new(0, 0, 4, 4), &png).expect("png decodes");
+        assert_eq!(lines.len(), 4, "one text line per inner row");
+        // Every row has one span per column; all renderable (opaque image).
+        let spans: usize = lines.iter().map(|l| l.spans.len()).sum();
+        assert_eq!(spans, 4 * 4);
+    }
+
+    // ── render_player_view ──
+
+    fn base_params<'a>(
+        theme: &'a Theme,
+        cover_rect: &'a Cell<(u16, u16, u16, u16)>,
+        cache: &'a RefCell<Option<CoverLinesCache>>,
+        playlist_state: &'a PlaylistManagerState,
+        tracks: &'a [TrackDisplay],
+    ) -> PlayerViewParams<'a> {
+        PlayerViewParams {
+            theme,
+            title: "No track",
+            artist: "",
+            position: 0.0,
+            duration: 0.0,
+            volume: 0.8,
+            is_playing: false,
+            album: "",
+            genre: "",
+            year: "",
+            codec: "",
+            repeat_mode: RepeatMode::Sequential,
+            cover_art: None,
+            show_cover_art: true,
+            cover_rect,
+            cover_gen: 0,
+            cover_lines_cache: cache,
+            lyric_track: None,
+            current_lyric_index: 0,
+            visualizer_data: &[],
+            playlist_state,
+            playing_index: None,
+            tracks,
+            active_playlist: None,
+            search_active: false,
+            search_query: "",
+            selected_index: 0,
+        }
+    }
+
+    #[test]
+    fn test_render_player_view_smoke() {
+        let theme = Theme::default();
+        let cover_rect = Cell::new((0u16, 0u16, 0u16, 0u16));
+        let cache: RefCell<Option<CoverLinesCache>> = RefCell::new(None);
+        let playlist_state = PlaylistManagerState::default();
+        let params = base_params(&theme, &cover_rect, &cache, &playlist_state, &[]);
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| render_player_view(f, f.area(), &params))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let out: String = buf.content().iter().map(|c| c.symbol()).collect();
+        for needle in [
+            "Now Playing",
+            "No track",
+            "Playlists",
+            "Spectrum",
+            "No lyrics loaded",
+            "No audio data",
+            "Vol:80%",
+        ] {
+            assert!(out.contains(needle), "missing {needle:?}");
+        }
+    }
+
+    #[test]
+    fn test_render_player_view_search_results() {
+        let theme = Theme::default();
+        let cover_rect = Cell::new((0u16, 0u16, 0u16, 0u16));
+        let cache: RefCell<Option<CoverLinesCache>> = RefCell::new(None);
+        let playlist_state = PlaylistManagerState::default();
+        let tracks = vec![TrackDisplay {
+            path: PathBuf::from("/a.flac"),
+            title: "Hello World".into(),
+            artist: "John".into(),
+            duration_secs: 120.0,
+        }];
+
+        let mut params = base_params(&theme, &cover_rect, &cache, &playlist_state, &tracks);
+        params.search_active = true;
+        params.search_query = "hell";
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| render_player_view(f, f.area(), &params))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let out: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(out.contains("Search: hell"), "search header rendered");
+        assert!(out.contains("Hello World"), "matched track listed");
+    }
+
+    #[test]
+    fn test_render_player_view_no_search_matches() {
+        let theme = Theme::default();
+        let cover_rect = Cell::new((0u16, 0u16, 0u16, 0u16));
+        let cache: RefCell<Option<CoverLinesCache>> = RefCell::new(None);
+        let playlist_state = PlaylistManagerState::default();
+        let tracks = vec![TrackDisplay {
+            path: PathBuf::from("/a.flac"),
+            title: "Hello World".into(),
+            artist: "John".into(),
+            duration_secs: 120.0,
+        }];
+
+        let mut params = base_params(&theme, &cover_rect, &cache, &playlist_state, &tracks);
+        params.search_active = true;
+        params.search_query = "zzz";
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| render_player_view(f, f.area(), &params))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let out: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(out.contains("(no matches)"), "empty-state message rendered");
+    }
+}

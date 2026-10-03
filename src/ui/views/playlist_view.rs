@@ -346,3 +346,158 @@ fn render_playlists_panel(f: &mut Frame, area: Rect, theme: &Theme, state: &Play
     );
     f.render_widget(para, area);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::playlist::PlaylistData;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn pl(name: &str, songs: &[&str]) -> PlaylistData {
+        PlaylistData {
+            name: name.to_string(),
+            songs: songs.iter().map(PathBuf::from).collect(),
+        }
+    }
+
+    // ── PlaylistFlatModel ──
+
+    #[test]
+    fn test_total_lines_variants() {
+        // Empty: only the "..." row.
+        let m = PlaylistFlatModel::new(&[], None);
+        assert_eq!(m.total_lines(), 1);
+
+        // Collapsed playlists: one name row each.
+        let pls = vec![pl("A", &["/a"]), pl("B", &["/b"])];
+        let m = PlaylistFlatModel::new(&pls, None);
+        assert_eq!(m.total_lines(), 3);
+
+        // Expanded playlist with songs counts the songs.
+        let m = PlaylistFlatModel::new(&pls, Some(0));
+        assert_eq!(m.total_lines(), 4);
+
+        // Expanded empty playlist shows the "(empty)" row.
+        let empty_pls = vec![pl("A", &[])];
+        let m = PlaylistFlatModel::new(&empty_pls, Some(0));
+        assert_eq!(m.total_lines(), 3);
+    }
+
+    #[test]
+    fn test_line_of_playlist() {
+        let pls = vec![pl("A", &["/a1", "/a2"]), pl("B", &["/b1"])];
+        // Collapsed: A at 1, B at 2.
+        let m = PlaylistFlatModel::new(&pls, None);
+        assert_eq!(m.line_of_playlist(0), Some(1));
+        assert_eq!(m.line_of_playlist(1), Some(2));
+        assert_eq!(m.line_of_playlist(9), None);
+
+        // A expanded: A at 1, B at 4.
+        let m = PlaylistFlatModel::new(&pls, Some(0));
+        assert_eq!(m.line_of_playlist(1), Some(4));
+    }
+
+    #[test]
+    fn test_resolve_targets() {
+        let pls = vec![pl("A", &["/a1", "/a2"]), pl("B", &[])];
+
+        // Collapsed.
+        let m = PlaylistFlatModel::new(&pls, None);
+        assert_eq!(m.resolve(0), LineTarget::AddNew);
+        assert_eq!(m.resolve(1), LineTarget::PlaylistName(0));
+        assert_eq!(m.resolve(2), LineTarget::PlaylistName(1));
+        assert_eq!(m.resolve(99), LineTarget::AddNew); // out-of-bounds fallback
+
+        // A expanded.
+        let m = PlaylistFlatModel::new(&pls, Some(0));
+        assert_eq!(
+            m.resolve(2),
+            LineTarget::Song {
+                playlist: 0,
+                song_index: 0
+            }
+        );
+        assert_eq!(
+            m.resolve(3),
+            LineTarget::Song {
+                playlist: 0,
+                song_index: 1
+            }
+        );
+
+        // B expanded and empty → "(empty)" row.
+        let m = PlaylistFlatModel::new(&pls, Some(1));
+        assert_eq!(m.resolve(3), LineTarget::Empty(1));
+    }
+
+    // ── build_styled_lines ──
+
+    #[test]
+    fn test_build_styled_lines_default() {
+        let pls = vec![pl("A", &[])];
+        let m = PlaylistFlatModel::new(&pls, Some(0));
+        let lines = m.build_styled_lines(true, &InsertMode::Off, &Theme::default(), 0, |_| false);
+        assert_eq!(lines[0].0, "...");
+        assert_eq!(lines[1].0, "▼ A"); // expanded icon
+        assert_eq!(lines[2].0, "  (empty)");
+    }
+
+    #[test]
+    fn test_build_styled_lines_typing_mode() {
+        let m = PlaylistFlatModel::new(&[], None);
+        let lines = m.build_styled_lines(
+            true,
+            &InsertMode::Typing("My".into()),
+            &Theme::default(),
+            0,
+            |_| false,
+        );
+        assert_eq!(lines[0].0, "... My");
+    }
+
+    #[test]
+    fn test_build_styled_lines_songs_and_playing_prefix() {
+        let pls = vec![pl("A", &["/music/track-one.flac", "/music/track-two.flac"])];
+        let m = PlaylistFlatModel::new(&pls, Some(0));
+        let lines = m.build_styled_lines(true, &InsertMode::Off, &Theme::default(), 2, |p| {
+            *p == PathBuf::from("/music/track-one.flac")
+        });
+        assert_eq!(lines[1].0, "▼ A");
+        assert_eq!(lines[2].0, "◄ track-one"); // playing marker
+        assert_eq!(lines[3].0, "   track-two");
+    }
+
+    // ── render ──
+
+    #[test]
+    fn test_render_playlist_view_smoke() {
+        let mut state = PlaylistManagerState::default();
+        state.playlists = vec![pl("Chill", &["/music/a.flac"])];
+        state.expanded_playlist = Some(0);
+        state.focused = PlaylistPanel::Playlists;
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| render_playlist_view(f, f.area(), &Theme::default(), &state))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let out: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(out.contains("Chill"), "playlist name rendered");
+        assert!(out.contains("a"), "song stem rendered");
+    }
+
+    #[test]
+    fn test_render_playlist_view_notification() {
+        let mut state = PlaylistManagerState::default();
+        state.notification = Some(("已导出".into(), std::time::Instant::now()));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| render_playlist_view(f, f.area(), &Theme::default(), &state))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let out: String = buf.content().iter().map(|c| c.symbol()).collect();
+        // ratatui pads CJK chars with a continuation cell → assert per char.
+        assert!(out.contains('导'), "notification popup rendered");
+    }
+}

@@ -171,3 +171,78 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, theme: &Theme, state: &Se
     );
     f.render_widget(list, area);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::input::keymap::KeyBindings;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn render(state: &SettingsState) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| render_settings_view(f, f.area(), &Theme::default(), state))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        buf.content().iter().map(|c| c.symbol()).collect()
+    }
+
+    #[test]
+    fn test_rebuild_settings_flat_layout() {
+        let config = Config::default();
+        let keys = KeyBindings::default();
+        let mut state = SettingsState::default();
+        rebuild_settings(&mut state, &config, &keys);
+        assert_eq!(state.items.len(), 19);
+        assert_eq!(state.items[0].name, "主题");
+        assert_eq!(state.items[0].value, "tokyo-night");
+        assert_eq!(state.items[1].value, "32");
+        assert_eq!(state.items[2].value, "0.35");
+        assert_eq!(state.items[3].value, "80%");
+        assert_eq!(state.items[4].value, "5 秒");
+        assert_eq!(state.items[5].value, "是");
+        // Keybinding display rows carry non-empty default bindings.
+        assert!(!state.items[7].value.is_empty(), "keybinding row populated");
+        // Last row is the confirm row.
+        assert_eq!(state.items[18].name, "── 确认并返回 ──");
+    }
+
+    #[test]
+    fn test_rebuild_settings_reflects_config_values() {
+        let mut config = Config::default();
+        config.ui.theme = "dracula".into();
+        config.visualizer.num_bars = 64;
+        config.visualizer.smoothing = 0.55;
+        config.playback.default_volume = 0.5;
+        config.playback.seek_step_small_secs = 30;
+        config.ui.show_cover_art = false;
+        let keys = KeyBindings::default();
+        let mut state = SettingsState::default();
+        rebuild_settings(&mut state, &config, &keys);
+        assert_eq!(state.items[0].value, "dracula");
+        assert_eq!(state.items[1].value, "64");
+        assert_eq!(state.items[2].value, "0.55");
+        assert_eq!(state.items[3].value, "50%");
+        assert_eq!(state.items[4].value, "30 秒");
+        assert_eq!(state.items[5].value, "否");
+    }
+
+    #[test]
+    fn test_render_settings_smoke() {
+        let mut state = SettingsState::default();
+        rebuild_settings(&mut state, &Config::default(), &KeyBindings::default());
+        state.cursor = 0;
+        let out = render(&state);
+        // Block title and first rows render. (ratatui pads each CJK char with a
+        // continuation cell, so assert on single characters, not multi-char strings.)
+        assert!(out.contains('设'), "title rendered");
+        assert!(out.contains("tokyo-night"), "theme row rendered");
+        // Scroll clamps: cursor beyond the list end renders the last (confirm) row.
+        state.cursor = 99;
+        state.scroll = 99;
+        let out = render(&state);
+        assert!(out.contains('确'), "confirm row rendered after clamp");
+    }
+}

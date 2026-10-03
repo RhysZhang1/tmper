@@ -248,3 +248,251 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::handlers::test_support::{pl, seed_settings, test_app};
+    use crate::ui::views::settings_view::SettingItem;
+    use crate::ui::ViewMode;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        app.handle_settings_key(&key(code));
+    }
+
+    fn item(state: &SettingsState, i: usize) -> &SettingItem {
+        &state.items[i]
+    }
+
+    // ── rebuild_settings ──
+
+    #[test]
+    fn test_rebuild_settings_layout() {
+        let mut app = test_app();
+        seed_settings(&mut app);
+        let s = &app.ui_state.settings_state;
+        assert_eq!(s.items.len(), 19);
+        assert_eq!(item(s, 0).name, "主题");
+        assert_eq!(item(s, 0).value, "tokyo-night");
+        assert_eq!(item(s, 1).value, "32");
+        assert_eq!(item(s, 2).value, "0.35");
+        assert_eq!(item(s, 3).value, "80%");
+        assert_eq!(item(s, 4).value, "5 秒");
+        assert_eq!(item(s, 5).value, "是");
+    }
+
+    // ── Navigation ──
+
+    #[test]
+    fn test_j_k_navigation_clamps() {
+        let mut app = test_app();
+        seed_settings(&mut app);
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        assert_eq!(app.ui_state.settings_state.cursor, 3);
+        for _ in 0..20 {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        assert_eq!(app.ui_state.settings_state.cursor, 18); // last row
+        press(&mut app, KeyCode::Char('j')); // clamps
+        assert_eq!(app.ui_state.settings_state.cursor, 18);
+        for _ in 0..25 {
+            press(&mut app, KeyCode::Char('k'));
+        }
+        assert_eq!(app.ui_state.settings_state.cursor, 0);
+        press(&mut app, KeyCode::Char('k')); // saturates
+        assert_eq!(app.ui_state.settings_state.cursor, 0);
+    }
+
+    // ── cycle_setting forward / reverse ──
+
+    #[test]
+    fn test_cycle_theme_forward_and_back() {
+        let mut app = test_app();
+        seed_settings(&mut app);
+        app.ui_state.settings_state.cursor = 0;
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.config.ui.theme, "dracula");
+        assert_eq!(item(&app.ui_state.settings_state, 0).value, "dracula");
+        press(&mut app, KeyCode::Char('h'));
+        assert_eq!(app.config.ui.theme, "tokyo-night");
+    }
+
+    #[test]
+    fn test_cycle_theme_wraps_around() {
+        let mut app = test_app();
+        seed_settings(&mut app);
+        app.ui_state.settings_state.cursor = 0;
+        for _ in 0..5 {
+            press(&mut app, KeyCode::Char('l'));
+        }
+        assert_eq!(app.config.ui.theme, "tokyo-night"); // full cycle
+    }
+
+    #[test]
+    fn test_cycle_bars_forward_and_reverse() {
+        let mut app = test_app();
+        seed_settings(&mut app);
+        app.ui_state.settings_state.cursor = 1;
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.config.visualizer.num_bars, 40);
+        press(&mut app, KeyCode::Char('h'));
+        assert_eq!(app.config.visualizer.num_bars, 32);
+    }
+
+    #[test]
+    fn test_cycle_smoothing() {
+        let mut app = test_app();
+        seed_settings(&mut app);
+        app.ui_state.settings_state.cursor = 2;
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.config.visualizer.smoothing, 0.55);
+        assert_eq!(item(&app.ui_state.settings_state, 2).value, "0.55");
+    }
+
+    #[test]
+    fn test_cycle_volume_wraps_to_zero() {
+        let mut app = test_app();
+        seed_settings(&mut app);
+        app.ui_state.settings_state.cursor = 3;
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.config.playback.default_volume, 0.85);
+        // Force near the top of the range, then wrap back to 0.
+        app.config.playback.default_volume = 0.95;
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.config.playback.default_volume, 0.0);
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.config.playback.default_volume, 0.05);
+    }
+
+    #[test]
+    fn test_cycle_seek_step() {
+        let mut app = test_app();
+        seed_settings(&mut app);
+        app.ui_state.settings_state.cursor = 4;
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.config.playback.seek_step_small_secs, 10);
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.config.playback.seek_step_small_secs, 15);
+        assert_eq!(item(&app.ui_state.settings_state, 4).value, "15 秒");
+    }
+
+    #[test]
+    fn test_cycle_show_cover_art_toggles() {
+        let mut app = test_app();
+        seed_settings(&mut app);
+        app.ui_state.settings_state.cursor = 5;
+        assert!(app.config.ui.show_cover_art);
+        press(&mut app, KeyCode::Char('l'));
+        assert!(!app.config.ui.show_cover_art);
+        assert_eq!(item(&app.ui_state.settings_state, 5).value, "否");
+        press(&mut app, KeyCode::Char('l'));
+        assert!(app.config.ui.show_cover_art);
+    }
+
+    // ── Skip rows ──
+
+    #[test]
+    fn test_header_and_keybinding_rows_are_noops() {
+        let mut app = test_app();
+        seed_settings(&mut app);
+        // Section headers must not cycle.
+        for cursor in [6usize, 15] {
+            app.ui_state.settings_state.cursor = cursor;
+            let theme = app.config.ui.theme.clone();
+            press(&mut app, KeyCode::Char('l'));
+            assert_eq!(app.config.ui.theme, theme, "cursor {cursor} must not cycle");
+        }
+        // Keybinding display + M3U action rows must not cycle.
+        for cursor in 7..=17 {
+            app.ui_state.settings_state.cursor = cursor;
+            let bars = app.config.visualizer.num_bars;
+            press(&mut app, KeyCode::Char('l'));
+            assert_eq!(
+                app.config.visualizer.num_bars, bars,
+                "cursor {cursor} must not cycle"
+            );
+        }
+    }
+
+    // ── Enter actions ──
+
+    #[test]
+    fn test_confirm_row_returns_to_player() {
+        let mut app = test_app();
+        seed_settings(&mut app);
+        app.ui_state.view.active_view = ViewMode::Settings;
+        app.ui_state.settings_state.cursor = 18; // last (confirm) row
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.ui_state.view.active_view, ViewMode::Player);
+    }
+
+    #[test]
+    fn test_enter_header_row_is_noop() {
+        let mut app = test_app();
+        seed_settings(&mut app);
+        app.ui_state.view.active_view = ViewMode::Settings;
+        app.ui_state.settings_state.cursor = 6;
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.ui_state.view.active_view, ViewMode::Settings);
+    }
+
+    #[test]
+    fn test_enter_keybinding_row_notifies() {
+        let mut app = test_app();
+        seed_settings(&mut app);
+        app.ui_state.settings_state.cursor = 7;
+        press(&mut app, KeyCode::Enter);
+        assert!(app.ui_state.notification.is_some());
+    }
+
+    #[test]
+    fn test_enter_export_all_empty_notifies() {
+        let mut app = test_app();
+        seed_settings(&mut app);
+        app.ui_state.settings_state.cursor = 17;
+        press(&mut app, KeyCode::Enter);
+        assert!(app.ui_state.notification.is_some());
+    }
+
+    #[test]
+    fn test_enter_export_all_writes_m3u_files() {
+        let mut app = test_app();
+        seed_settings(&mut app);
+        std::fs::create_dir_all(crate::paths::data_dir()).unwrap();
+        app.ui_state.playlist_state.playlists =
+            vec![pl("P1", &["/a.flac"]), pl("P2", &["/b.flac"])];
+        app.ui_state.settings_state.cursor = 17;
+        press(&mut app, KeyCode::Enter);
+        let msg = app
+            .ui_state
+            .notification
+            .as_ref()
+            .map(|(m, _)| m.clone())
+            .unwrap_or_default();
+        assert!(msg.contains("已导出 2/2"), "unexpected: {msg}");
+        assert!(crate::paths::data_dir().join("P1.m3u").exists());
+        assert!(crate::paths::data_dir().join("P2.m3u").exists());
+        std::fs::remove_file(crate::paths::data_dir().join("P1.m3u")).ok();
+        std::fs::remove_file(crate::paths::data_dir().join("P2.m3u")).ok();
+    }
+
+    #[test]
+    fn test_enter_on_theme_cycles_and_persists() {
+        let mut app = test_app();
+        seed_settings(&mut app);
+        app.ui_state.settings_state.cursor = 0;
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.config.ui.theme, "dracula");
+        // cycle_setting persists through write_config to the test-isolated dir.
+        let path = crate::paths::config_dir().join("config.toml");
+        let content = std::fs::read_to_string(&path).expect("config written");
+        assert!(content.contains("theme = \"dracula\""));
+    }
+}

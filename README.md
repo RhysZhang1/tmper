@@ -357,7 +357,7 @@ tmper/
 ```bash
 cargo build                        # 调试编译
 cargo build --release              # 发布编译（单文件 ~7MB）
-cargo test                         # 全部测试（59 个）
+cargo test                         # 全部测试（174 个）
 cargo clippy -- -D warnings        # 代码检查
 cargo fmt --all                    # 格式化
 

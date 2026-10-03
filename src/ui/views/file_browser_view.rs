@@ -155,3 +155,62 @@ fn render_filesystem_panel(f: &mut Frame, area: Rect, theme: &Theme, state: &Fil
     );
     f.render_widget(list, area);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// Render the view into a 80×24 buffer and return all cell symbols.
+    fn render(state: &FileBrowserState) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| render_file_browser(f, f.area(), &Theme::default(), state))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        buf.content().iter().map(|c| c.symbol()).collect()
+    }
+
+    #[test]
+    fn test_render_empty_has_panel_titles() {
+        let out = render(&FileBrowserState::default());
+        assert!(out.contains(" Library "), "missing Library title");
+    }
+
+    #[test]
+    fn test_render_populated_panels() {
+        let mut state = FileBrowserState {
+            current_dir: PathBuf::from("/music"),
+            home_dir: PathBuf::from("/"),
+            scroll_library: 0,
+            scroll_fs: 0,
+            dirs: vec![PathBuf::from("/music/sub")],
+            audio_files: vec![PathBuf::from("/music/track.mp3")],
+            selected_fs_index: 0,
+            library_paths: vec![PathBuf::from("/music/alpha.flac")],
+            selected_library_index: 0,
+            focused: BrowserPanel::Library,
+            fs_items: vec![FsItem::Dir("sub".into()), FsItem::Audio("track".into())],
+        };
+        let out = render(&mut state);
+        // Library panel shows the file stem.
+        assert!(out.contains("alpha"), "library row rendered");
+        // Filesystem panel shows icons and current dir in the title.
+        assert!(out.contains("📁"), "dir icon rendered");
+        assert!(out.contains("🎵"), "audio icon rendered");
+        assert!(out.contains("/music"), "current dir shown in title");
+    }
+
+    #[test]
+    fn test_render_fs_panel_focused_style_no_panic() {
+        let mut state = FileBrowserState::default();
+        state.current_dir = PathBuf::from("/tmp");
+        state.dirs = vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")];
+        state.fs_items = vec![FsItem::Dir("a".into()), FsItem::Dir("b".into())];
+        state.focused = BrowserPanel::Filesystem;
+        state.selected_fs_index = 1;
+        let out = render(&state);
+        assert!(out.contains("a") && out.contains("b"));
+    }
+}
