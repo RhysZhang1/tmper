@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PlaybackConfig {
-    #[serde(default = "default_volume")]
+    #[serde(default = "default_volume", serialize_with = "serialize_f32_rounded")]
     pub default_volume: f32,
     #[serde(default = "default_seek_step_small")]
     pub seek_step_small_secs: u32,
@@ -14,8 +14,26 @@ pub struct VisualizerConfig {
     pub num_bars: u32,
     #[serde(default = "default_frame_rate")]
     pub frame_rate: u32,
-    #[serde(default = "default_smoothing")]
+    #[serde(
+        default = "default_smoothing",
+        serialize_with = "serialize_f32_rounded"
+    )]
     pub smoothing: f32,
+}
+
+/// Write an `f32` knob at two decimals.
+///
+/// `serde_json`/`toml` widen an `f32` to `f64` before printing, which exposes
+/// the exact binary value: saving the settings view produced
+/// `default_volume = 0.10000000149011612`. The value is identical either way,
+/// but the file is meant to be hand-edited, so it should read like one.
+/// Rounding in `f64` space is what makes `0.1` print as `0.1`; rounding the
+/// `f32` first would just reproduce the artifact.
+fn serialize_f32_rounded<S: serde::Serializer>(
+    value: &f32,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_f64((f64::from(*value) * 100.0).round() / 100.0)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

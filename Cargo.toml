@@ -12,9 +12,9 @@ codegen-units = 1
 strip = true
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 ratatui = "0.29"
-crossterm = { version = "0.28", features = ["event-stream"] }
+crossterm = "0.28"
 rodio = "0.20"
 symphonia = { version = "0.5", features = ["all"] }
 lofty = "0.22"

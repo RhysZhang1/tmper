@@ -553,10 +553,12 @@ mod tests {
 
     #[test]
     fn test_clamp_playlist_scroll_forward() {
-        let mut state = PlaylistManagerState::default();
-        state.playlists = vec![pl("A", &[]), pl("B", &[])]; // total 3 lines
-        state.selected_playlist = 10;
-        state.scroll_playlists = 0;
+        let mut state = PlaylistManagerState {
+            playlists: vec![pl("A", &[]), pl("B", &[])], // total 3 lines
+            selected_playlist: 10,
+            scroll_playlists: 0,
+            ..Default::default()
+        };
         App::clamp_playlist_scroll(&mut state, 2);
         assert_eq!(state.selected_playlist, 2);
         assert_eq!(state.scroll_playlists, 1); // 2 >= 0+2 → 2-2+1
@@ -564,10 +566,12 @@ mod tests {
 
     #[test]
     fn test_clamp_playlist_scroll_backward() {
-        let mut state = PlaylistManagerState::default();
-        state.playlists = vec![pl("A", &[]), pl("B", &[])]; // total 3 lines
-        state.selected_playlist = 1;
-        state.scroll_playlists = 5;
+        let mut state = PlaylistManagerState {
+            playlists: vec![pl("A", &[]), pl("B", &[])], // total 3 lines
+            selected_playlist: 1,
+            scroll_playlists: 5,
+            ..Default::default()
+        };
         App::clamp_playlist_scroll(&mut state, 20);
         assert_eq!(state.selected_playlist, 1);
         assert_eq!(state.scroll_playlists, 1); // cursor above scroll → pull down

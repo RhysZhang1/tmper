@@ -16,10 +16,9 @@ impl App {
         }
 
         let saved = super::SavedState {
-            volume: self.ui_state.volume,
-            repeat_mode: self.ui_state.repeat_mode,
-
-            lyrics_offset_ms: self.ui_state.lyrics.lyrics_offset_ms,
+            volume: Some(self.ui_state.volume),
+            repeat_mode: Some(self.ui_state.repeat_mode),
+            lyrics_offset_ms: Some(self.ui_state.lyrics.lyrics_offset_ms),
             last_track_path: self
                 .ui_state
                 .player
@@ -47,11 +46,19 @@ impl App {
             tracing::warn!("Ignoring unreadable state.json");
             return;
         };
-        self.ui_state.volume = saved.volume;
-        self.engine.set_volume(saved.volume);
-        self.ui_state.repeat_mode = saved.repeat_mode;
-        self.ui_state.lyrics.lyrics_offset_ms = saved.lyrics_offset_ms;
-        tracing::info!("Restored saved state (volume={:.2})", saved.volume);
+        // Apply each setting independently so a partial file still restores
+        // what it has; anything absent keeps the config-derived value.
+        if let Some(volume) = saved.volume {
+            self.ui_state.volume = volume;
+            self.engine.set_volume(volume);
+        }
+        if let Some(mode) = saved.repeat_mode {
+            self.ui_state.repeat_mode = mode;
+        }
+        if let Some(offset) = saved.lyrics_offset_ms {
+            self.ui_state.lyrics.lyrics_offset_ms = offset;
+        }
+        tracing::info!("Restored saved state (volume={:.2})", self.ui_state.volume);
     }
 
     pub(super) fn save_playlists(&self) {
@@ -239,5 +246,43 @@ impl App {
                 tracing::error!("Failed to read metadata: {e}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::handlers::test_support::test_app;
+    use crate::paths;
+
+    /// One test rather than several: `state.json` lives at a fixed path under
+    /// the process-wide test root, so parallel writers would race each other.
+    #[test]
+    fn partial_state_file_restores_what_it_contains() {
+        let mut app = test_app();
+        // Values that must survive an absent field.
+        app.ui_state.volume = 0.5;
+        app.ui_state.lyrics.lyrics_offset_ms = 0;
+        app.ui_state.repeat_mode = crate::ui::RepeatMode::Sequential;
+
+        let dir = paths::state_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("state.json"),
+            r#"{"volume": 0.25, "lyrics_offset_ms": 700}"#,
+        )
+        .unwrap();
+        app.load_state();
+
+        assert!(
+            (app.ui_state.volume - 0.25).abs() < 1e-6,
+            "present field must be restored, got {}",
+            app.ui_state.volume
+        );
+        assert_eq!(app.ui_state.lyrics.lyrics_offset_ms, 700);
+        assert_eq!(
+            app.ui_state.repeat_mode,
+            crate::ui::RepeatMode::Sequential,
+            "absent field keeps the value the app already had"
+        );
     }
 }

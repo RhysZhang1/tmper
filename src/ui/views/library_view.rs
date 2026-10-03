@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn test_render_populated_panels() {
-        let mut s = LibraryState {
+        let s = LibraryState {
             artists: vec!["Artist A".into()],
             albums: vec!["Album 1".into()],
             track_paths: vec!["/a.flac".into()],
@@ -255,7 +255,7 @@ mod tests {
             search_mode: false,
             search_query: String::new(),
         };
-        let out = render(&mut s);
+        let out = render(&s);
         assert!(out.contains("Artist A"), "artist row rendered");
         assert!(out.contains("Album 1"), "album row rendered");
         assert!(out.contains("Song X"), "track row rendered");
@@ -263,9 +263,11 @@ mod tests {
 
     #[test]
     fn test_render_search_bar() {
-        let mut s = LibraryState::default();
-        s.search_mode = true;
-        s.search_query = "abc".into();
+        let s = LibraryState {
+            search_mode: true,
+            search_query: "abc".into(),
+            ..Default::default()
+        };
         let out = render(&s);
         assert!(out.contains("abc"), "query shown in search bar");
         assert!(out.contains("Search"), "search prompt visible");
@@ -274,14 +276,18 @@ mod tests {
     #[test]
     fn test_render_search_cursor_blink() {
         // Even-length query → block cursor `|`; odd → empty (blink alternation).
-        let mut even = LibraryState::default();
-        even.search_mode = true;
-        even.search_query = "ab".into();
+        let even = LibraryState {
+            search_mode: true,
+            search_query: "ab".into(),
+            ..Default::default()
+        };
         assert!(render(&even).contains("|"));
 
-        let mut odd = LibraryState::default();
-        odd.search_mode = true;
-        odd.search_query = "abc".into();
+        let odd = LibraryState {
+            search_mode: true,
+            search_query: "abc".into(),
+            ..Default::default()
+        };
         let out = render(&odd);
         assert!(
             !out.contains("abc|"),

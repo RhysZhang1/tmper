@@ -68,7 +68,9 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: clippy
-      - run: cargo clippy --workspace --all-features -- -D warnings
+      # `--all-targets` includes the test code. Without it, lints in test
+      # modules were never checked and a dozen of them had accumulated.
+      - run: cargo clippy --all-targets --workspace --all-features -- -D warnings
 
   coverage:
     name: Coverage

@@ -195,11 +195,11 @@ mod tests {
         let rows = render_bars(&bars, width, 2, &CharSet::Blocks);
         let top_row: Vec<char> = rows[0].chars().collect();
 
-        for column in 0..width as usize {
+        for (column, drawn) in top_row.iter().enumerate() {
             match bar_at_column(column, num_bars, width) {
                 // A full-height bar draws the solid block.
-                Some(_) => assert_eq!(top_row[column], '█', "column {column}"),
-                None => assert_eq!(top_row[column], ' ', "column {column}"),
+                Some(_) => assert_eq!(*drawn, '█', "column {column}"),
+                None => assert_eq!(*drawn, ' ', "column {column}"),
             }
         }
     }

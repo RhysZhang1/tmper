@@ -200,7 +200,7 @@ mod tests {
 
     #[test]
     fn test_render_populated_panels() {
-        let mut state = FileBrowserState {
+        let state = FileBrowserState {
             current_dir: PathBuf::from("/music"),
             home_dir: PathBuf::from("/"),
             scroll_library: 0,
@@ -221,7 +221,7 @@ mod tests {
             ],
             scan_status: None,
         };
-        let out = render(&mut state);
+        let out = render(&state);
         // Library panel shows the file stem.
         assert!(out.contains("alpha"), "library row rendered");
         // Filesystem panel shows icons and current dir in the title.
@@ -232,20 +232,22 @@ mod tests {
 
     #[test]
     fn test_render_fs_panel_focused_style_no_panic() {
-        let mut state = FileBrowserState::default();
-        state.current_dir = PathBuf::from("/tmp");
-        state.fs_items = vec![
-            FsItem::Dir {
-                name: "a".into(),
-                path: PathBuf::from("/tmp/a"),
-            },
-            FsItem::Dir {
-                name: "b".into(),
-                path: PathBuf::from("/tmp/b"),
-            },
-        ];
-        state.focused = BrowserPanel::Filesystem;
-        state.selected_fs_index = 1;
+        let state = FileBrowserState {
+            current_dir: PathBuf::from("/tmp"),
+            fs_items: vec![
+                FsItem::Dir {
+                    name: "a".into(),
+                    path: PathBuf::from("/tmp/a"),
+                },
+                FsItem::Dir {
+                    name: "b".into(),
+                    path: PathBuf::from("/tmp/b"),
+                },
+            ],
+            focused: BrowserPanel::Filesystem,
+            selected_fs_index: 1,
+            ..Default::default()
+        };
         let out = render(&state);
         assert!(out.contains("a") && out.contains("b"));
     }

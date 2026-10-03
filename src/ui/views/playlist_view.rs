@@ -461,7 +461,7 @@ mod tests {
         let pls = vec![pl("A", &["/music/track-one.flac", "/music/track-two.flac"])];
         let m = PlaylistFlatModel::new(&pls, Some(0));
         let lines = m.build_styled_lines(true, &InsertMode::Off, &Theme::default(), 2, |p| {
-            *p == PathBuf::from("/music/track-one.flac")
+            p == std::path::Path::new("/music/track-one.flac")
         });
         assert_eq!(lines[1].0, "▼ A");
         assert_eq!(lines[2].0, "◄ track-one"); // playing marker
@@ -472,10 +472,12 @@ mod tests {
 
     #[test]
     fn test_render_playlist_view_smoke() {
-        let mut state = PlaylistManagerState::default();
-        state.playlists = vec![pl("Chill", &["/music/a.flac"])];
-        state.expanded_playlist = Some(0);
-        state.focused = PlaylistPanel::Playlists;
+        let state = PlaylistManagerState {
+            playlists: vec![pl("Chill", &["/music/a.flac"])],
+            expanded_playlist: Some(0),
+            focused: PlaylistPanel::Playlists,
+            ..Default::default()
+        };
 
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal
@@ -489,8 +491,10 @@ mod tests {
 
     #[test]
     fn test_render_playlist_view_notification() {
-        let mut state = PlaylistManagerState::default();
-        state.notification = Some(("已导出".into(), std::time::Instant::now()));
+        let state = PlaylistManagerState {
+            notification: Some(("已导出".into(), std::time::Instant::now())),
+            ..Default::default()
+        };
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal
             .draw(|f| render_playlist_view(f, f.area(), &Theme::default(), &state))

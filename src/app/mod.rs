@@ -92,11 +92,20 @@ pub struct App {
     library_scans_active: usize,
 }
 
+/// Persisted on exit, restored at startup.
+///
+/// Every setting is optional: a `state.json` written by an older build (or
+/// truncated mid-write) used to fail to deserialize as a whole, and the app
+/// silently dropped *all* of it — volume, repeat mode and lyric offset
+/// together. Missing fields now fall back to whatever the config already
+/// provided, and a present field is still restored.
 #[derive(Serialize, Deserialize)]
 struct SavedState {
-    volume: f32,
-    repeat_mode: crate::ui::RepeatMode,
-    lyrics_offset_ms: i64,
+    volume: Option<f32>,
+    repeat_mode: Option<crate::ui::RepeatMode>,
+    lyrics_offset_ms: Option<i64>,
+    /// Recorded for reference only — startup deliberately does not resume
+    /// playback (see `load_state`).
     last_track_path: Option<String>,
 }
 
@@ -221,13 +230,18 @@ impl App {
             }
         });
 
-        let mut tick_interval = tokio::time::interval(Duration::from_millis(
-            (1000 / self.config.visualizer.frame_rate.max(1)) as u64,
-        ));
+        // `frame_rate` drives both the tick and the throttle below, so the
+        // configured value is the rate the UI is actually redrawn at on tick.
+        // The throttle used to be a flat 50ms, which silently capped every
+        // setting above 20fps — a config value that was documented as live but
+        // could not take effect.
+        let frame_rate = self.config.visualizer.frame_rate.max(1);
+        let mut tick_interval =
+            tokio::time::interval(Duration::from_millis((1000 / frame_rate) as u64));
 
-        // Tick-only draw throttling: don't redraw faster than every 50ms
-        // on tick events (key batches always draw).
-        let min_draw_interval = Duration::from_millis(50);
+        // Tick-only draw throttling (key batches always draw). The FFT thread
+        // produces new spectrum data every ~31ms independently of this.
+        let min_draw_interval = Duration::from_millis((1000 / frame_rate) as u64);
         let mut last_draw = std::time::Instant::now();
         let mut needs_draw = true;
 
