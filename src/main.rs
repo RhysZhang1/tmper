@@ -67,6 +67,9 @@ async fn main() -> error::AppResult<()> {
 /// by the next `tmper` — including the lines explaining why it is about to
 /// die. `tmper-daemon.log` is the daemon's alone.
 fn init_logging(is_daemon: bool) {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
     let name = if is_daemon {
         "tmper-daemon.log"
     } else {
@@ -75,23 +78,35 @@ fn init_logging(is_daemon: bool) {
     let log_file = std::fs::File::create(state_dir().join(name))
         .unwrap_or_else(|_| std::fs::File::create("/dev/null").expect("/dev/null"));
 
-    let env_filter = std::env::var("RUST_LOG").unwrap_or_default();
+    // `info` by default, not "everything". A subscriber with no filter logs
+    // TRACE, and the dependencies are chatty there: `lofty` narrates every
+    // tag block it parses and tokio every poller registration. That was merely
+    // untidy while the TUI was the only process — it truncates its log at
+    // every start — but the daemon runs for days and gets its log truncated
+    // only when it starts, so a library scan would leave megabytes of other
+    // people's debug output behind. Everything the README tells a user to grep
+    // for (`cell size`, the graphics decision) is logged at `info`, so this
+    // keeps that working; `RUST_LOG=debug` brings the noise back on demand.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
     let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::sync::Mutex::new(log_file))
         .with_target(false);
 
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-
-    if env_filter.is_empty() {
-        tracing_subscriber::registry().with(file_layer).init();
-    } else {
+    if std::env::var("RUST_LOG").is_ok() {
         let stderr_layer = tracing_subscriber::fmt::layer()
             .with_writer(std::io::stderr)
             .with_target(false);
         tracing_subscriber::registry()
+            .with(filter)
             .with(file_layer)
             .with(stderr_layer)
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(file_layer)
             .init();
     }
 }
