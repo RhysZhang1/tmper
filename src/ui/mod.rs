@@ -540,7 +540,6 @@ pub(crate) fn search_matches(tracks: &[TrackDisplay], query: &str) -> Vec<usize>
 mod render_tests {
     use super::*;
     use ratatui::backend::TestBackend;
-    use ratatui::style::Color;
     use ratatui::Terminal;
 
     #[test]
@@ -757,51 +756,19 @@ mod render_tests {
         // string: a cell holds a multi-byte glyph and a wide one is two
         // columns, so counting bytes per row shears every CJK line.
         //
-        // Each cell keeps its colours: GitHub renders ```ansi code blocks
-        // with real SGR, so the cover and the spectrum come out as the
-        // terminal would have drawn them rather than as a field of blocks.
+        // Plain text, no SGR. GitHub has no ```ansi support, whatever the
+        // highlighting looks like it is doing: it swaps every ESC for U+FFFD
+        // and leaves the rest of the sequence — `[0;38;2;122;162;247;49m` —
+        // as literal characters in the middle of the picture. An earlier
+        // version of this generator emitted colours and the rendered README
+        // was 2086 replacement characters of noise. So the cover arrives here
+        // as a field of blocks and the spectrum as plain bars; run tmper to
+        // see them in the theme's colours.
         for row in buffer.content().chunks(width as usize) {
-            let mut line = String::new();
-            let mut style: Option<(Color, Color)> = None;
-            for cell in row {
-                let want = (cell.fg, cell.bg);
-                if style != Some(want) {
-                    line.push_str(&sgr(want));
-                    style = Some(want);
-                }
-                line.push_str(cell.symbol());
-            }
-            println!("{}\x1b[0m", line.trim_end());
+            let line: String = row.iter().map(|cell| cell.symbol()).collect();
+            println!("{}", line.trim_end());
         }
         println!("--->8------------------------------->8---");
-    }
-
-    /// The SGR sequence for a cell's colours.
-    fn sgr((fg, bg): (Color, Color)) -> String {
-        let part = |base: u8, color: Color| match color {
-            Color::Rgb(r, g, b) => format!("{base};2;{r};{g};{b}"),
-            // 39/49 are the "default" codes and are 30 apart from 38/48,
-            // which is why this one is not a range over `base`.
-            Color::Reset => format!("{}", if base == 38 { 39 } else { 49 }),
-            Color::Indexed(n) => format!("{base};5;{n}"),
-            Color::Black => format!("{}", base - 8),
-            Color::Red => format!("{}", base - 7),
-            Color::Green => format!("{}", base - 6),
-            Color::Yellow => format!("{}", base - 5),
-            Color::Blue => format!("{}", base - 4),
-            Color::Magenta => format!("{}", base - 3),
-            Color::Cyan => format!("{}", base - 2),
-            Color::Gray => format!("{}", base - 1),
-            Color::DarkGray => format!("{base};5;8"),
-            Color::LightRed => format!("{base};5;9"),
-            Color::LightGreen => format!("{base};5;10"),
-            Color::LightYellow => format!("{base};5;11"),
-            Color::LightBlue => format!("{base};5;12"),
-            Color::LightMagenta => format!("{base};5;13"),
-            Color::LightCyan => format!("{base};5;14"),
-            Color::White => format!("{base};5;15"),
-        };
-        format!("\x1b[0;{};{}m", part(38, fg), part(48, bg))
     }
 
     /// A 32×32 gradient standing in for album art, as a PNG in memory.
