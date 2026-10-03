@@ -68,6 +68,11 @@ impl App {
             songs: Vec<String>,
         }
         let path = crate::paths::state_dir().join("playlists.json");
+        // Create the parent rather than assuming startup made it: the same
+        // guard `save_state` has, so every writer in this file stands alone.
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         let save: Vec<SavePlaylist> = self
             .ui_state
             .playlist_state
@@ -116,6 +121,9 @@ impl App {
 
     pub(super) fn save_library_paths(&self) {
         let path = crate::paths::state_dir().join("library.json");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         let paths: Vec<String> = self
             .ui_state
             .file_browser_state

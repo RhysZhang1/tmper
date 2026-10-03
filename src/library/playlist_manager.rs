@@ -40,6 +40,12 @@ pub fn import_m3u(path: &Path) -> AppResult<PlaylistData> {
 }
 
 pub fn export_m3u(playlist: &PlaylistData, path: &Path) -> AppResult<()> {
+    // Callers pass a path under the data directory; creating the parent here
+    // keeps the export working even when nothing has populated that directory
+    // yet, instead of depending on startup having created it.
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
     let mut content = String::from("#EXTM3U\n");
 
     for song in &playlist.songs {

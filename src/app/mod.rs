@@ -125,7 +125,7 @@ impl App {
             .unwrap_or_else(|_| LibraryDb::open_memory().expect("in-memory db"));
         let key_bindings = KeyBindings::load();
         let quit_key = keymap::parse_key_str(&key_bindings.quit);
-        let mut app = Self {
+        let app = Self {
             config: config.clone(),
             ui_state: UiState {
                 theme: Theme::load(&config.ui.theme),

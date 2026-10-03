@@ -1033,6 +1033,158 @@ mod tests {
         assert_eq!(app.ui_state.repeat_mode, RepeatMode::Shuffle);
     }
 
+    /// Drive a command through the real path — `:` then the text then Enter —
+    /// so the command buffer and the parser are exercised too.
+    fn run_command(app: &mut App, command: &str) {
+        press_char(app, ':');
+        for c in command.chars() {
+            press_char(app, c);
+        }
+        press(app, KeyCode::Enter);
+    }
+
+    fn notification(app: &App) -> String {
+        app.ui_state
+            .notification
+            .as_ref()
+            .map(|(message, _)| message.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn command_quit_requests_shutdown() {
+        let mut app = test_app();
+        assert!(!app.should_quit);
+
+        run_command(&mut app, "quit");
+
+        assert!(app.should_quit, ":quit must end the session");
+    }
+
+    #[test]
+    fn command_theme_switches_and_loads_the_palette() {
+        let mut app = test_app();
+        run_command(&mut app, "theme nord");
+
+        assert_eq!(app.config.ui.theme, "nord");
+        assert_eq!(app.ui_state.theme.name, "nord", "palette actually loaded");
+    }
+
+    #[test]
+    fn command_volume_takes_a_percentage() {
+        let mut app = test_app();
+        run_command(&mut app, "volume 25");
+
+        assert!((app.ui_state.volume - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn command_shuffle_accepts_the_documented_affirmatives() {
+        for word in ["on", "true", "yes", "ON"] {
+            let mut app = test_app();
+            run_command(&mut app, &format!("shuffle {word}"));
+            assert_eq!(
+                app.ui_state.repeat_mode,
+                RepeatMode::Shuffle,
+                "shuffle {word}"
+            );
+        }
+
+        let mut app = test_app();
+        run_command(&mut app, "shuffle off");
+        assert_eq!(app.ui_state.repeat_mode, RepeatMode::Sequential);
+    }
+
+    #[test]
+    fn command_view_accepts_both_names_and_digits() {
+        let cases = [
+            ("player", ViewMode::Player),
+            ("1", ViewMode::Player),
+            ("lyrics", ViewMode::Lyrics),
+            ("3", ViewMode::Lyrics),
+            ("visualizer", ViewMode::Visualizer),
+            ("playlists", ViewMode::Playlists),
+            ("browser", ViewMode::Browser),
+            ("settings", ViewMode::Settings),
+        ];
+        for (arg, expected) in cases {
+            let mut app = test_app();
+            run_command(&mut app, &format!("view {arg}"));
+            assert_eq!(app.ui_state.view.active_view, expected, "view {arg}");
+        }
+    }
+
+    #[test]
+    fn command_view_with_an_unknown_name_leaves_the_view_alone() {
+        let mut app = test_app();
+        let before = app.ui_state.view.active_view;
+
+        run_command(&mut app, "view nowhere");
+
+        assert_eq!(app.ui_state.view.active_view, before);
+        assert!(notification(&app).contains("Unknown view"));
+    }
+
+    /// A malformed argument must be discarded, not parsed into a bogus seek.
+    #[test]
+    fn command_seek_ignores_a_malformed_argument() {
+        let mut app = test_app();
+        let before = app.ui_state.player.position;
+
+        run_command(&mut app, "seek not-a-number");
+        run_command(&mut app, "seek 30"); // valid, but no track is loaded
+
+        assert_eq!(app.ui_state.player.position, before);
+    }
+
+    #[test]
+    fn command_export_reports_an_unknown_playlist() {
+        let mut app = test_app();
+        run_command(&mut app, "export Nothing");
+
+        assert!(notification(&app).contains("Playlist not found"));
+    }
+
+    #[test]
+    fn command_export_writes_an_m3u_for_a_known_playlist() {
+        let mut app = test_app();
+        let song = std::fs::canonicalize("tests/fixtures/test.flac").unwrap();
+        app.ui_state.playlist_state.playlists = vec![pl("Road", &[song.to_str().unwrap()])];
+
+        // The lookup is case-insensitive.
+        run_command(&mut app, "export road");
+
+        let written = crate::paths::data_dir().join("Road.m3u");
+        assert!(written.exists(), "expected {}", written.display());
+        assert!(notification(&app).contains("Exported"));
+        let _ = std::fs::remove_file(&written);
+    }
+
+    #[test]
+    fn command_import_adds_a_playlist_and_reports_its_size() {
+        let mut app = test_app();
+        let song = std::fs::canonicalize("tests/fixtures/test.flac").unwrap();
+        let dir = std::env::temp_dir().join(format!("tmper-import-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let m3u = dir.join("list.m3u");
+        std::fs::write(&m3u, format!("#EXTM3U\n{}\n", song.display())).unwrap();
+
+        run_command(&mut app, &format!("import {}", m3u.display()));
+
+        assert_eq!(app.ui_state.playlist_state.playlists.len(), 1);
+        assert!(notification(&app).contains("Imported: 1"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn command_import_reports_a_failure() {
+        let mut app = test_app();
+        run_command(&mut app, "import /definitely/not/here.m3u");
+
+        assert!(notification(&app).contains("Import failed"));
+    }
+
     #[test]
     fn test_repeat_key_cycles_and_notifies() {
         let mut app = test_app();
