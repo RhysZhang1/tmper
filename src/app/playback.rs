@@ -75,9 +75,19 @@ impl App {
                 if songs.is_empty() {
                     return;
                 }
-                let cur_song = self.ui_state.active_playlist_song.unwrap_or(0);
+                // `active_playlist_song` is chosen in one view and used in
+                // another, so it can outlive the playlist edit that shrank
+                // `songs` (removing a track or a whole playlist does not
+                // re-point it). Clamp before deriving `prev_song` — `next_track`
+                // and `on_track_ended` both guard, and this one did not, so a
+                // stale index indexed past the end and panicked.
+                let cur_song = self
+                    .ui_state
+                    .active_playlist_song
+                    .unwrap_or(0)
+                    .min(songs.len() - 1);
                 let prev_song = if cur_song == 0 {
-                    songs.len().saturating_sub(1)
+                    songs.len() - 1
                 } else {
                     cur_song - 1
                 };
@@ -267,5 +277,92 @@ impl App {
             );
             self.ui_state.lyrics.current_lyric_index = idx;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::handlers::test_support::{pl, test_app};
+    use std::path::PathBuf;
+
+    /// `prev_track` derives its index from `active_playlist_song`, which is set
+    /// in one view and consumed in another — deleting a song or a whole
+    /// playlist never re-points it. A stale index used to be used verbatim and
+    /// indexed past the end of `songs`.
+    #[test]
+    fn prev_track_ignores_a_stale_playlist_index() {
+        let mut app = test_app();
+        app.ui_state.playlist_state.playlists = vec![pl("Mix", &["/a.flac", "/b.flac"])];
+        app.ui_state.active_playlist = Some(0);
+        // Stale: the playlist has since shrunk to two songs.
+        app.ui_state.active_playlist_song = Some(5);
+
+        app.prev_track();
+
+        // Clamped to the last song, then stepped back to the first.
+        assert_eq!(app.ui_state.active_playlist_song, Some(0));
+    }
+
+    /// The documented behaviour still holds for an in-range index.
+    #[test]
+    fn prev_track_wraps_from_the_first_song_to_the_last() {
+        let mut app = test_app();
+        app.ui_state.playlist_state.playlists = vec![pl("Mix", &["/a.flac", "/b.flac"])];
+        app.ui_state.active_playlist = Some(0);
+        app.ui_state.active_playlist_song = Some(0);
+
+        app.prev_track();
+
+        assert_eq!(app.ui_state.active_playlist_song, Some(1));
+    }
+
+    #[test]
+    fn prev_track_on_an_empty_playlist_is_a_noop() {
+        let mut app = test_app();
+        app.ui_state.playlist_state.playlists = vec![pl("Empty", &[])];
+        app.ui_state.active_playlist = Some(0);
+        app.ui_state.active_playlist_song = Some(3);
+
+        app.prev_track();
+
+        assert_eq!(app.ui_state.active_playlist_song, Some(3));
+    }
+
+    /// `next_track` wraps with a modulo, so a stale cursor cannot index out of
+    /// bounds — unlike `prev_track`, which is why only that one panicked. It
+    /// still has to land inside the playlist.
+    #[test]
+    fn next_track_with_a_stale_cursor_stays_inside_the_playlist() {
+        let mut app = test_app();
+        app.ui_state.playlist_state.playlists = vec![pl("Mix", &["/a.flac", "/b.flac"])];
+        app.ui_state.active_playlist = Some(0);
+        app.ui_state.active_playlist_song = Some(9);
+
+        app.next_track();
+
+        let landed = app.ui_state.active_playlist_song.unwrap();
+        assert!(landed < 2, "must stay in range, landed on {landed}");
+    }
+
+    /// `on_track_ended` in sequential mode advances within the playlist; with a
+    /// stale cursor it must not run past the end either.
+    #[test]
+    fn on_track_ended_with_a_stale_cursor_stays_inside_the_playlist() {
+        let mut app = test_app();
+        app.ui_state.playlist_state.playlists = vec![pl("Mix", &["/a.flac", "/b.flac"])];
+        app.ui_state.active_playlist = Some(0);
+        app.ui_state.active_playlist_song = Some(7);
+        app.ui_state.repeat_mode = crate::ui::RepeatMode::Sequential;
+        app.ui_state.player.tracks = vec![crate::ui::TrackDisplay {
+            path: PathBuf::from("/a.flac"),
+            title: "A".into(),
+            artist: "X".into(),
+            duration_secs: 1.0,
+        }];
+        app.ui_state.player.playing_index = Some(0);
+
+        app.on_track_ended();
+
+        assert!(!app.should_quit);
     }
 }

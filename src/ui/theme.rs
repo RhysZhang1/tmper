@@ -143,7 +143,13 @@ fn built_in_theme(name: &str) -> Option<&'static str> {
 /// Parse `#rrggbb` into `Color::Rgb`. Invalid input degrades to black.
 fn parse_hex(s: &str) -> Color {
     let s = s.trim().trim_start_matches('#');
-    if s.len() != 6 {
+    // The length check is in bytes because the slices below are byte slices —
+    // but that makes it unsound on its own: "€€" is 6 bytes and 2 characters,
+    // so it passed the check and then panicked slicing at a non-char boundary.
+    // Hex digits are ASCII, so requiring ASCII makes the check sufficient.
+    // `Theme::load` runs from `App::new`, so this would have been a startup
+    // crash triggered by a typo in a user-editable theme file.
+    if s.len() != 6 || !s.is_ascii() {
         tracing::warn!("Invalid theme color '{s}'");
         return Color::Black;
     }
@@ -166,6 +172,15 @@ mod tests {
     fn parse_hex_valid() {
         assert_eq!(parse_hex("#7aa2f7"), Color::Rgb(0x7a, 0xa2, 0xf7));
         assert_eq!(parse_hex("ffffff"), Color::Rgb(255, 255, 255));
+    }
+
+    /// Six *bytes* need not be six characters. This input used to panic with
+    /// "byte index 2 is not a char boundary" instead of degrading to black.
+    #[test]
+    fn parse_hex_multibyte_input_degrades_instead_of_panicking() {
+        assert_eq!(parse_hex("€€"), Color::Black); // 6 bytes, 2 chars
+        assert_eq!(parse_hex("#€€"), Color::Black);
+        assert_eq!(parse_hex("日本語"), Color::Black); // 9 bytes
     }
 
     #[test]
