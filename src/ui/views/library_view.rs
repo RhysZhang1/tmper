@@ -77,28 +77,37 @@ pub fn render_library_view(f: &mut Frame, area: Rect, theme: &Theme, state: &Lib
         f,
         columns[0],
         theme,
-        "Artists",
-        &state.artists,
-        state.artist_index,
-        state.focused == LibraryPanel::Artists && !has_search,
+        PanelParams {
+            title: "Artists",
+            items: &state.artists,
+            selected: state.artist_index,
+            scroll: state.scroll_artists,
+            is_focused: state.focused == LibraryPanel::Artists && !has_search,
+        },
     );
     render_panel(
         f,
         columns[1],
         theme,
-        "Albums",
-        &state.albums,
-        state.album_index,
-        state.focused == LibraryPanel::Albums && !has_search,
+        PanelParams {
+            title: "Albums",
+            items: &state.albums,
+            selected: state.album_index,
+            scroll: state.scroll_albums,
+            is_focused: state.focused == LibraryPanel::Albums && !has_search,
+        },
     );
     render_panel(
         f,
         columns[2],
         theme,
-        "Tracks",
-        &state.track_titles,
-        state.track_index,
-        state.focused == LibraryPanel::Tracks,
+        PanelParams {
+            title: "Tracks",
+            items: &state.track_titles,
+            selected: state.track_index,
+            scroll: state.scroll_tracks,
+            is_focused: state.focused == LibraryPanel::Tracks,
+        },
     );
 
     // Search bar
@@ -127,26 +136,62 @@ pub fn render_library_view(f: &mut Frame, area: Rect, theme: &Theme, state: &Lib
     }
 }
 
-fn render_panel(
-    f: &mut Frame,
-    area: Rect,
-    theme: &Theme,
-    title: &str,
-    items: &[String],
+/// Read-only inputs for one column panel, gathered into a struct so the
+/// renderer keeps taking explicit read-only parameters (the pattern used by
+/// `PlayerViewParams`) instead of threading eight positional arguments.
+struct PanelParams<'a> {
+    title: &'a str,
+    items: &'a [String],
     selected: usize,
+    scroll: usize,
     is_focused: bool,
-) {
+}
+
+fn render_panel(f: &mut Frame, area: Rect, theme: &Theme, params: PanelParams<'_>) {
+    let PanelParams {
+        title,
+        items,
+        selected,
+        scroll,
+        is_focused,
+    } = params;
+
     let border_style = if is_focused {
         Style::default().fg(theme.primary)
     } else {
         Style::default().fg(theme.muted)
     };
 
-    let list_items: Vec<ListItem> = items
+    // Slice to the visible window, as the file browser and playlist panels do.
+    // Rendering every item and letting `List` clip them meant the cursor could
+    // walk off the bottom of the panel and disappear, while the handler kept
+    // dutifully maintaining `scroll_*` that nothing read.
+    //
+    // The maintained offset is honoured when it already shows the selection,
+    // and corrected when it does not: the panel's real height shrinks while the
+    // search bar is up, so an offset computed from the terminal height can be
+    // a few rows stale. Keeping the selection on screen is the invariant that
+    // matters, and it is cheap to guarantee here.
+    let visible = area.height.saturating_sub(2) as usize;
+    let total = items.len();
+    let scroll = if visible == 0 || total <= visible {
+        0
+    } else if selected < scroll {
+        selected
+    } else if selected >= scroll + visible {
+        selected - visible + 1
+    } else {
+        scroll
+    };
+    let scroll = scroll.min(total.saturating_sub(1));
+    let end = (scroll + visible).min(total);
+
+    let list_items: Vec<ListItem> = items[scroll..end]
         .iter()
         .enumerate()
-        .map(|(i, item)| {
-            let style = if i == selected && is_focused {
+        .map(|(offset, item)| {
+            let index = scroll + offset;
+            let style = if index == selected && is_focused {
                 Style::default()
                     .fg(theme.text)
                     .bg(theme.muted)
@@ -242,5 +287,43 @@ mod tests {
             !out.contains("abc|"),
             "no trailing cursor for odd-length query"
         );
+    }
+
+    /// The row the cursor is on has to be inside the rendered window. Every
+    /// item used to be handed to `List` and clipped by it, so the cursor simply
+    /// walked off the bottom of the panel and vanished — while the handler kept
+    /// maintaining `scroll_*` offsets that nothing read.
+    #[test]
+    fn test_selected_row_stays_visible_in_a_long_list() {
+        let artists: Vec<String> = (0..60).map(|i| format!("Artist {i:02}")).collect();
+        let mut s = LibraryState {
+            artists,
+            artist_index: 55,
+            scroll_artists: 0, // as if the handler never advanced it
+            ..Default::default()
+        };
+
+        assert!(
+            render(&s).contains("Artist 55"),
+            "selected row must be rendered even with a stale scroll offset"
+        );
+
+        // With the offset caught up, the window is sliced for real.
+        s.scroll_artists = 40;
+        let out = render(&s);
+        assert!(out.contains("Artist 55"), "still visible after scrolling");
+        assert!(!out.contains("Artist 00"), "off-window rows are not drawn");
+    }
+
+    /// Scrolling past the selection pulls it back into view.
+    #[test]
+    fn test_scroll_ahead_of_selection_pulls_it_back() {
+        let s = LibraryState {
+            artists: (0..60).map(|i| format!("Artist {i:02}")).collect(),
+            artist_index: 2,
+            scroll_artists: 50, // window has scrolled away from the cursor
+            ..Default::default()
+        };
+        assert!(render(&s).contains("Artist 02"));
     }
 }
