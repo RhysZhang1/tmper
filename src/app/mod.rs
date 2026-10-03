@@ -149,7 +149,10 @@ impl App {
             library_scan_cancels: Vec::new(),
             library_scans_active: 0,
         };
-        app.load_state();
+        // Persisted state is restored by `run`, not here: constructing an App
+        // must stay free of side effects that depend on files on disk. Tests
+        // build Apps constantly, and reading `state.json` at construction made
+        // one test's saved state leak into every App built afterwards.
         Ok(app)
     }
 
@@ -186,6 +189,9 @@ impl App {
                 .set(rows.saturating_sub(2) as usize);
         }
 
+        // Restore the persisted settings before anything observes them: the
+        // CLI playback below and the first render both read volume/repeat mode.
+        self.load_state();
         self.load_library_paths();
         self.load_playlists();
         if let Some(Command::Play { file }) = cli.command {

@@ -377,6 +377,53 @@ mod tests {
         assert!(!app.should_quit);
     }
 
+    // ── Selection ──
+
+    #[test]
+    fn play_selected_plays_the_highlighted_track() {
+        let mut app = test_app();
+        app.ui_state.player.tracks = vec![
+            crate::ui::TrackDisplay {
+                path: PathBuf::from("/one.flac"),
+                title: "One".into(),
+                artist: "X".into(),
+                duration_secs: 1.0,
+            },
+            crate::ui::TrackDisplay {
+                path: PathBuf::from("/two.flac"),
+                title: "Two".into(),
+                artist: "X".into(),
+                duration_secs: 1.0,
+            },
+        ];
+        app.ui_state.player.selected_index = 1;
+
+        app.play_selected();
+
+        // Neither path exists, so metadata lookup fails and nothing is queued —
+        // but the guard must not have panicked or touched the selection.
+        assert_eq!(app.ui_state.player.selected_index, 1);
+        assert_eq!(app.ui_state.player.playing_index, None);
+    }
+
+    /// A selection past the end is the stale-index case again: it must be
+    /// ignored rather than panicking.
+    #[test]
+    fn play_selected_out_of_range_is_a_noop() {
+        let mut app = test_app();
+        app.ui_state.player.tracks = vec![crate::ui::TrackDisplay {
+            path: PathBuf::from("/one.flac"),
+            title: "One".into(),
+            artist: "X".into(),
+            duration_secs: 1.0,
+        }];
+        app.ui_state.player.selected_index = 7;
+
+        app.play_selected();
+
+        assert_eq!(app.ui_state.player.playing_index, None);
+    }
+
     // ── FFT analysis window ──
 
     /// The window must be the newest samples, not the oldest ones still held.
