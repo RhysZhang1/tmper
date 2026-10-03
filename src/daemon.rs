@@ -454,7 +454,28 @@ async fn desktop_command(rx: &mut Option<mpsc::UnboundedReceiver<Request>>) -> O
 /// This is the only place the program re-executes itself, and it is what keeps
 /// the daemon in the same single binary as the TUI rather than in a second
 /// executable to install, document and keep in step.
+///
+/// Under `cfg(test)` it refuses, and the refusal is not a formality: the test
+/// binary *is* `current_exe()`, so a spawn there would re-run the whole suite —
+/// detached, with its output sent to `/dev/null`, past the end of the test that
+/// caused it. Nothing in the suite has a daemon to start; a test that drives
+/// the reconnect path past a failed dial must get an error it can ignore, and
+/// the real `spawn_detached` is exercised where it can be: by hand, on a
+/// desktop, through `tmper` itself.
 pub fn spawn_detached() -> AppResult<()> {
+    #[cfg(test)]
+    {
+        Err(AppError::Ipc("not started from a test binary".into()).into())
+    }
+
+    #[cfg(not(test))]
+    {
+        spawn_process()
+    }
+}
+
+#[cfg(not(test))]
+fn spawn_process() -> AppResult<()> {
     use std::os::unix::process::CommandExt;
 
     let exe = std::env::current_exe()

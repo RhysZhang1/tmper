@@ -14,13 +14,29 @@
 use std::time::Duration;
 
 use tokio::io::BufReader;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::constants::runtime;
 use crate::error::{AppError, AppResult};
 use crate::ipc::proto::{Event, NoticeLevel, Request, PROTOCOL_VERSION};
 #[cfg(test)]
 use crate::player::Player;
+
+/// Whether the client can still reach its player.
+///
+/// A *state*, not an event, and the distinction is the reason it is a channel
+/// the client reads rather than a message it is sent: a toast times out, and
+/// "the player is gone" does not stop being true because ten seconds have
+/// passed. The TUI draws this for as long as it says `Lost`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Connection {
+    /// Either the player is in this process, or the socket to it is up.
+    #[default]
+    Live,
+    /// The socket dropped. Something is already trying to get it back — the
+    /// client carries on in the meantime, and may leave whenever it likes.
+    Lost { reason: String },
+}
 
 /// A player the TUI can talk to, wherever it lives.
 ///
@@ -57,6 +73,15 @@ pub trait PlayerHandle {
     /// somebody else's process and carries on.
     fn detach(&mut self) -> AppResult<()> {
         Ok(())
+    }
+
+    /// Whether the player can still be reached, as of this moment.
+    ///
+    /// Always [`Connection::Live`] for a player in this process: a player that
+    /// has gone takes the client with it, so it has no way to be lost and
+    /// watched for.
+    fn connection(&self) -> Connection {
+        Connection::Live
     }
 
     /// The player itself, when it lives in this process.
@@ -149,12 +174,52 @@ impl PlayerHandle for LocalHandle {
 pub struct DaemonHandle {
     outbox: mpsc::Sender<Request>,
     inbox: mpsc::Receiver<Event>,
+    /// Written by the supervisor, read every tick by the client. A `watch`
+    /// rather than a lock: this is a value that changes rarely and is read
+    /// often, and the reader must never be able to hold anything up.
+    connection: watch::Receiver<Connection>,
+}
+
+/// One greeted socket: the two halves of a connection the daemon has already
+/// answered [`Request::Hello`] on.
+struct Socket {
+    write: tokio::net::unix::OwnedWriteHalf,
+    read: BufReader<tokio::net::unix::OwnedReadHalf>,
 }
 
 impl DaemonHandle {
     /// Connect to a running daemon. Fails if there is none — use
     /// [`DaemonHandle::connect_or_spawn`] to start one.
+    ///
+    /// This is the one-shot verbs' connection: it does not heal, because
+    /// `tmper pause` on a player that has crashed is a failure to report rather
+    /// than a player to start again.
     pub async fn connect() -> AppResult<Self> {
+        let socket = Self::dial().await?;
+        let (outbox, outbox_rx) = mpsc::channel::<Request>(runtime::DAEMON_CLIENT_QUEUE);
+        tokio::spawn(write_requests(socket.write, outbox_rx));
+
+        // Bounded, and deliberately the same bound the daemon applies on its
+        // side: a client that stops draining its inbox applies backpressure
+        // all the way to the daemon's mailbox, which is what makes "this
+        // client is too far behind" a judgement both ends agree on.
+        let (inbox_tx, inbox) = mpsc::channel::<Event>(runtime::DAEMON_CLIENT_QUEUE);
+        tokio::spawn(read_events(socket.read, inbox_tx));
+
+        // A connection nobody supervises can never be lost, only ended. The
+        // sender is dropped here rather than kept: `borrow` still answers with
+        // the value it last held, and this handle's answer is always `Live`.
+        let (_no_supervisor, connection) = watch::channel(Connection::Live);
+        Ok(Self {
+            outbox,
+            inbox,
+            connection,
+        })
+    }
+
+    /// Connect, greet, and hand back the socket. The part both kinds of
+    /// connection share.
+    async fn dial() -> AppResult<Socket> {
         let socket = crate::paths::socket_path();
         let stream = tokio::net::UnixStream::connect(&socket)
             .await
@@ -230,27 +295,40 @@ impl DaemonHandle {
             }
         }
 
-        let (outbox, outbox_rx) = mpsc::channel::<Request>(runtime::DAEMON_CLIENT_QUEUE);
-        tokio::spawn(write_requests(write_half, outbox_rx));
-
-        // Bounded, and deliberately the same bound the daemon applies on its
-        // side: a client that stops draining its inbox applies backpressure
-        // all the way to the daemon's mailbox, which is what makes "this
-        // client is too far behind" a judgement both ends agree on.
-        let (inbox_tx, inbox) = mpsc::channel::<Event>(runtime::DAEMON_CLIENT_QUEUE);
-        tokio::spawn(read_events(reader, inbox_tx));
-
-        Ok(Self { outbox, inbox })
+        Ok(Socket {
+            write: write_half,
+            read: reader,
+        })
     }
 
-    /// Connect to a running daemon, starting one if there is none.
+    /// Connect to a running daemon, starting one if there is none — and keep it
+    /// connected: this is the TUI's handle, and the TUI is meant to outlive any
+    /// one socket.
     ///
     /// Bounded on purpose: a player that cannot come up — no sound card, a
     /// socket it cannot bind — has to surface as an error the user can read,
-    /// not as a TUI that hangs on a blank screen.
+    /// not as a TUI that hangs on a blank screen. Only the *first* connection
+    /// is bounded; once the TUI is up, losing the player puts a banner on
+    /// screen and starts dialing again, forever.
     pub async fn connect_or_spawn() -> AppResult<Self> {
-        if let Ok(handle) = Self::connect().await {
-            return Ok(handle);
+        let socket = Self::dial_starting_one().await?;
+
+        let (outbox, outbox_rx) = mpsc::channel::<Request>(runtime::DAEMON_CLIENT_QUEUE);
+        let (inbox_tx, inbox) = mpsc::channel::<Event>(runtime::DAEMON_CLIENT_QUEUE);
+        let (state, connection) = watch::channel(Connection::Live);
+        tokio::spawn(supervise(socket, outbox_rx, inbox_tx, state));
+        Ok(Self {
+            outbox,
+            inbox,
+            connection,
+        })
+    }
+
+    /// Dial, and if nothing answers, start a player and keep dialing for as
+    /// long as a startup is allowed to take.
+    async fn dial_starting_one() -> AppResult<Socket> {
+        if let Ok(socket) = Self::dial().await {
+            return Ok(socket);
         }
         crate::daemon::spawn_detached()?;
 
@@ -259,8 +337,8 @@ impl DaemonHandle {
         let mut last = None;
         while std::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(runtime::DAEMON_CONNECT_RETRY_MS)).await;
-            match Self::connect().await {
-                Ok(handle) => return Ok(handle),
+            match Self::dial().await {
+                Ok(socket) => return Ok(socket),
                 Err(error) => last = Some(error),
             }
         }
@@ -304,6 +382,10 @@ impl PlayerHandle for DaemonHandle {
     fn tick(&mut self) -> Vec<Event> {
         Vec::new()
     }
+
+    fn connection(&self) -> Connection {
+        self.connection.borrow().clone()
+    }
 }
 
 /// Write requests until the daemon stops listening.
@@ -321,47 +403,162 @@ async fn write_requests(
     }
 }
 
-/// Read events until the daemon is gone, and report that as an event.
+/// Read events until the daemon is gone, and end the client with a word about
+/// why.
 ///
-/// A client whose player has died has nothing left to control: the `Bye` tells
-/// [`crate::app::App`] to leave, and the notice in front of it says why, which
-/// is the difference between a TUI that vanished and one that explained
-/// itself.
-///
-/// The reader is the handshake's, passed on rather than rebuilt — see
-/// [`DaemonHandle::connect`] for what a second `BufReader` over one socket
-/// costs.
+/// The one-shot verbs' reader. A `tmper pause` whose player died halfway
+/// through has nothing left to do: the `Bye` tells [`crate::app::App`] to
+/// leave, and the notice in front of it says why, which is the difference
+/// between a TUI that vanished and one that explained itself. The TUI proper
+/// wants [`supervise`] instead.
 async fn read_events(
-    mut reader: BufReader<tokio::net::unix::OwnedReadHalf>,
+    reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     inbox: mpsc::Sender<Event>,
 ) {
+    let Some(reason) = forward_events(reader, inbox.clone()).await else {
+        return; // the client went away; nobody is waiting for a notice
+    };
+    tracing::warn!("Lost the player connection: {reason}");
+    let _ = inbox
+        .send(Event::Notice {
+            level: NoticeLevel::Error,
+            message: format!("Lost the player connection: {reason}"),
+        })
+        .await;
+    let _ = inbox.send(Event::Bye).await;
+}
+
+/// Forward events until the socket dies. `None` means the *client* is gone —
+/// the receiver was dropped, so nobody is listening any more.
+///
+/// The reader is the handshake's, passed on rather than rebuilt — see
+/// [`DaemonHandle::dial`] for what a second `BufReader` over one socket costs.
+///
+/// Returned rather than acted on, because what a dead socket *means* is the
+/// caller's business: the same reason is a `Bye` to a one-shot verb and a
+/// banner to a TUI.
+async fn forward_events(
+    mut reader: BufReader<tokio::net::unix::OwnedReadHalf>,
+    inbox: mpsc::Sender<Event>,
+) -> Option<String> {
     loop {
         match crate::ipc::read_message_async::<_, Event>(&mut reader).await {
             Ok(Some(event)) => {
                 if inbox.send(event).await.is_err() {
-                    break;
+                    return None;
                 }
             }
-            Ok(None) => {
-                let _ = inbox
-                    .send(Event::Notice {
-                        level: NoticeLevel::Error,
-                        message: "The player has gone; restart tmper to reconnect".into(),
-                    })
-                    .await;
-                let _ = inbox.send(Event::Bye).await;
-                break;
+            // A clean EOF at a line boundary: the daemon said goodbye by
+            // leaving, which for a socket in the middle of a session is a crash
+            // or a kill — a graceful exit sends `Bye` first.
+            Ok(None) => return Some("the player closed the connection".into()),
+            Err(error) => return Some(error.to_string()),
+        }
+    }
+}
+
+/// Hold a connection open, and get another one when it drops.
+///
+/// The client's end of a session outlives any single socket, which is what
+/// makes a crashed player recoverable: this task owns the channels the
+/// [`DaemonHandle`] holds, dials a replacement whenever the current socket
+/// dies, and publishes what it is doing through `state` — which is what the
+/// TUI's banner renders.
+///
+/// Requests sent while disconnected stay in the outbox and go out on the next
+/// connection, in order. That is the right default for what a request *is*: a
+/// key the user pressed, meaning what it meant when they pressed it.
+///
+/// This task ends when the client does — when the handle, and with it the
+/// outbox, is dropped.
+async fn supervise(
+    first: Socket,
+    mut outbox: mpsc::Receiver<Request>,
+    inbox: mpsc::Sender<Event>,
+    state: watch::Sender<Connection>,
+) {
+    let mut socket = first;
+    loop {
+        let Some(reason) = serve(socket, &mut outbox, &inbox).await else {
+            return; // the client is gone; so is there anything to reconnect for
+        };
+        let _ = state.send(Connection::Lost {
+            reason: reason.clone(),
+        });
+        let _ = inbox
+            .send(Event::Notice {
+                level: NoticeLevel::Warn,
+                message: format!("Lost the player: {reason} — reconnecting"),
+            })
+            .await;
+
+        // A player that died is usually a player that has to be started again.
+        // Once per outage: a daemon that comes up and dies again leaves its
+        // socket answering for long enough to be dialed, so a genuine crash
+        // loop stays a crash loop rather than becoming a fork loop.
+        let mut started_one = false;
+        loop {
+            match DaemonHandle::dial().await {
+                Ok(dialed) => {
+                    socket = dialed;
+                    let _ = state.send(Connection::Live);
+                    break;
+                }
+                Err(error) => {
+                    tracing::debug!("Still no player: {error}");
+                    if !started_one {
+                        started_one = true;
+                        if let Err(error) = crate::daemon::spawn_detached() {
+                            tracing::warn!("Could not start the player again: {error}");
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(runtime::DAEMON_RECONNECT_RETRY_MS))
+                        .await;
+                }
             }
-            Err(error) => {
-                tracing::warn!("Lost the player connection: {error}");
-                let _ = inbox
-                    .send(Event::Notice {
-                        level: NoticeLevel::Error,
-                        message: format!("Lost the player connection: {error}"),
-                    })
-                    .await;
-                let _ = inbox.send(Event::Bye).await;
-                break;
+        }
+    }
+}
+
+/// Run one connection until it dies, forwarding requests and events.
+///
+/// `None` when the client itself is gone; `Some(reason)` when the socket is.
+///
+/// The reading is a task of its own, never a `select!` branch. A read future
+/// dropped mid-line takes the buffered bytes with it — the hazard the handshake
+/// had, and the reason it was rewritten — so it must be allowed to fail on its
+/// own terms. The forwarder, meanwhile, *is* cancel-safe (`recv` either yields
+/// a request or it does not), so it is what the supervisor may drop.
+async fn serve(
+    socket: Socket,
+    outbox: &mut mpsc::Receiver<Request>,
+    inbox: &mpsc::Sender<Event>,
+) -> Option<String> {
+    let (live_tx, live_rx) = mpsc::channel::<Request>(runtime::DAEMON_CLIENT_QUEUE);
+    tokio::spawn(write_requests(socket.write, live_rx));
+    let mut reader = tokio::spawn(forward_events(socket.read, inbox.clone()));
+
+    loop {
+        tokio::select! {
+            request = outbox.recv() => match request {
+                // A send that fails means the writer task is done with, which
+                // means this socket is. The reader will say so; dropping it
+                // here just means the reason comes from the read side, which
+                // is where a socket failure is actually observed.
+                Some(request) => { let _ = live_tx.send(request).await; }
+                None => {
+                    reader.abort();
+                    return None;
+                }
+            },
+            finished = &mut reader => {
+                return match finished {
+                    Ok(Some(reason)) => Some(reason),
+                    // The client's inbox was dropped: it is not waiting for
+                    // another player, it is leaving.
+                    Ok(None) => None,
+                    Err(error) => Some(format!("the reader task died: {error}")),
+                };
             }
         }
     }
@@ -464,12 +661,23 @@ mod tests {
     // Under `cfg(test)` the socket path lives in a per-process temp directory,
     // never the developer's `$XDG_RUNTIME_DIR`.
 
-    /// A listener where [`DaemonHandle::connect`] will look for one.
-    fn listener() -> tokio::net::UnixListener {
+    /// One socket path for the whole test binary, and several tests below bind
+    /// it — so they take turns. Without this they race at the filesystem level:
+    /// one test's `bind` after another's `remove_file` is an `ENOENT` for a
+    /// client that was about to dial, and the failure reads as a reconnect bug.
+    static SOCKET: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// A listener where [`DaemonHandle::connect`] will look for one. Hold the
+    /// guard for as long as the socket is needed.
+    async fn listener() -> (
+        tokio::sync::MutexGuard<'static, ()>,
+        tokio::net::UnixListener,
+    ) {
+        let guard = SOCKET.lock().await;
         let path = crate::paths::socket_path();
         crate::paths::ensure_runtime_dir().expect("runtime dir");
         let _ = std::fs::remove_file(&path);
-        tokio::net::UnixListener::bind(&path).expect("bind")
+        (guard, tokio::net::UnixListener::bind(&path).expect("bind"))
     }
 
     /// The next event, with a deadline: "nothing arrived" must fail the test
@@ -529,7 +737,7 @@ mod tests {
     /// one waits forever for a queue it was already sent.
     #[tokio::test]
     async fn the_greeting_behind_the_welcome_is_not_swallowed() {
-        let listener = listener();
+        let (_socket, listener) = listener().await;
         let greeter = tokio::spawn(greet_in_one_chunk(listener));
 
         let mut handle = DaemonHandle::connect().await.expect("connect");
@@ -550,7 +758,7 @@ mod tests {
     /// client should say so rather than panic on an unexpected `None`.
     #[tokio::test]
     async fn a_daemon_that_leaves_before_saying_hello_is_reported() {
-        let listener = listener();
+        let (_socket, listener) = listener().await;
         let greeter = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept");
             // Read the hello before leaving. Closing on an unread hello is a
@@ -574,5 +782,296 @@ mod tests {
             "unhelpful error: {error}"
         );
         greeter.await.expect("the fake daemon finished");
+    }
+
+    /// A daemon that dies *after* the greeting ends a one-shot verb's session
+    /// with a `Bye` — the verb has nothing left to wait for, and saying so is
+    /// what stops `tmper status` from hanging on a socket nobody will answer on.
+    #[tokio::test]
+    async fn a_socket_that_dies_mid_session_ends_a_one_shot_verb() {
+        let (_socket, listener) = listener().await;
+        let player = fake_player(listener);
+
+        let mut handle = DaemonHandle::connect().await.expect("connect");
+        assert!(matches!(event(&mut handle).await, Event::Snapshot(_)));
+        player.kill();
+
+        assert!(
+            matches!(event(&mut handle).await, Event::Notice { .. }),
+            "the reason, in words"
+        );
+        assert!(
+            matches!(event(&mut handle).await, Event::Bye),
+            "and then the end of the session"
+        );
+    }
+
+    // ── Surviving the player ──
+    //
+    // The TUI's handle is the one that heals. Everything below drives the real
+    // supervisor over a real socket; the far end is a stand-in player that can
+    // be told to die and comes back when the client dials again.
+
+    /// A stand-in player: greets every connection the way the daemon does, and
+    /// then stays up until it is told to go.
+    ///
+    /// The far end has to be killable on cue and restartable, which a real
+    /// daemon is neither — and starting one from a test is refused outright
+    /// (see [`crate::daemon::spawn_detached`]).
+    struct FakePlayer {
+        /// One value per live connection: send to end it.
+        deaths: mpsc::UnboundedSender<()>,
+        /// `true` means the player is gone for good — no more connections.
+        vanish: watch::Sender<bool>,
+        /// Everything any connection asked for, `Hello` aside.
+        requests: mpsc::UnboundedReceiver<Request>,
+        /// How many times a client has connected.
+        connections: watch::Receiver<usize>,
+    }
+
+    impl FakePlayer {
+        /// End the current connection, as a crash would: no `Bye`, just a
+        /// socket that stops answering. The next dial gets a new one.
+        fn kill(&self) {
+            self.deaths.send(()).expect("a connection to kill");
+        }
+
+        /// Take the player away for good: the current connection dies and
+        /// nothing accepts the next dial.
+        fn vanish(&self) {
+            self.kill();
+            let _ = self.vanish.send_replace(true);
+        }
+
+        /// Wait for a request to arrive on the wire.
+        async fn next_request(&mut self) -> Request {
+            tokio::time::timeout(Duration::from_secs(5), self.requests.recv())
+                .await
+                .expect("the client said something")
+                .expect("a request")
+        }
+    }
+
+    fn fake_player(listener: tokio::net::UnixListener) -> FakePlayer {
+        let (deaths, mut dying) = mpsc::unbounded_channel::<()>();
+        let (vanish, mut vanishing) = watch::channel(false);
+        let (requests_tx, requests) = mpsc::unbounded_channel::<Request>();
+        let (count_tx, connections) = watch::channel(0usize);
+
+        tokio::spawn(async move {
+            let mut count = 0usize;
+            loop {
+                let accepted = tokio::select! {
+                    // Cancel-safe, and the only *listening* arm: `accept` is
+                    // not, so it must never be the one a select drops — it is
+                    // not dropped, it is simply not polled again.
+                    _ = vanishing.changed() => return,
+                    accepted = listener.accept() => accepted,
+                };
+                let Ok((stream, _)) = accepted else { return };
+
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let hello: Option<Request> = match crate::ipc::read_message_async(&mut reader).await
+                {
+                    Ok(hello) => hello,
+                    Err(_) => continue, // a client that left before saying hello
+                };
+                if !matches!(hello, Some(Request::Hello { .. })) {
+                    continue;
+                }
+                count += 1;
+                let _ = count_tx.send_replace(count);
+
+                let mut greeted = true;
+                for message in [
+                    Event::Welcome {
+                        proto: PROTOCOL_VERSION,
+                        version: "test".into(),
+                        pid: 1,
+                    },
+                    Event::Snapshot(Box::default()),
+                ] {
+                    if crate::ipc::write_message_async(&mut write_half, &message)
+                        .await
+                        .is_err()
+                    {
+                        greeted = false;
+                        break;
+                    }
+                }
+                if !greeted {
+                    continue;
+                }
+
+                // Everything this connection asks for, until the test ends it.
+                loop {
+                    tokio::select! {
+                        _ = dying.recv() => break,
+                        _ = vanishing.changed() => return,
+                        message = crate::ipc::read_message_async::<_, Request>(&mut reader) => {
+                            match message {
+                                Ok(Some(request)) => {
+                                    if requests_tx.send(request).is_err() {
+                                        return;
+                                    }
+                                }
+                                // The client hung up, or the socket broke.
+                                _ => break,
+                            }
+                        }
+                    }
+                }
+                // Both halves, so the client sees a socket that is finished
+                // rather than one that is merely quiet.
+                drop(write_half);
+                drop(reader);
+            }
+        });
+
+        FakePlayer {
+            deaths,
+            vanish,
+            requests,
+            connections,
+        }
+    }
+
+    /// Wait for the handle to report a state, with a deadline.
+    async fn wait_for(handle: &DaemonHandle, want: impl Fn(&Connection) -> bool) -> Connection {
+        let mut watch = handle.connection.clone();
+        let current = handle.connection();
+        if want(&current) {
+            return current;
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                watch
+                    .changed()
+                    .await
+                    .expect("the supervisor is still running");
+                let now = watch.borrow().clone();
+                if want(&now) {
+                    return now;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the handle never reported the state the test waited for"))
+    }
+
+    /// The whole point of the supervisor: a player that dies does not take the
+    /// client with it. The banner goes up, the client dials again on its own,
+    /// and the banner comes down when a player answers.
+    #[tokio::test]
+    async fn a_dead_player_puts_up_a_banner_and_comes_back() {
+        let (_socket, listener) = listener().await;
+        let player = fake_player(listener);
+        let mut handle = DaemonHandle::connect_or_spawn()
+            .await
+            .expect("the first connection");
+
+        assert_eq!(handle.connection(), Connection::Live);
+        assert!(matches!(event(&mut handle).await, Event::Snapshot(_)));
+
+        player.kill();
+        let lost = wait_for(&handle, |c| matches!(c, Connection::Lost { .. })).await;
+        let Connection::Lost { reason } = lost else {
+            unreachable!("asked for a lost connection")
+        };
+        assert!(
+            !reason.is_empty(),
+            "a banner that says only 'lost' is not worth showing"
+        );
+
+        // The client is told, and is *not* told to leave. This is the line
+        // between a player that died and a player that said goodbye.
+        let events = handle.poll();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                Event::Notice {
+                    level: NoticeLevel::Warn,
+                    ..
+                }
+            )),
+            "the loss is announced: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, Event::Bye)),
+            "and the client is not sent away: {events:?}"
+        );
+
+        wait_for(&handle, |c| matches!(*c, Connection::Live)).await;
+        assert!(
+            handle
+                .poll()
+                .iter()
+                .any(|e| matches!(e, Event::Snapshot(_))),
+            "the new connection is greeted like any other"
+        );
+        assert_eq!(
+            *player.connections.borrow(),
+            2,
+            "the client dialed again by itself"
+        );
+    }
+
+    /// A command given while the player is away is not swallowed: it waits in
+    /// the outbox and goes out with the next connection. The user pressed a key
+    /// meaning what it meant when they pressed it.
+    #[tokio::test]
+    async fn a_command_given_during_an_outage_arrives_after_it() {
+        let (_socket, listener) = listener().await;
+        let mut player = fake_player(listener);
+        let mut handle = DaemonHandle::connect_or_spawn()
+            .await
+            .expect("the first connection");
+        assert!(matches!(event(&mut handle).await, Event::Snapshot(_)));
+
+        player.kill();
+        wait_for(&handle, |c| matches!(c, Connection::Lost { .. })).await;
+
+        handle.dispatch(Request::SetVolume { volume: 0.25 });
+
+        wait_for(&handle, |c| matches!(*c, Connection::Live)).await;
+        assert_eq!(
+            player.next_request().await,
+            Request::SetVolume { volume: 0.25 }
+        );
+    }
+
+    /// A player that never comes back leaves the client alive and usable — the
+    /// banner is not a dialog, and there is nothing for the user to dismiss.
+    ///
+    /// This is also the test that drives the supervisor past a *failed* dial,
+    /// which is where it would try to start a player: `spawn_detached` refuses
+    /// under `cfg(test)`, so the retry loop is what is left, and the client is
+    /// still there to offer a `q`.
+    #[tokio::test]
+    async fn a_client_whose_player_never_returns_stays_up() {
+        let (_socket, listener) = listener().await;
+        let player = fake_player(listener);
+        let handle = DaemonHandle::connect_or_spawn()
+            .await
+            .expect("the first connection");
+
+        player.vanish();
+        wait_for(&handle, |c| matches!(c, Connection::Lost { .. })).await;
+
+        // Several attempts' worth of time, with nothing on the far end.
+        tokio::time::sleep(Duration::from_millis(
+            runtime::DAEMON_RECONNECT_RETRY_MS * 3,
+        ))
+        .await;
+        assert!(
+            matches!(handle.connection(), Connection::Lost { .. }),
+            "still lost, and still saying so"
+        );
+        assert_eq!(
+            *player.connections.borrow(),
+            1,
+            "and it never pretended to reconnect"
+        );
     }
 }

@@ -11,6 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
+use crate::app::handle::Connection;
 use crate::constants::runtime;
 use crate::lyrics::types::LyricTrack;
 use crate::ui::theme::Theme;
@@ -194,6 +195,14 @@ pub struct UiState {
     pub search_mode: bool,
     pub search_query: String,
     pub notification: Option<(String, std::time::Instant)>,
+    /// Whether the client can still reach its player.
+    ///
+    /// Persistent where [`UiState::notification`] is transient, and the
+    /// distinction is the point: a toast says something happened, and this says
+    /// something *is*. A player that has gone does not come back because ten
+    /// seconds went by, so the banner stays until it does — or until the user
+    /// leaves, which is still theirs to do.
+    pub connection: Connection,
     pub visible_rows: Cell<usize>,
     pub cover_rect: Cell<(u16, u16, u16, u16)>,
     /// Pixel size of one terminal cell, measured once per frame from the
@@ -230,6 +239,7 @@ impl Default for UiState {
             search_mode: false,
             search_query: String::new(),
             notification: None,
+            connection: Connection::Live,
             visible_rows: Cell::new(20),
             cover_rect: Cell::new((0, 0, 0, 0)),
             cell_px: Cell::new(crate::constants::runtime::FALLBACK_CELL_PX),
@@ -415,10 +425,43 @@ pub fn render(f: &mut Frame, state: &UiState) {
         }
     }
 
-    // Last, so it lands on top of the view. Drawn earlier it was simply
+    // Last, so they land on top of the view. Drawn earlier they were simply
     // painted over: the view renders the whole frame, and a mode-change
     // notification was therefore never actually visible.
+    //
+    // The banner first, so a toast about the connection — the moment it went —
+    // is readable on top of the state it left behind.
+    render_connection_banner(f, state);
     render_notification(f, state);
+}
+
+/// A strip at the top of the frame for as long as the player is unreachable.
+///
+/// Across the whole width and one row tall, rather than a floating popup: this
+/// is not an announcement that interrupts, it is the frame's own state, and it
+/// stays until the player is back. The user can still drive the TUI — nothing
+/// here is modal — which is the honest shape of it, since the thing that broke
+/// is not the client.
+fn render_connection_banner(f: &mut Frame, state: &UiState) {
+    let Connection::Lost { reason } = &state.connection else {
+        return;
+    };
+    let area = f.area();
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let line = format!("  ⚠ 玩家已断开：{reason} — 正在重连…  ");
+    let strip = Rect::new(0, 0, area.width, 1);
+    f.render_widget(Clear, strip);
+    f.render_widget(
+        Paragraph::new(line).style(
+            Style::default()
+                .fg(state.theme.text)
+                .bg(state.theme.warning),
+        ),
+        strip,
+    );
 }
 
 /// Floating banner for mode changes (volume, repeat, command results).
@@ -559,6 +602,34 @@ mod render_tests {
         let out = render_to_string(&state, 80, 24);
 
         assert!(out.contains("Saved!"), "notification text rendered");
+    }
+
+    /// A lost player is drawn, across the top, saying what happened.
+    #[test]
+    fn a_lost_player_is_drawn_as_a_banner() {
+        let state = UiState {
+            connection: Connection::Lost {
+                reason: "the player closed the connection".into(),
+            },
+            ..Default::default()
+        };
+
+        let out = render_to_string(&state, 80, 24);
+
+        // One symbol per cell, and a double-width glyph leaves the cell after
+        // it empty — so the Chinese half is matched a character at a time.
+        assert!(out.contains('断'), "the banner is on screen");
+        assert!(out.contains("closed"), "and it says why");
+    }
+
+    /// A banner that stays after the player is back is worse than no banner:
+    /// the user would be told the player is gone while looking at it playing.
+    #[test]
+    fn a_live_player_draws_no_banner() {
+        let state = UiState::default();
+        assert!(matches!(state.connection, Connection::Live));
+
+        assert!(!render_to_string(&state, 80, 24).contains("断开"));
     }
 
     /// Notifications are transient: a stale one must not keep drawing.

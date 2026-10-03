@@ -108,6 +108,17 @@ pub mod runtime {
     /// frozen state because of it.
     pub const DAEMON_HELLO_TIMEOUT_MS: u64 = 2000;
 
+    /// Gap between attempts to get a *lost* player back.
+    ///
+    /// Slower than [`DAEMON_CONNECT_RETRY_MS`]: that one is a client waiting on
+    /// a daemon it just started and can expect within milliseconds, while this
+    /// one runs for as long as the outage lasts — possibly for the rest of the
+    /// session — with a banner on screen and a user who may be watching. A
+    /// `connect` on a unix socket twice a second is not a cost worth optimizing
+    /// away, and the difference between 25ms and 500ms is the difference
+    /// between "the TUI came back" and "the TUI came back instantly".
+    pub const DAEMON_RECONNECT_RETRY_MS: u64 = 500;
+
     // ── FFT ──
 
     /// Number of PCM samples fed into the FFT analyzer per frame.

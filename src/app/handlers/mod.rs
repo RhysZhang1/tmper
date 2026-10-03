@@ -643,6 +643,11 @@ impl App {
         // which it is.
         let mut events = self.player.poll();
         events.extend(self.player.tick());
+        // Read before pumping, so a snapshot and the loss of the connection it
+        // came from cannot be reported in the wrong order. Not an event: the
+        // banner is shown for as long as this says so, and there is no
+        // afterwards to forget.
+        self.ui_state.connection = self.player.connection();
         self.pump(events);
 
         let pos = self.ui_state.player.position;
