@@ -675,25 +675,26 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 
 > 下表统计的是**测试用例数量**，不是**行覆盖率**。行覆盖率需用 `cargo llvm-cov` 单独测量
 > （见 [10.3 行覆盖率](#103-行覆盖率)）。
-> **现状（2026-10-03 实测）**：总行覆盖率 **80.09%**（函数 82.13%、区域 79.16%；
-> 少数计时敏感测试会让该数字每次浮动 ~0.3%）。XDG/流式合并一度把它压到 75.55%
-> （合并带进约 880 行新生产代码，而新增测试只有 7 个），随后的缺陷修复系列又推回 80% 以上 ——
-> 主要来自 `input/handler.rs` 19%→98%（该文件此前零测试）、`app/playback.rs` 24%→64%、
-> `ui/cover/mod.rs` 59%→87%、`visualizer/render.rs` 82%→96%。
-> 剩余的几个未覆盖块：`library/scanner.rs` 30%（生产扫描器的错误路径）、
-> `paths.rs` 29%（非测试分支在 `cfg(test)` 下无法执行）、`audio/engine.rs` 48%、
-> `ui/views/player_view.rs` 72%。
+> **现状（2026-10-03 实测）**：总行覆盖率 **88.78%**（函数 88.24%、区域 87.75%；
+> 少数计时敏感测试会让该数字每次浮动 ~0.3%）。本次从 80.09% 推到这里，主要靠补齐此前
+> 零测试的模块：`input/handler.rs`（19%→98%）、`library/scanner.rs`（30%→98%）、
+> `app/persistence.rs`、`config.rs`、`app/playback.rs`、`ui/views/player_view.rs`（72%→92%）。
+>
+> 剩余的未覆盖部分是**结构性**的，不是遗漏：
+> `audio/engine.rs` 70%（6 个 `#[ignore]` 设备测试的函数体本身计入未覆盖，另有 `new`/`play_file`
+> 需要真实声卡）、`app/mod.rs` 63%（`TerminalGuard` 与 `run` 事件循环需要真实 tty）、
+> `paths.rs` 29%（非 `cfg(test)` 分支在测试构建下根本不参与编译）、`main.rs` 0%（二进制入口）。
 
 | 模块 | 测试数 | 覆盖内容 |
 |------|--------|----------|
 | audio/decoder.rs | 3 | 解码 WAV、不存在的文件、seek |
-| audio/engine.rs | 7 | 播放状态机、暂停/seek/完成（headless）、背压上界、会话替换丢弃陈旧事件、打开失败上报 |
-| lyrics/parser.rs | 7 | 标准 LRC、元数据、多时间戳、逐字、空文件、损坏行、排序 |
+| audio/engine.rs | 23 | 播放状态机、暂停/seek/完成（headless）、背压上界、会话替换丢弃陈旧事件、打开失败上报、`InstrumentedSource` 环形缓冲与 DoD 释放计数、会话辅助函数、队列诊断 |
+| lyrics/parser.rs | 16 | 标准 LRC、元数据、多时间戳、逐字、空文件、损坏行、排序、BOM/UTF-8/GBK/Shift-JIS 编码检测、文件读取 |
 | visualizer/fft.rs | 1 | 440Hz 峰值检测 |
 | visualizer/processor.rs | 2 | 桶数量、平滑收敛 |
 | visualizer/render.rs | 6 | 渲染输出、颜色渐变、行宽恰为 width（含 num_bars > width）、`bar_at_column` 跨过居中留白、绘制与配色逐列对齐 |
 | library/database.rs | 10 | upsert、重复更新、搜索、artists、albums、delete、前缀精确匹配、`delete_missing_under` 不误伤同前缀兄弟目录 |
-| library/scanner.rs | 1 | 扩展名过滤（生产扫描器 `scan_incremental` 的错误路径尚无单测） |
+| library/scanner.rs | 10 | 扩展名过滤、遍历错误使列表不完整（缺失根、不可读子目录）、指纹命中跳过与变更重读、元数据失败计入 failed 但不影响 complete、取消、进度上报 |
 | library/playlist_manager.rs | 2 | M3U 往返、相对路径 |
 | metadata/reader.rs | 3 | FLAC、WAV（无标签）、不存在的文件 |
 | ui/theme.rs | 5 | hex 颜色解析（有效/无效回退）、多字节输入不 panic、缺失主题回退默认、真实主题 13 色槽加载 |
@@ -702,24 +703,25 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 | input/keymap.rs | 5 | 单字符/^X/特殊名称、非 ASCII 单字符不再静默变空格、未知名称回退 |
 | playlist.rs | — | （v3.5 后仅存 `PlaylistData` 数据模型，逻辑并入 playlist_view） |
 | paths.rs | 2 | XDG 目录拼接、测试期重定向到临时根（三个目录都隔离） |
+| config.rs | 10 | 模板与代码默认值一致、clamp 上下界与放行、f32 两位小数序列化、往返、部分/空/含未知键的文档解析 |
 | app/mod.rs | 14 | 视图切换、音量、循环、加载播放、停止、命令模式、搜索、文本输入模式旁路集合（含 4 个 tokio 集成式） |
-| app/playback.rs | 8 | 陈旧歌单游标下 prev/next 不越界、空歌单 no-op、曲终三模式、FFT 取最新样本窗口 |
-| app/persistence.rs | 1 | 部分字段的 state.json 仍恢复其包含的设置 |
-| app/handlers/mod.rs | 22 | 键位匹配、视图分发切换、滚动 clamp、test_support 辅助（test_app/seed_settings） |
+| app/playback.rs | 17 | 陈旧歌单游标下 prev/next 不越界、空歌单 no-op、曲终三模式（歌单与全局两条路径）、全局队列两端停住、shuffle 落在范围内、FFT 取最新样本窗口、播放选中项 |
+| app/persistence.rs | 11 | state 往返与部分字段恢复、缺失/损坏文件、歌单往返且丢弃已不存在的歌曲、库路径往返与去重、写入内容 |
+| app/handlers/mod.rs | 41 | 键位匹配、视图分发切换、滚动 clamp、命令分发全分支（quit/theme/volume/seek/shuffle/view/import/export 及失败路径）、AppEvent 分发、帮助覆盖层按键、tick 的频谱衰减与配置同步、test_support 辅助 |
 | app/handlers/browser.rs | 16 | 焦点切换、库/文件系统导航与 clamp、Enter 进入目录/加库去重、混合目录（子目录+音频）选中行不串位、Backspace 边界、刷新过滤排序 |
 | app/handlers/library.rs | 19 | 面板导航、搜索输入/回车/回退、clamp_scroll、库加载 upsert 与去重、Enter 播放、扫描完成才剪枝（含 1 个 tokio 集成式） |
 | app/handlers/playlist.rs | 18 | 焦点切换、新建歌单插入模式、展开/删除/重复保护、M3U 导出、flat-model 解析、clamp |
 | app/handlers/settings.rs | 16 | 布局 19 行、j/k 导航 clamp、主题/柱数/平滑/音量/步长/封面循环、跳过行、Enter 动作、M3U 导出、config 持久化 |
-| ui/render_tests | 2 | 最小支持尺寸渲染、极窄终端不 panic |
+| ui/render_tests | 7 | 最小支持尺寸渲染、极窄终端不 panic、通知弹窗绘制与过期、命令面板、帮助覆盖层优先级 |
 | ui/views/file_browser_view.rs | 3 | 空/填充渲染、聚焦样式 |
 | ui/views/library_view.rs | 6 | 三面板标题、数据行、搜索栏、光标闪烁、长列表滚动保持选中行可见 |
 | ui/views/lyrics_view.rs | 4 | 空提示、歌词+当前高亮、offset 标签、滚动保持当前行可见 |
 | ui/views/playlist_view.rs | 8 | flat-model 行数/行号/解析、styled lines（展开/输入/播放前缀）、渲染与通知弹出 |
 | ui/views/settings_view.rs | 3 | rebuild_settings 布局与配置值、渲染冒烟（含 scroll clamp） |
-| ui/views/player_view.rs | 6 | cover 块渲染（空字节/零面积/内存 PNG）、渲染冒烟、搜索命中与无匹配 |
+| ui/views/player_view.rs | 13 | cover 块渲染（空字节/零面积/内存 PNG）、渲染冒烟、搜索命中与无匹配、迷你歌单、歌词区（空/当前行/跟随滚动）、歌曲信息各槽位、控制栏进度与零时长 |
 | ui/cover/mod.rs | 9 | 一次性发送不变量、区域重发、视图切换/隐藏/无封面清除、chafa 失败不重试、Kitty 尺寸变化重发、搜索覆盖层清理两个协议（注入式 writer/encoder） |
-| ui/widgets/help_popup.rs | 1 | 帮助文案与当前键位/XDG 路径一致 |
-| **总计** | **229** | **223 默认运行 + 6 设备门控（`#[ignore]`）** |
+| ui/widgets/help_popup.rs | 4 | 帮助文案与当前键位/XDG 路径一致、绘制、滚动到底后 clamp、小于自身边距的终端 |
+| **总计** | **326** | **320 默认运行 + 6 设备门控（`#[ignore]`）** |
 
 #### 测试分层
 
