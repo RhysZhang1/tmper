@@ -315,6 +315,12 @@ impl App {
                     self.cover_renderer.clear_done();
                 }
 
+                // Re-read the cell size each frame — a resize changes it, and
+                // both the cover box and the chafa geometry depend on it.
+                self.ui_state
+                    .cell_px
+                    .set(crate::ui::cover::terminal_cell_px());
+
                 if let Err(e) = terminal_guard
                     .terminal_mut()
                     .draw(|f| ui::render(f, &self.ui_state))
@@ -333,9 +339,16 @@ impl App {
                     cover_gen: self.ui_state.player.cover_gen.get(),
                     cover_art: self.ui_state.player.cover_art.clone(),
                     cover_rect: self.ui_state.cover_rect.get(),
+                    cell_px: self.ui_state.cell_px.get(),
+                    // Still the value the frame above was drawn with; the
+                    // renderer compares it against what it sent for.
+                    blocks_suppressed: self.ui_state.native_cover.get(),
                 };
                 // Dispatch to the active protocol (Kitty or chafa SIXEL).
                 self.cover_renderer.render(&cover_params);
+                self.ui_state
+                    .native_cover
+                    .set(self.cover_renderer.native_active());
 
                 last_draw = std::time::Instant::now();
                 needs_draw = false;

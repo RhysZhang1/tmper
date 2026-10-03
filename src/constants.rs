@@ -45,6 +45,22 @@ pub mod runtime {
     /// Kitty terminals recommend keeping payloads ≤ 4 KiB per escape sequence.
     pub const KITTY_CHUNK_SIZE: usize = 4096;
 
+    /// Pixel size chafa uses for one cell of a SIXEL payload.
+    ///
+    /// chafa cannot see this terminal (all three stdio streams are pipes, and
+    /// `--probe off` disables the escape-sequence query), so its SIXEL geometry
+    /// is a pure function of `--size`: 20 px per requested column, 20 px per
+    /// requested row rounded down to a multiple of 6. Measured against chafa
+    /// 1.18 — `-s 20x10` yields 400×198 px whatever the real terminal reports,
+    /// and `--font-ratio` does not change it. We therefore ask for the number
+    /// of chafa-cells that spans the cover rect's *pixels*, not its cells.
+    pub const CHAFA_SIXEL_CELL_PX: u32 = 20;
+
+    /// Cell pixel size assumed when the terminal does not report one
+    /// (`window_size()` returns 0 — tmux, some multiplexers). 10×20 is the
+    /// common xterm/Konsole cell and the model the Kitty path already used.
+    pub const FALLBACK_CELL_PX: (u16, u16) = (10, 20);
+
     // ── FFT ──
 
     /// Number of PCM samples fed into the FFT analyzer per frame.

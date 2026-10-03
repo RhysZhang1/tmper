@@ -278,6 +278,10 @@ down = "j"
 - **Konsole (Plasma 6+)**：安装 `chafa` 包后自动使用 SIXEL 渲染
 - 其他终端：使用半块字符渲染（▄ + fg/bg 两倍垂直分辨率）
 
+封面区域会按图片宽高比自动调整，并读取终端上报的单元格像素尺寸来对齐原生图像，因此在
+不同长宽比的窗口中都不会出现图像旁边多出一块像素的错位。`tmux` / `screen` 下图形协议默认
+被吞掉，程序会自动退回到 chafa（若可用）或半块字符。
+
 ### Q: 歌词不显示？
 
 确保 `.lrc` 文件与音频文件同名、同目录。检查歌词编码是否为 UTF-8 / GBK / Shift-JIS。按 `3` 切换到全屏歌词视图。
@@ -310,7 +314,7 @@ tmper/
 ├── themes/                       # 编译进程序的五套默认主题
 ├── progress/                     # 历史开发记录，不代表当前实现
 │
-├── src/                          # 源代码 (~8,000 行 Rust)
+├── src/                          # 源代码 (~15,000 行 Rust)
 │   ├── main.rs                   #   入口
 │   ├── constants.rs              #   运行时调优常量
 │   ├── config.rs                 #   配置加载
@@ -367,7 +371,7 @@ tmper/
 ```bash
 cargo build                        # 调试编译
 cargo build --release              # 发布编译（资源已内嵌的可执行文件）
-cargo test                         # 默认：全部无需音频设备的测试（320 个）
+cargo test                         # 默认：全部无需音频设备的测试（337 个）
 cargo test audio_output_ -- --ignored --test-threads=1  # 需要真实/虚拟设备（6 个）
 cargo clippy -- -D warnings        # 代码检查
 cargo fmt --all                    # 格式化

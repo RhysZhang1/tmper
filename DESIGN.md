@@ -645,7 +645,9 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 2. **协议互斥**：Kitty 与 chafa SIXEL 按终端环境检测二选一，避免两者同时写入争抢同一区域。
 3. **输入零防御**：不再需要 guard / 帧抑制 / 控制字符过滤等防御层。`handle_key_event` 不拦截任何按键。
 4. **清理**：离开播放器视图、隐藏封面、或新曲目无封面时，置 `clear_pending` → 事件循环 `terminal.clear()` 覆盖 SIXEL 残留（Konsole 对 ED 清 SIXEL 的 workaround）。
-5. 渲染器经注入式 writer + encoder 可测试，状态机由 6 个单元测试锁定（`src/ui/cover/mod.rs`）。
+5. **几何对齐**（2026-10-03，详见 `progress/2026-10-03-cover-aspect-fit.md`）：封面矩形由 `player_view::fit_cover_rect` 按图片**像素**宽高比收缩居中，两个图层共用这一个盒子；chafa 的 `--size` 由「矩形像素 ÷ `CHAFA_SIXEL_CELL_PX`（实测每请求格 20px）」换算并配 `--stretch`。单元格像素每帧经 `terminal_cell_px()`（`window_size()` ioctl，不写 stdin）读取，不上报时退回 `FALLBACK_CELL_PX`。
+6. **字符画让位**：原生图像生效时（`CoverRenderer::native_active`）用 `Clear` 抹掉封面矩形内的半块字符，而不是不画——`Block` 只重置样式，保留的 `▄▀` 会以默认色露出成像素块。因写入单元格会擦除下层图形层，`blocks_suppressed` 并入 SIXEL 缓存键，在被改写的那一帧重发一次。
+7. 渲染器经注入式 writer + encoder 可测试，状态机由 15 个单元测试锁定（`src/ui/cover/mod.rs`）。
 
 ### 9.4 全局快捷键
 
@@ -675,14 +677,15 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 
 > 下表统计的是**测试用例数量**，不是**行覆盖率**。行覆盖率需用 `cargo llvm-cov` 单独测量
 > （见 [10.3 行覆盖率](#103-行覆盖率)）。
-> **现状（2026-10-03 实测）**：总行覆盖率 **88.78%**（函数 88.24%、区域 87.75%；
-> 少数计时敏感测试会让该数字每次浮动 ~0.3%）。本次从 80.09% 推到这里，主要靠补齐此前
-> 零测试的模块：`input/handler.rs`（19%→98%）、`library/scanner.rs`（30%→98%）、
+> **现状（2026-10-03 实测）**：总行覆盖率 **88.22%**（函数 88.83%、区域 89.34%；
+> 少数计时敏感测试会让该数字每次浮动 ~0.3%）。同日先由 80.09% 补到 88.78%，主要靠补齐
+> 此前零测试的模块：`input/handler.rs`（19%→98%）、`library/scanner.rs`（30%→98%）、
 > `app/persistence.rs`、`config.rs`、`app/playback.rs`、`ui/views/player_view.rs`（72%→92%）。
+> 随后封面几何修复新增了几行位于 `run()` 内的代码，总数因此回落到 88.22%。
 >
 > 剩余的未覆盖部分是**结构性**的，不是遗漏：
-> `audio/engine.rs` 70%（6 个 `#[ignore]` 设备测试的函数体本身计入未覆盖，另有 `new`/`play_file`
-> 需要真实声卡）、`app/mod.rs` 63%（`TerminalGuard` 与 `run` 事件循环需要真实 tty）、
+> `audio/engine.rs` 73%（6 个 `#[ignore]` 设备测试的函数体本身计入未覆盖，另有 `new`/`play_file`
+> 需要真实声卡）、`app/mod.rs` 62%（`TerminalGuard` 与 `run` 事件循环需要真实 tty）、
 > `paths.rs` 29%（非 `cfg(test)` 分支在测试构建下根本不参与编译）、`main.rs` 0%（二进制入口）。
 
 | 模块 | 测试数 | 覆盖内容 |
@@ -718,8 +721,8 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 | ui/views/lyrics_view.rs | 4 | 空提示、歌词+当前高亮、offset 标签、滚动保持当前行可见 |
 | ui/views/playlist_view.rs | 8 | flat-model 行数/行号/解析、styled lines（展开/输入/播放前缀）、渲染与通知弹出 |
 | ui/views/settings_view.rs | 3 | rebuild_settings 布局与配置值、渲染冒烟（含 scroll clamp） |
-| ui/views/player_view.rs | 13 | cover 块渲染（空字节/零面积/内存 PNG）、渲染冒烟、搜索命中与无匹配、迷你歌单、歌词区（空/当前行/跟随滚动）、歌曲信息各槽位、控制栏进度与零时长 |
-| ui/cover/mod.rs | 9 | 一次性发送不变量、区域重发、视图切换/隐藏/无封面清除、chafa 失败不重试、Kitty 尺寸变化重发、搜索覆盖层清理两个协议（注入式 writer/encoder） |
+| ui/views/player_view.rs | 20 | cover 块渲染（空字节/零面积/内存 PNG）、封面矩形自适应（正方形/带余量的一边/宽图/竖图/退化输入/永不越界）、原生图层生效时字符画让位、渲染冒烟、搜索命中与无匹配、迷你歌单、歌词区（空/当前行/跟随滚动）、歌曲信息各槽位、控制栏进度与零时长 |
+| ui/cover/mod.rs | 15 | 一次性发送不变量、区域重发、视图切换/隐藏/无封面清除、chafa 失败不重试、Kitty 尺寸变化重发、搜索覆盖层清理两个协议、chafa 请求盒换算与不溢出、单元格尺寸解析与回退、抑制字符画时的重发（注入式 writer/encoder） |
 | ui/widgets/help_popup.rs | 4 | 帮助文案与当前键位/XDG 路径一致、绘制、滚动到底后 clamp、小于自身边距的终端 |
 | **总计** | **326** | **320 默认运行 + 6 设备门控（`#[ignore]`）** |
 
@@ -833,7 +836,7 @@ tmper/
 │   │   ├── mod.rs              #     UiState、ViewMode、render() 入口
 │   │   ├── theme.rs            #     13 色槽语义主题（themes/*.toml 加载）
 │   │   ├── cover/              #     封面图渲染（终端协议直接输出）
-│   │   │   └── mod.rs          #       CoverRenderer: Kitty/SIXEL 互斥、一次性发送、6 测试
+│   │   │   └── mod.rs          #       CoverRenderer: Kitty/SIXEL 互斥、一次性发送、几何对齐、15 测试
 │   │   ├── views/              #     视图
 │   │   │   ├── player_view.rs  #       播放器主视图
 │   │   │   ├── library_view.rs #       曲库浏览器

@@ -62,11 +62,16 @@ pub struct TrackDisplay {
 /// resize + Floyd-Steinberg dither), keyed by cover identity and render area.
 /// Recomputing every frame at 30 FPS was a major UI-lag source on the player
 /// view, even on terminals where a SIXEL/Kitty cover hides the blocks.
+///
+/// `rect` is the aspect-fitted box the art was rendered into — it is *not* the
+/// whole panel, and the native graphics layer is placed against the same box.
 #[derive(Debug, Clone)]
 pub struct CoverLinesCache {
     pub gen: u64,
     pub width: u16,
     pub height: u16,
+    /// `(x, y, w, h)` in cells, as `ui::cover` expects it.
+    pub rect: (u16, u16, u16, u16),
     pub lines: Vec<ratatui::text::Line<'static>>,
 }
 
@@ -184,6 +189,18 @@ pub struct UiState {
     pub notification: Option<(String, std::time::Instant)>,
     pub visible_rows: Cell<usize>,
     pub cover_rect: Cell<(u16, u16, u16, u16)>,
+    /// Pixel size of one terminal cell, measured once per frame from the
+    /// terminal's reported window size. Both cover layers need it: the block
+    /// art to pick a box whose aspect matches the artwork, and the chafa
+    /// fallback to convert that box into the pixel geometry chafa emits.
+    pub cell_px: Cell<(u16, u16)>,
+    /// A terminal-native image (SIXEL/Kitty) is on screen for the current
+    /// cover. It covers the same rect the block art would, but the two can
+    /// disagree by a sub-cell rounding, and that sliver is what showed up as
+    /// a fringe of dithered blocks beside the picture. The block art steps
+    /// aside while this is set — it is still the fallback for terminals with
+    /// no graphics protocol at all.
+    pub native_cover: Cell<bool>,
 }
 
 impl Default for UiState {
@@ -210,6 +227,8 @@ impl Default for UiState {
             notification: None,
             visible_rows: Cell::new(20),
             cover_rect: Cell::new((0, 0, 0, 0)),
+            cell_px: Cell::new(crate::constants::runtime::FALLBACK_CELL_PX),
+            native_cover: Cell::new(false),
         }
     }
 }
@@ -320,6 +339,8 @@ pub fn render(f: &mut Frame, state: &UiState) {
                 cover_art: state.player.cover_art.as_ref(),
                 show_cover_art: state.player.show_cover_art,
                 cover_rect: &state.cover_rect,
+                cell_px: state.cell_px.get(),
+                native_cover: state.native_cover.get(),
                 cover_gen: state.player.cover_gen.get(),
                 cover_lines_cache: &state.player.cover_lines_cache,
                 lyric_track: state.lyrics.lyric_track.as_ref(),

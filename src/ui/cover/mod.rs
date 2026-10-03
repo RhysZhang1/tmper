@@ -21,6 +21,7 @@ use std::sync::Arc;
 use base64::Engine;
 use image::GenericImageView;
 
+use crate::constants::runtime;
 use crate::ui::ViewMode;
 
 /// Read-only parameters for cover art rendering.
@@ -36,6 +37,15 @@ pub struct CoverParams {
     pub cover_gen: u64,
     pub cover_art: Option<Arc<Vec<u8>>>,
     pub cover_rect: (u16, u16, u16, u16),
+    /// Pixel size of one terminal cell, as measured by the UI for the frame
+    /// that was just drawn.
+    pub cell_px: (u16, u16),
+    /// Whether the half-block layer was suppressed for the frame that was just
+    /// drawn. It is what ratatui was told to put in the cover cells, and the
+    /// SIXEL payload has to be re-sent whenever it changes: suppressing the
+    /// blocks makes ratatui write over the cover rect, and that write lands on
+    /// top of the graphics layer underneath.
+    pub blocks_suppressed: bool,
 }
 
 /// Converts cover image bytes into a terminal graphics payload (e.g. SIXEL).
@@ -66,6 +76,11 @@ impl SixelEncoder for ChafaEncoder {
             .arg("sixels")
             .arg("-c")
             .arg("full")
+            // chafa keeps the aspect ratio by default and letterboxes into the
+            // size it was given. The box below is already sized to the
+            // artwork, so the letterbox was pure slack — and the slack was
+            // filled by whatever the half-block layer had drawn there.
+            .arg("--stretch")
             .arg("-s")
             .arg(format!("{cols}x{rows}"))
             .stdin(std::process::Stdio::piped())
@@ -108,6 +123,10 @@ pub struct CoverRenderer {
     /// spawns until the cover or area changes (a terminal that doesn't
     /// support SIXEL won't start supporting it mid-session).
     chafa_failed: bool,
+    /// Value of `CoverParams::blocks_suppressed` on the frame the current
+    /// payload was sent for. A change means the cover cells were rewritten by
+    /// the UI, which erases the graphics layer — so the payload is re-sent.
+    last_blocks_suppressed: bool,
     /// Set to `true` when leaving the player view — the event loop calls
     /// `terminal.clear()` before the next ratatui draw so the internal diff
     /// buffer covers all cells and overwrites any SIXEL residue.
@@ -148,10 +167,22 @@ impl CoverRenderer {
             last_chafa_gen: 0,
             last_chafa_rect: None,
             chafa_failed: false,
+            last_blocks_suppressed: false,
             clear_pending: false,
             kitty_active: false,
             last_kitty_gen: 0,
             last_kitty_rect: None,
+        }
+    }
+
+    /// Whether a terminal-native image is on screen for the current cover.
+    /// The UI reads this (a frame late) to decide whether the half-block
+    /// fallback is needed on top of it.
+    pub fn native_active(&self) -> bool {
+        if self.kitty_available {
+            self.kitty_active
+        } else {
+            self.chafa_sixel_cache.is_some()
         }
     }
 
@@ -203,15 +234,18 @@ impl CoverRenderer {
         let gen = params.cover_gen;
         // Re-place the image when the cover changes *or* the area moves: a
         // resize keeps the same cover but needs the image re-sent at the new
-        // geometry, which is what the SIXEL path already did.
+        // geometry, which is what the SIXEL path already did. The suppression
+        // flip counts as a move: ratatui rewrote the cover cells that frame.
         if self.kitty_active
             && gen == self.last_kitty_gen
             && self.last_kitty_rect == Some(params.cover_rect)
+            && self.last_blocks_suppressed == params.blocks_suppressed
         {
             return; // image unchanged — Kitty image persists on screen
         }
         self.last_kitty_gen = gen;
         self.last_kitty_rect = Some(params.cover_rect);
+        self.last_blocks_suppressed = params.blocks_suppressed;
 
         let cover = match &params.cover_art {
             Some(c) => c.clone(),
@@ -235,10 +269,12 @@ impl CoverRenderer {
                 let area_w = w_chars as u32 * cell_w;
                 let area_h = h_chars as u32 * cell_h;
 
-                // Scale image to fit area while preserving aspect ratio
-                let scale = (area_w as f64 / img_w as f64)
-                    .min(area_h as f64 / img_h as f64)
-                    .min(1.0);
+                // Scale image to fill the cover rect, preserving its aspect
+                // (which is the rect's aspect too — see `fit_cover_rect`).
+                // Deliberately not capped at 1.0: a cap left artwork smaller
+                // than the rect rendered at its own size, uncovered strip and
+                // all, which is one of the ways the panel showed through.
+                let scale = (area_w as f64 / img_w as f64).min(area_h as f64 / img_h as f64);
                 let out_w = (img_w as f64 * scale).round().max(1.0) as u32;
                 let out_h = (img_h as f64 * scale).round().max(1.0) as u32;
 
@@ -263,9 +299,13 @@ impl CoverRenderer {
                     } else {
                         0
                     };
+                    // `c`/`r` tell the terminal how many cells the image
+                    // occupies. This used to say `c=3`, which asked every
+                    // Kitty terminal for a three-column cover; naming both
+                    // dimensions ties the image to the cover rect exactly.
                     let _ = write!(
                         self.out,
-                        "\x1b_Ga=T,f=100,s={out_w},v={out_h},c=3,p={px},{py},m={more};{chunk_str}\x1b\\",
+                        "\x1b_Ga=T,f=100,s={out_w},v={out_h},c={w_chars},r={h_chars},p={px},{py},m={more};{chunk_str}\x1b\\",
                     );
                 }
                 let _ = self.out.flush();
@@ -335,15 +375,20 @@ impl CoverRenderer {
         // phantom key events and UI lag (see progress/2026-08-01).
         let dirty = self.chafa_sixel_cache.is_none()
             || gen != self.last_chafa_gen
-            || self.last_chafa_rect != Some(rect);
+            || self.last_chafa_rect != Some(rect)
+            // The UI rewrote the cover cells (the block layer was suppressed),
+            // which paints over the SIXEL underneath.
+            || self.last_blocks_suppressed != params.blocks_suppressed;
         if !dirty {
             return;
         }
         self.chafa_failed = false;
         self.last_chafa_gen = gen;
         self.last_chafa_rect = Some(rect);
+        self.last_blocks_suppressed = params.blocks_suppressed;
 
-        match self.encoder.encode(&cover, rect.2, rect.3) {
+        let (box_w, box_h) = chafa_box(rect, params.cell_px);
+        match self.encoder.encode(&cover, box_w, box_h) {
             Ok(payload) if !payload.is_empty() => {
                 self.chafa_sixel_cache = Some(payload.clone());
                 // Position the cursor at the cover area, then send the payload
@@ -384,6 +429,62 @@ impl CoverRenderer {
 
 // ── Helpers ──
 
+/// Translate the cover rect from terminal cells into the cell counts chafa has
+/// to be asked for, so that the SIXEL it emits covers the rect's *pixels*.
+///
+/// chafa sizes its output at [`runtime::CHAFA_SIXEL_CELL_PX`] per requested
+/// cell and cannot see this terminal, so passing the rect's own cell counts —
+/// what the code used to do — was only correct on a terminal whose cells
+/// happen to be that size. Everywhere else the payload came out the wrong
+/// size, and the half-block art drawn underneath showed around it.
+///
+/// Rounded down on purpose: a payload a few pixels short leaves a clean margin,
+/// while one that is too big would spill over the panel border.
+fn chafa_box(rect: (u16, u16, u16, u16), cell_px: (u16, u16)) -> (u16, u16) {
+    let cell = runtime::CHAFA_SIXEL_CELL_PX;
+    let px_w = rect.2 as u32 * cell_px.0.max(1) as u32;
+    let px_h = rect.3 as u32 * cell_px.1.max(1) as u32;
+    ((px_w / cell).max(1) as u16, (px_h / cell).max(1) as u16)
+}
+
+/// Pixel size of one terminal cell, or [`runtime::FALLBACK_CELL_PX`] when the
+/// terminal does not report one.
+///
+/// `window_size()` is a plain ioctl on the tty. Unlike an escape-sequence
+/// query it writes nothing to stdin, so it cannot produce the phantom key
+/// events that `chafa --probe off` exists to avoid.
+pub fn terminal_cell_px() -> (u16, u16) {
+    match crossterm::terminal::window_size() {
+        Ok(ws) => cell_px_from_window((ws.columns, ws.rows, ws.width, ws.height))
+            .unwrap_or(runtime::FALLBACK_CELL_PX),
+        Err(_) => runtime::FALLBACK_CELL_PX,
+    }
+}
+
+/// Sanity-check a reported window size and reduce it to a cell size.
+///
+/// Some terminals report pixel dimensions of zero, and a few report nonsense;
+/// a bad cell size skews every cover box, so anything outside a plausible
+/// range falls back to the default rather than being trusted.
+///
+/// Takes `(columns, rows, width_px, height_px)` — split out from
+/// `terminal_cell_px` because the rules are worth testing without a terminal.
+fn cell_px_from_window(ws: (u16, u16, u16, u16)) -> Option<(u16, u16)> {
+    let (cols, rows, px_w, px_h) = ws;
+    if cols == 0 || rows == 0 || px_w == 0 || px_h == 0 {
+        return None;
+    }
+    let w = px_w / cols;
+    let h = px_h / rows;
+    // A cell is taller than it is wide, but not arbitrarily: outside this
+    // range the terminal's numbers are not describing a text grid.
+    let ratio = h as f32 / w.max(1) as f32;
+    if w == 0 || h == 0 || !(1.2..=4.0).contains(&ratio) {
+        return None;
+    }
+    Some((w, h))
+}
+
 /// Check if the `chafa` binary is available and working.
 fn which_chafa() -> bool {
     let ok = std::process::Command::new("chafa")
@@ -400,6 +501,14 @@ fn which_chafa() -> bool {
 /// Returns true if the terminal supports the Kitty graphics protocol.
 /// Checks known env vars — no stdin query needed.
 fn is_kitty_graphics_compatible() -> bool {
+    // Inside a multiplexer the graphics sequences are swallowed unless
+    // passthrough is explicitly configured, and they fail silently. That was
+    // survivable while the block art was always drawn underneath; now that the
+    // blocks stand aside for a native image, guessing wrong would leave an
+    // empty panel. Fall through to chafa / blocks instead.
+    if std::env::var_os("TMUX").is_some() || std::env::var_os("STY").is_some() {
+        return false;
+    }
     // Native Kitty terminal
     if std::env::var("KITTY_WINDOW_ID").is_ok() {
         return true;
@@ -462,6 +571,8 @@ mod tests {
             cover_gen: gen,
             cover_art: cover.map(|b| Arc::new(b.to_vec())),
             cover_rect: rect,
+            cell_px: (10, 20),
+            blocks_suppressed: false,
         }
     }
 
@@ -541,6 +652,138 @@ mod tests {
             r.needs_clear(),
             "stale SIXEL must be cleared on a coverless track"
         );
+    }
+
+    // ── chafa geometry ──
+
+    /// chafa emits a fixed 20 px per requested cell and cannot see this
+    /// terminal, so the rect has to be converted into chafa's own units. On a
+    /// 10×20 cell, ten columns of terminal are five cells of chafa.
+    #[test]
+    fn chafa_box_converts_cells_to_chafa_pixels() {
+        assert_eq!(chafa_box((0, 0, 10, 10), (10, 20)), (5, 10));
+        // A terminal with 20×20 cells maps one-to-one — the size chafa assumes.
+        assert_eq!(chafa_box((0, 0, 10, 10), (20, 20)), (10, 10));
+    }
+
+    /// Rounded down, never up: a payload a few pixels short leaves a clean
+    /// margin, one that is too big spills over the panel border.
+    #[test]
+    fn chafa_box_never_overflows_the_rect() {
+        for cell in [(10u16, 20u16), (8, 17), (12, 24), (20, 20)] {
+            for (w, h) in [(13u16, 7u16), (40, 20), (3, 30), (4, 4)] {
+                let (bw, bh) = chafa_box((0, 0, w, h), cell);
+                let px_w = bw as u32 * runtime::CHAFA_SIXEL_CELL_PX;
+                let px_h = bh as u32 * runtime::CHAFA_SIXEL_CELL_PX;
+                assert!(
+                    px_w <= w as u32 * cell.0.max(1) as u32,
+                    "box {bw} cells wide overflows {w} columns at cell {cell:?}"
+                );
+                assert!(px_h <= h as u32 * cell.1.max(1) as u32);
+                assert!(bw >= 1 && bh >= 1, "chafa needs a non-zero box");
+            }
+        }
+    }
+
+    /// chafa cannot draw less than one of its cells, so a cover rect narrower
+    /// than that is the one case the box overshoots. Degenerate terminals are
+    /// refused by `render` long before a cover panel gets that small; what
+    /// matters here is that it stays usable rather than collapsing to zero.
+    #[test]
+    fn chafa_box_stays_usable_for_a_sub_cell_rect() {
+        assert_eq!(chafa_box((0, 0, 1, 1), (10, 20)), (1, 1));
+
+        // An unknown cell size is clamped instead of dividing by zero.
+        assert_eq!(chafa_box((0, 0, 4, 4), (0, 0)), (1, 1));
+    }
+
+    // ── Cell size detection ──
+
+    #[test]
+    fn cell_size_is_derived_from_the_window_pixels() {
+        // 1000×800 px over 100×40 cells = 10×20 px per cell.
+        assert_eq!(cell_px_from_window((100, 40, 1000, 800)), Some((10, 20)));
+        assert_eq!(cell_px_from_window((80, 24, 800, 480)), Some((10, 20)));
+    }
+
+    /// This runs on every frame, including when there is no terminal at all
+    /// (a test process, a redirected run). It must come back with something
+    /// usable rather than panicking or returning a zero cell.
+    #[test]
+    fn terminal_cell_px_always_yields_a_usable_cell() {
+        let (w, h) = terminal_cell_px();
+        assert!(w >= 1 && h >= 1, "got a {w}x{h} cell");
+    }
+
+    /// Terminals that don't report pixels (tmux, some emulators) must fall
+    /// back rather than divide by zero.
+    #[test]
+    fn cell_size_rejects_unusable_window_reports() {
+        assert_eq!(cell_px_from_window((0, 0, 0, 0)), None);
+        assert_eq!(cell_px_from_window((100, 40, 0, 0)), None, "no pixel size");
+        assert_eq!(cell_px_from_window((0, 40, 1000, 800)), None, "no columns");
+        // 1000 px over 100 columns is 10 px wide but 1 px tall — not a text
+        // grid, and trusting it would make every cover box absurd.
+        assert_eq!(cell_px_from_window((100, 800, 1000, 800)), None);
+    }
+
+    // ── Block-layer suppression ──
+
+    /// The UI stops drawing blocks once a native image is up. That rewrite
+    /// lands on top of the graphics layer, so the payload has to go out again
+    /// on the same frame or the cover disappears.
+    #[test]
+    fn suppressing_the_block_layer_resends_the_sixel() {
+        let buf = SharedBuf::default();
+        let mut r = renderer(&buf);
+        r.render_chafa(&params(1, (0, 0, 10, 10), Some(&[1])));
+        let placed = written(&buf);
+        assert!(r.native_active(), "a payload was sent");
+
+        // Blocks still drawn, nothing changed → the image persists.
+        r.render_chafa(&params(1, (0, 0, 10, 10), Some(&[1])));
+        assert_eq!(written(&buf), placed, "no change, no re-send");
+
+        // The UI suppressed the blocks this frame: ratatui wrote over the
+        // cover rect, so the payload is sent again.
+        let mut suppressed = params(1, (0, 0, 10, 10), Some(&[1]));
+        suppressed.blocks_suppressed = true;
+        r.render_chafa(&suppressed);
+        assert!(
+            written(&buf) > placed,
+            "the rewritten cells erase the SIXEL"
+        );
+
+        // ...and then it settles: no further re-sends while nothing changes.
+        let settled = written(&buf);
+        r.render_chafa(&suppressed);
+        assert_eq!(written(&buf), settled, "stable once the blocks are gone");
+    }
+
+    /// `native_active` is what the UI consults, so it must be false whenever
+    /// the encoder produced nothing — otherwise the fallback art is dropped
+    /// for an image that never arrives.
+    #[test]
+    fn native_active_is_false_when_the_encode_produced_nothing() {
+        let buf = SharedBuf::default();
+        let mut r = CoverRenderer::with_writer(Box::new(buf.clone()), Box::new(EmptyEncoder));
+        r.render_chafa(&params(1, (0, 0, 10, 10), Some(&[1])));
+        assert!(!r.native_active());
+    }
+
+    /// Leaving the player view clears the image, and `native_active` has to
+    /// follow so the blocks come back on the next frame that shows a cover.
+    #[test]
+    fn native_active_tracks_the_clear_on_view_change() {
+        let buf = SharedBuf::default();
+        let mut r = renderer(&buf);
+        r.render_chafa(&params(1, (0, 0, 10, 10), Some(&[1])));
+        assert!(r.native_active());
+
+        let mut away = params(1, (0, 0, 10, 10), Some(&[1]));
+        away.active_view = ViewMode::Library;
+        r.render_chafa(&away);
+        assert!(!r.native_active());
     }
 
     // ── Failure handling ──

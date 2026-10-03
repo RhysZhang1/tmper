@@ -2,7 +2,7 @@ use image::GenericImageView;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
@@ -31,6 +31,11 @@ pub struct PlayerViewParams<'a> {
     pub cover_art: Option<&'a Arc<Vec<u8>>>,
     pub show_cover_art: bool,
     pub cover_rect: &'a Cell<(u16, u16, u16, u16)>,
+    /// Pixel size of one terminal cell (measured per frame; see `UiState`).
+    pub cell_px: (u16, u16),
+    /// A native graphics layer already covers the cover rect, so the block
+    /// art would only show through wherever the two disagree.
+    pub native_cover: bool,
     pub cover_gen: u64,
     pub cover_lines_cache: &'a RefCell<Option<CoverLinesCache>>,
     pub lyric_track: Option<&'a LyricTrack>,
@@ -46,16 +51,67 @@ pub struct PlayerViewParams<'a> {
     pub selected_index: usize,
 }
 
+/// Largest box inside `area` whose pixel aspect ratio matches an
+/// `img_w` × `img_h` artwork, centred in `area`.
+///
+/// The cover used to be handed the whole panel. The two layers that draw it
+/// then disagree about the slack that creates: the block art stretches the
+/// picture to fill the panel, while the graphics layer keeps the aspect ratio
+/// and covers only part of it — so whichever dimension had room left over
+/// showed dithered blocks beside the real cover. Sizing the box to the artwork
+/// removes the slack instead of arguing about it.
+///
+/// The box is chosen in cells but measured in pixels, because a cell is about
+/// twice as tall as it is wide: a square cover needs a box twice as wide as it
+/// is tall, not a square box.
+fn fit_cover_rect(area: Rect, img_w: u32, img_h: u32, cell_px: (u16, u16)) -> Rect {
+    if area.width == 0 || area.height == 0 || img_w == 0 || img_h == 0 {
+        return area;
+    }
+    let (cell_w, cell_h) = (cell_px.0.max(1) as f32, cell_px.1.max(1) as f32);
+    // Cell columns needed per row to reproduce the artwork's aspect ratio.
+    let cols_per_row = (cell_h / cell_w) * (img_w as f32 / img_h as f32);
+    if !cols_per_row.is_finite() || cols_per_row <= 0.0 {
+        return area;
+    }
+
+    // Try the full width first; fall back to the full height when that comes
+    // out taller than the panel.
+    let mut w = area.width;
+    let mut h = (w as f32 / cols_per_row).round().max(1.0) as u16;
+    if h > area.height {
+        h = area.height;
+        w = (h as f32 * cols_per_row).round().max(1.0) as u16;
+    }
+    let w = w.clamp(1, area.width);
+    let h = h.clamp(1, area.height);
+    Rect::new(
+        area.x + (area.width - w) / 2,
+        area.y + (area.height - h) / 2,
+        w,
+        h,
+    )
+}
+
 /// Decode cover art bytes and render as colored block characters (chafa-style).
 /// Uses Lanczos3 resize + lower-half block (▄) with fg/bg for 2× vertical resolution.
-fn cover_as_colored_lines(inner: Rect, bytes: &[u8]) -> Option<Vec<Line<'static>>> {
-    let cols = inner.width as usize;
-    let rows = inner.height as usize;
-    if cols == 0 || rows == 0 {
+///
+/// Returns the box the art was rendered into along with the lines, so the
+/// caller can tell the native graphics layer where to put the real image.
+fn cover_as_colored_lines(
+    inner: Rect,
+    bytes: &[u8],
+    cell_px: (u16, u16),
+) -> Option<(Rect, Vec<Line<'static>>)> {
+    if inner.width == 0 || inner.height == 0 {
         return None;
     }
 
     let img = image::load_from_memory(bytes).ok()?;
+    let (img_w, img_h) = img.dimensions();
+    let box_rect = fit_cover_rect(inner, img_w, img_h, cell_px);
+    let cols = box_rect.width as usize;
+    let rows = box_rect.height as usize;
     // Effective pixel height = 2 rows per text row (half-block trick)
     let ph = rows * 2;
     // Lanczos3: much sharper than Nearest, smoother than Triangle
@@ -159,7 +215,7 @@ fn cover_as_colored_lines(inner: Rect, bytes: &[u8]) -> Option<Vec<Line<'static>
         next_err_b.fill(0.0);
         lines.push(Line::from(spans));
     }
-    Some(lines)
+    Some((box_rect, lines))
 }
 
 /// Main player view: two-column layout with cover/playlist (left)
@@ -198,11 +254,6 @@ fn render_cover_art(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Store position for Kitty protocol rendering
-    params
-        .cover_rect
-        .set((inner.x, inner.y, inner.width, inner.height));
-
     if params.show_cover_art {
         // Render cover art as colored blocks, reusing the cached render when
         // the cover and area are unchanged (decode + Lanczos3 + dither only
@@ -213,20 +264,41 @@ fn render_cover_art(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
                 c.gen != params.cover_gen || c.width != inner.width || c.height != inner.height
             });
             if stale {
-                *cache = cover_as_colored_lines(inner, &cover[..]).map(|lines| CoverLinesCache {
-                    gen: params.cover_gen,
-                    width: inner.width,
-                    height: inner.height,
-                    lines,
-                });
+                *cache = cover_as_colored_lines(inner, &cover[..], params.cell_px).map(
+                    |(box_rect, lines)| CoverLinesCache {
+                        gen: params.cover_gen,
+                        width: inner.width,
+                        height: inner.height,
+                        rect: (box_rect.x, box_rect.y, box_rect.width, box_rect.height),
+                        lines,
+                    },
+                );
             }
             if let Some(cached) = cache.as_ref() {
-                let para = Paragraph::new(cached.lines.clone());
-                f.render_widget(para, inner);
+                let rect = Rect::new(cached.rect.0, cached.rect.1, cached.rect.2, cached.rect.3);
+                // Both layers are placed against this box — see `fit_cover_rect`.
+                params.cover_rect.set(cached.rect);
+                if params.native_cover {
+                    // Blank the cells rather than simply not drawing them:
+                    // `Block` leaves the previous symbols in place, so the art
+                    // would sit there in default colours and any part the
+                    // image does not cover would still read as pixel blocks.
+                    f.render_widget(Clear, rect);
+                } else {
+                    let para = Paragraph::new(cached.lines.clone());
+                    f.render_widget(para, rect);
+                }
                 return;
             }
         }
     }
+
+    // No image to show. Nothing for the graphics layer to draw either, but the
+    // rect still has to name the panel so a cover that just went away is
+    // cleared rather than left on screen.
+    params
+        .cover_rect
+        .set((inner.x, inner.y, inner.width, inner.height));
 
     // Fallback / no-image mode: show detailed song info
     let h = inner.height.max(3);
@@ -631,28 +703,108 @@ mod tests {
         bytes
     }
 
+    // ── fit_cover_rect ──
+
+    /// A square cover needs a box twice as wide as it is tall, because a
+    /// terminal cell is about twice as tall as it is wide.
+    #[test]
+    fn cover_box_matches_a_square_artwork() {
+        let box_rect = fit_cover_rect(Rect::new(0, 0, 40, 20), 500, 500, (10, 20));
+        assert_eq!((box_rect.width, box_rect.height), (40, 20));
+    }
+
+    /// Panels are rarely the artwork's aspect. The box gives up the dimension
+    /// that has slack rather than stretching the picture into it.
+    #[test]
+    fn cover_box_shrinks_the_dimension_with_slack() {
+        // A very wide panel: height is the binding constraint.
+        let wide = fit_cover_rect(Rect::new(0, 0, 80, 10), 500, 500, (10, 20));
+        assert_eq!((wide.width, wide.height), (20, 10));
+        assert_eq!(wide.x, 30, "centred horizontally");
+
+        // A tall panel: width binds, and a square cover wants 2× that in rows.
+        let tall = fit_cover_rect(Rect::new(0, 0, 10, 40), 500, 500, (10, 20));
+        assert_eq!((tall.width, tall.height), (10, 5));
+        assert_eq!(tall.y, 17, "centred vertically");
+    }
+
+    /// The box follows the *artwork's* aspect, not a fixed one: a 2:1 cover in
+    /// a square panel gets a box half as tall as a square cover would.
+    #[test]
+    fn cover_box_follows_the_artwork_aspect() {
+        let square = fit_cover_rect(Rect::new(0, 0, 40, 20), 500, 500, (10, 20));
+        let wide = fit_cover_rect(Rect::new(0, 0, 40, 20), 1000, 500, (10, 20));
+        assert!(wide.height < square.height, "wider art, shorter box");
+        assert_eq!((wide.width, wide.height), (40, 10));
+    }
+
+    /// A portrait cover is limited by the panel height, so its box is narrow.
+    #[test]
+    fn cover_box_handles_portrait_artwork() {
+        let box_rect = fit_cover_rect(Rect::new(0, 0, 40, 20), 500, 1000, (10, 20));
+        assert_eq!((box_rect.width, box_rect.height), (20, 20));
+    }
+
+    /// Degenerate inputs must not panic or hand back a zero-sized box.
+    #[test]
+    fn cover_box_survives_empty_inputs() {
+        let empty = Rect::new(3, 4, 0, 0);
+        assert_eq!(fit_cover_rect(empty, 500, 500, (10, 20)), empty);
+
+        let area = Rect::new(0, 0, 8, 4);
+        assert_eq!(fit_cover_rect(area, 0, 0, (10, 20)), area);
+
+        // A cell size of zero would divide by zero; it is clamped to 1.
+        let box_rect = fit_cover_rect(area, 500, 500, (0, 0));
+        assert!(box_rect.width >= 1 && box_rect.height >= 1);
+        assert!(box_rect.width <= area.width && box_rect.height <= area.height);
+    }
+
+    /// Whatever the panel and the artwork, the box stays inside the panel.
+    #[test]
+    fn cover_box_never_leaves_the_panel() {
+        let panel = Rect::new(5, 3, 21, 9);
+        for (w, h) in [(1u32, 1u32), (1000, 3), (3, 1000), (16, 9), (9, 16)] {
+            for cell in [(10u16, 20u16), (8, 17), (20, 20), (1, 1)] {
+                let b = fit_cover_rect(panel, w, h, cell);
+                assert!(
+                    b.x >= panel.x
+                        && b.y >= panel.y
+                        && b.right() <= panel.right()
+                        && b.bottom() <= panel.bottom(),
+                    "artwork {w}x{h} at cell {cell:?} escaped the panel: {b:?}"
+                );
+                assert!(b.width >= 1 && b.height >= 1);
+            }
+        }
+    }
+
     // ── cover_as_colored_lines ──
 
     #[test]
     fn test_cover_empty_bytes_returns_none() {
-        assert!(cover_as_colored_lines(Rect::new(0, 0, 8, 8), &[]).is_none());
+        assert!(cover_as_colored_lines(Rect::new(0, 0, 8, 8), &[], (10, 20)).is_none());
     }
 
     #[test]
     fn test_cover_zero_area_returns_none() {
         let png = make_png();
-        assert!(cover_as_colored_lines(Rect::new(0, 0, 0, 0), &png).is_none());
-        assert!(cover_as_colored_lines(Rect::new(0, 0, 8, 0), &png).is_none());
+        assert!(cover_as_colored_lines(Rect::new(0, 0, 0, 0), &png, (10, 20)).is_none());
+        assert!(cover_as_colored_lines(Rect::new(0, 0, 8, 0), &png, (10, 20)).is_none());
     }
 
+    /// One text line per row of the *fitted* box, one span per column.
     #[test]
     fn test_cover_generated_png_yields_one_line_per_row() {
         let png = make_png();
-        let lines = cover_as_colored_lines(Rect::new(0, 0, 4, 4), &png).expect("png decodes");
-        assert_eq!(lines.len(), 4, "one text line per inner row");
-        // Every row has one span per column; all renderable (opaque image).
+        // 8×8 art in a 4×4 panel: the box is 4×2 (a square picture needs twice
+        // the columns as rows), so two lines of four spans.
+        let (box_rect, lines) =
+            cover_as_colored_lines(Rect::new(0, 0, 4, 4), &png, (10, 20)).expect("png decodes");
+        assert_eq!((box_rect.width, box_rect.height), (4, 2));
+        assert_eq!(lines.len(), 2, "one text line per box row");
         let spans: usize = lines.iter().map(|l| l.spans.len()).sum();
-        assert_eq!(spans, 4 * 4);
+        assert_eq!(spans, 4 * 2);
     }
 
     // ── render_player_view ──
@@ -680,6 +832,8 @@ mod tests {
             cover_art: None,
             show_cover_art: true,
             cover_rect,
+            cell_px: (10, 20),
+            native_cover: false,
             cover_gen: 0,
             cover_lines_cache: cache,
             lyric_track: None,
@@ -773,6 +927,74 @@ mod tests {
         let buf = terminal.backend().buffer();
         let out: String = buf.content().iter().map(|c| c.symbol()).collect();
         assert!(out.contains("(no matches)"), "empty-state message rendered");
+    }
+
+    /// The point of the whole arrangement: when the terminal draws the cover
+    /// itself, the panel must not also carry the block art. The two never
+    /// cover exactly the same pixels, and the difference is what showed up as
+    /// a fringe of blocks beside the picture.
+    #[test]
+    fn the_block_art_steps_aside_for_a_native_cover() {
+        let theme = Theme::default();
+        let cover_rect = Cell::new((0u16, 0u16, 0u16, 0u16));
+        let cache = RefCell::new(None);
+        let playlists = PlaylistManagerState::default();
+        let art = Arc::new(make_png());
+
+        let mut params = base_params(&theme, &cover_rect, &cache, &playlists, &[]);
+        params.cover_art = Some(&art);
+
+        // No graphics layer: the block art is all there is, so it must show.
+        // (▄/▀ come only from the cover renderer — the control bar uses █/░.)
+        let with_blocks = render_to_string(&params, 100, 30);
+        assert!(
+            with_blocks.contains('▄') || with_blocks.contains('▀'),
+            "the fallback has to render when nothing else covers the panel"
+        );
+        let fitted = cover_rect.get();
+
+        // A graphics layer is up: the same cached art must leave the buffer
+        // blank, or it shows through wherever the image stops short.
+        params.native_cover = true;
+        let without = render_to_string(&params, 100, 30);
+        assert!(
+            !without.contains('▄') && !without.contains('▀'),
+            "block art must not survive a native cover"
+        );
+        assert_eq!(cover_rect.get(), fitted, "same box, same native placement");
+    }
+
+    /// The cover box is fitted to the artwork, so it stops short of the panel
+    /// in the dimension that has slack instead of stretching the picture.
+    #[test]
+    fn the_cover_box_leaves_the_panel_margin_empty() {
+        let theme = Theme::default();
+        let cover_rect = Cell::new((0u16, 0u16, 0u16, 0u16));
+        let cache = RefCell::new(None);
+        let playlists = PlaylistManagerState::default();
+        let art = Arc::new(make_png()); // square
+        let mut params = base_params(&theme, &cover_rect, &cache, &playlists, &[]);
+        params.cover_art = Some(&art);
+
+        let _ = render_to_string(&params, 100, 30);
+        let (x, y, w, h) = cover_rect.get();
+
+        // The panel's inner area is 31×13. Square art at a 10×20 cell wants
+        // two columns per row, which does not fit 31 columns into 13 rows, so
+        // height binds: the box fills the panel vertically and is centred
+        // horizontally with room to spare.
+        assert_eq!((w, h), (26, 13), "box is fitted to the artwork's aspect");
+        assert_eq!(y, 1, "no vertical slack — the height is the binding one");
+
+        // Centred in the panel's inner area (which starts inside the border):
+        // the odd leftover column goes to the right.
+        let inner_x = 1;
+        let left_margin = x - inner_x;
+        let right_margin = (inner_x + 31) - (x + w);
+        assert!(
+            right_margin - left_margin <= 1,
+            "box should be centred, margins were {left_margin}/{right_margin}"
+        );
     }
 
     // ── Panel sections ──
