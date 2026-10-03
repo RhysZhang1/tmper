@@ -294,6 +294,7 @@ fn latest_window(buffer: &std::collections::VecDeque<f32>, fft_size: usize) -> O
 mod tests {
     use super::latest_window;
     use crate::app::handlers::test_support::{pl, test_app};
+    use crate::app::App;
     use std::path::PathBuf;
 
     /// `prev_track` derives its index from `active_playlist_song`, which is set
@@ -375,6 +376,119 @@ mod tests {
         app.on_track_ended();
 
         assert!(!app.should_quit);
+    }
+
+    // ── Global queue (no active playlist) ──
+
+    /// Seed `n` tracks whose paths do not exist: `load_and_play` fails quietly
+    /// on those, so the assertions below see only the cursor movement.
+    fn seed_queue(app: &mut App, n: usize) {
+        app.ui_state.player.tracks = (0..n)
+            .map(|i| crate::ui::TrackDisplay {
+                path: PathBuf::from(format!("/track{i}.flac")),
+                title: format!("Track {i}"),
+                artist: "X".into(),
+                duration_secs: 1.0,
+            })
+            .collect();
+    }
+
+    #[test]
+    fn next_and_prev_walk_the_global_queue_when_no_playlist_is_active() {
+        let mut app = test_app();
+        seed_queue(&mut app, 3);
+        app.ui_state.player.playing_index = Some(1);
+
+        app.next_track();
+        assert_eq!(app.ui_state.player.selected_index, 2);
+
+        app.prev_track();
+        assert_eq!(app.ui_state.player.selected_index, 0);
+    }
+
+    /// The global fallback stops at the ends rather than wrapping, unlike the
+    /// playlist path which wraps with a modulo.
+    #[test]
+    fn next_stops_at_the_end_of_the_global_queue() {
+        let mut app = test_app();
+        seed_queue(&mut app, 3);
+        app.ui_state.player.playing_index = Some(2);
+        app.ui_state.player.selected_index = 2;
+
+        app.next_track();
+
+        assert_eq!(app.ui_state.player.selected_index, 2);
+    }
+
+    #[test]
+    fn prev_stops_at_the_start_of_the_global_queue() {
+        let mut app = test_app();
+        seed_queue(&mut app, 3);
+        app.ui_state.player.playing_index = Some(0);
+        app.ui_state.player.selected_index = 0;
+
+        app.prev_track();
+
+        assert_eq!(app.ui_state.player.selected_index, 0);
+    }
+
+    // ── on_track_ended, global queue ──
+
+    #[test]
+    fn track_end_advances_and_wraps_in_sequential_mode() {
+        let mut app = test_app();
+        seed_queue(&mut app, 3);
+        app.ui_state.repeat_mode = crate::ui::RepeatMode::Sequential;
+
+        app.ui_state.player.playing_index = Some(0);
+        app.on_track_ended();
+        assert_eq!(app.ui_state.player.selected_index, 1);
+
+        app.ui_state.player.playing_index = Some(2);
+        app.on_track_ended();
+        assert_eq!(app.ui_state.player.selected_index, 0, "wraps to the start");
+    }
+
+    #[test]
+    fn track_end_repeats_the_same_track_in_single_mode() {
+        let mut app = test_app();
+        seed_queue(&mut app, 3);
+        app.ui_state.repeat_mode = crate::ui::RepeatMode::SingleTrack;
+        app.ui_state.player.playing_index = Some(1);
+        app.ui_state.player.selected_index = 1;
+
+        app.on_track_ended();
+
+        assert_eq!(app.ui_state.player.selected_index, 1, "cursor stays put");
+    }
+
+    #[test]
+    fn track_end_in_shuffle_mode_lands_inside_the_queue() {
+        let mut app = test_app();
+        seed_queue(&mut app, 5);
+        app.ui_state.repeat_mode = crate::ui::RepeatMode::Shuffle;
+        app.ui_state.player.playing_index = Some(0);
+
+        for _ in 0..20 {
+            app.on_track_ended();
+            assert!(
+                app.ui_state.player.selected_index < 5,
+                "shuffle must pick a real index"
+            );
+        }
+    }
+
+    /// Nothing playing → nothing to advance to. Must not index at all.
+    #[test]
+    fn track_end_without_a_current_track_does_nothing() {
+        let mut app = test_app();
+        seed_queue(&mut app, 3);
+        app.ui_state.player.playing_index = None;
+        app.ui_state.player.selected_index = 0;
+
+        app.on_track_ended();
+
+        assert_eq!(app.ui_state.player.selected_index, 0);
     }
 
     // ── Selection ──

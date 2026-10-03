@@ -232,32 +232,6 @@ pub fn render(f: &mut Frame, state: &UiState) {
         return;
     }
 
-    // Floating notification for mode changes (shown before everything else)
-    let should_notify = if let Some((_, t)) = &state.notification {
-        t.elapsed().as_secs_f64() < runtime::NOTIFICATION_DURATION_SECS
-    } else {
-        false
-    };
-    if should_notify {
-        if let Some((ref msg, _)) = &state.notification {
-            let area = f.area();
-            let popup_w = (msg.len() as u16 + 4).min(area.width.saturating_sub(4));
-            let popup_h = 3u16;
-            let x = (area.width.saturating_sub(popup_w)) / 2;
-            let y = (area.height.saturating_sub(popup_h)) / 2;
-            let popup = Rect::new(x, y, popup_w, popup_h);
-            f.render_widget(Clear, popup);
-            let para = Paragraph::new(msg.as_str())
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .style(Style::default().fg(state.theme.success)),
-                )
-                .alignment(ratatui::layout::Alignment::Center);
-            f.render_widget(para, popup);
-        }
-    }
-
     // Command mode: centered popup overlay
     if state.command_mode {
         let area = f.area();
@@ -414,6 +388,41 @@ pub fn render(f: &mut Frame, state: &UiState) {
             );
         }
     }
+
+    // Last, so it lands on top of the view. Drawn earlier it was simply
+    // painted over: the view renders the whole frame, and a mode-change
+    // notification was therefore never actually visible.
+    render_notification(f, state);
+}
+
+/// Floating banner for mode changes (volume, repeat, command results).
+fn render_notification(f: &mut Frame, state: &UiState) {
+    let Some((message, shown_at)) = &state.notification else {
+        return;
+    };
+    if shown_at.elapsed().as_secs_f64() >= runtime::NOTIFICATION_DURATION_SECS {
+        return;
+    }
+
+    let area = f.area();
+    let popup_w = (message.len() as u16 + 4).min(area.width.saturating_sub(4));
+    let popup_h = 3u16;
+    let popup = Rect::new(
+        (area.width.saturating_sub(popup_w)) / 2,
+        (area.height.saturating_sub(popup_h)) / 2,
+        popup_w,
+        popup_h,
+    );
+
+    f.render_widget(Clear, popup);
+    let para = Paragraph::new(message.as_str())
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .style(Style::default().fg(state.theme.success)),
+        )
+        .alignment(ratatui::layout::Alignment::Center);
+    f.render_widget(para, popup);
 }
 
 fn terminal_is_too_small(area: Rect) -> bool {
@@ -494,6 +503,98 @@ mod render_tests {
             terminal
                 .draw(|frame| render(frame, &state))
                 .expect("minimum supported terminal should render every view");
+        }
+    }
+
+    /// Draw the full UI and flatten the buffer to text.
+    fn render_to_string(state: &UiState, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
+        terminal
+            .draw(|frame| render(frame, state))
+            .expect("renders");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    // ── Overlays ──
+
+    #[test]
+    fn a_fresh_notification_is_drawn_over_the_view() {
+        let state = UiState {
+            notification: Some(("Saved!".into(), std::time::Instant::now())),
+            ..Default::default()
+        };
+
+        let out = render_to_string(&state, 80, 24);
+
+        assert!(out.contains("Saved!"), "notification text rendered");
+    }
+
+    /// Notifications are transient: a stale one must not keep drawing.
+    #[test]
+    fn an_expired_notification_is_not_drawn() {
+        let stale = std::time::Instant::now()
+            - std::time::Duration::from_secs_f64(runtime::NOTIFICATION_DURATION_SECS + 1.0);
+        let state = UiState {
+            notification: Some(("Gone".into(), stale)),
+            ..Default::default()
+        };
+
+        assert!(!render_to_string(&state, 80, 24).contains("Gone"));
+    }
+
+    #[test]
+    fn command_mode_draws_the_buffer_and_the_command_list() {
+        let state = UiState {
+            command_mode: true,
+            command_buffer: "theme".into(),
+            ..Default::default()
+        };
+
+        let out = render_to_string(&state, 80, 24);
+
+        assert!(out.contains("theme"), "typed text shown");
+        assert!(out.contains("Commands:"), "command list shown");
+    }
+
+    /// The help overlay is the topmost layer — `render` returns straight after
+    /// drawing it, so nothing underneath reaches the screen.
+    #[test]
+    fn the_help_overlay_covers_everything_else() {
+        let mut state = UiState {
+            command_mode: true,
+            command_buffer: "zzz".into(),
+            ..Default::default()
+        };
+        state.view.show_help = true;
+
+        let out = render_to_string(&state, 80, 24);
+
+        assert!(out.contains("Esc"), "help drawn");
+        assert!(!out.contains("Commands:"), "the command panel is behind it");
+    }
+
+    /// A one-column terminal is below anything the popups assume; they clamp
+    /// rather than underflow.
+    #[test]
+    fn overlays_survive_a_terminal_narrower_than_their_padding() {
+        for (width, height) in [(1u16, 1u16), (2, 2), (3, 3)] {
+            let notified = UiState {
+                notification: Some(("hello".into(), std::time::Instant::now())),
+                ..Default::default()
+            };
+            let _ = render_to_string(&notified, width, height);
+
+            let command = UiState {
+                command_mode: true,
+                ..Default::default()
+            };
+            let _ = render_to_string(&command, width, height);
         }
     }
 }
