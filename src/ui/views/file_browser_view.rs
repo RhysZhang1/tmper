@@ -19,8 +19,6 @@ pub struct FileBrowserState {
     pub home_dir: PathBuf,
     pub scroll_library: usize,
     pub scroll_fs: usize,
-    pub dirs: Vec<PathBuf>,
-    pub audio_files: Vec<PathBuf>,
     pub selected_fs_index: usize,
     pub library_paths: Vec<PathBuf>,
     pub selected_library_index: usize,
@@ -29,10 +27,26 @@ pub struct FileBrowserState {
     pub scan_status: Option<String>,
 }
 
+/// One row of the filesystem panel.
+///
+/// Each variant carries its own path. This used to be a bare name plus two
+/// side arrays (`dirs`, `audio_files`) that were compacted per kind while the
+/// rows themselves were merged and sorted — so the row index only happened to
+/// line up, and `Enter` opened the wrong file (or indexed out of bounds) in
+/// any directory holding both subdirectories and audio files.
 #[derive(Debug, Clone)]
 pub enum FsItem {
-    Dir(String),
-    Audio(String),
+    Dir { name: String, path: PathBuf },
+    Audio { name: String, path: PathBuf },
+}
+
+impl FsItem {
+    /// The filesystem path this row points at.
+    pub fn path(&self) -> &std::path::Path {
+        match self {
+            FsItem::Dir { path, .. } | FsItem::Audio { path, .. } => path,
+        }
+    }
 }
 
 impl Default for FileBrowserState {
@@ -43,8 +57,6 @@ impl Default for FileBrowserState {
             home_dir: home,
             scroll_library: 0,
             scroll_fs: 0,
-            dirs: Vec::new(),
-            audio_files: Vec::new(),
             selected_fs_index: 0,
             library_paths: Vec::new(),
             selected_library_index: 0,
@@ -138,16 +150,16 @@ fn render_filesystem_panel(f: &mut Frame, area: Rect, theme: &Theme, state: &Fil
                 .add_modifier(Modifier::BOLD)
         } else {
             match item {
-                FsItem::Dir(_) => Style::default().fg(theme.primary),
-                FsItem::Audio(_) => Style::default().fg(theme.success),
+                FsItem::Dir { .. } => Style::default().fg(theme.primary),
+                FsItem::Audio { .. } => Style::default().fg(theme.success),
             }
         };
         let prefix = match item {
-            FsItem::Dir(_) => "📁 ",
-            FsItem::Audio(_) => "🎵 ",
+            FsItem::Dir { .. } => "📁 ",
+            FsItem::Audio { .. } => "🎵 ",
         };
         let name = match item {
-            FsItem::Dir(n) | FsItem::Audio(n) => n.as_str(),
+            FsItem::Dir { name, .. } | FsItem::Audio { name, .. } => name.as_str(),
         };
         items.push(ListItem::new(Line::from(Span::styled(
             format!("{}{}", prefix, name),
@@ -193,13 +205,20 @@ mod tests {
             home_dir: PathBuf::from("/"),
             scroll_library: 0,
             scroll_fs: 0,
-            dirs: vec![PathBuf::from("/music/sub")],
-            audio_files: vec![PathBuf::from("/music/track.mp3")],
             selected_fs_index: 0,
             library_paths: vec![PathBuf::from("/music/alpha.flac")],
             selected_library_index: 0,
             focused: BrowserPanel::Library,
-            fs_items: vec![FsItem::Dir("sub".into()), FsItem::Audio("track".into())],
+            fs_items: vec![
+                FsItem::Dir {
+                    name: "sub".into(),
+                    path: PathBuf::from("/music/sub"),
+                },
+                FsItem::Audio {
+                    name: "track".into(),
+                    path: PathBuf::from("/music/track.mp3"),
+                },
+            ],
             scan_status: None,
         };
         let out = render(&mut state);
@@ -215,8 +234,16 @@ mod tests {
     fn test_render_fs_panel_focused_style_no_panic() {
         let mut state = FileBrowserState::default();
         state.current_dir = PathBuf::from("/tmp");
-        state.dirs = vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")];
-        state.fs_items = vec![FsItem::Dir("a".into()), FsItem::Dir("b".into())];
+        state.fs_items = vec![
+            FsItem::Dir {
+                name: "a".into(),
+                path: PathBuf::from("/tmp/a"),
+            },
+            FsItem::Dir {
+                name: "b".into(),
+                path: PathBuf::from("/tmp/b"),
+            },
+        ];
         state.focused = BrowserPanel::Filesystem;
         state.selected_fs_index = 1;
         let out = render(&state);

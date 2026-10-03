@@ -105,20 +105,22 @@ impl App {
                 }
                 BrowserPanel::Filesystem => {
                     let fs_idx = state.selected_fs_index;
-                    if fs_idx < state.fs_items.len() {
-                        match &state.fs_items[fs_idx] {
-                            FsItem::Dir(_) => {
-                                state.current_dir = state.dirs[fs_idx].clone();
-                                self.refresh_file_browser();
-                            }
-                            FsItem::Audio(_) => {
-                                let path = state.audio_files[fs_idx].clone();
-                                if !state.library_paths.contains(&path) {
-                                    state.library_paths.push(path.clone());
-                                    self.load_and_play_collect(&path);
-                                    self.save_library_paths();
-                                }
-                            }
+                    // The path comes from the row itself — never from a
+                    // parallel array indexed by the same number.
+                    let target = state.fs_items.get(fs_idx).map(|item| {
+                        (
+                            matches!(item, FsItem::Dir { .. }),
+                            item.path().to_path_buf(),
+                        )
+                    });
+                    if let Some((is_dir, path)) = target {
+                        if is_dir {
+                            state.current_dir = path;
+                            self.refresh_file_browser();
+                        } else if !state.library_paths.contains(&path) {
+                            state.library_paths.push(path.clone());
+                            self.load_and_play_collect(&path);
+                            self.save_library_paths();
                         }
                     }
                 }
@@ -152,8 +154,6 @@ impl App {
 
     pub(super) fn refresh_file_browser(&mut self) {
         let dir = self.ui_state.file_browser_state.current_dir.clone();
-        let mut dirs = Vec::new();
-        let mut audios = Vec::new();
         let mut items = Vec::new();
 
         if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -161,30 +161,18 @@ impl App {
             all.sort_by_key(|e| e.file_name());
             for entry in all {
                 let path = entry.path();
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("?")
+                    .to_string();
                 if path.is_dir() {
-                    let name = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("?")
-                        .to_string();
-                    dirs.push(path.clone());
-                    items.push(FsItem::Dir(name));
-                } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                    let ext_lower = ext.to_lowercase();
-                    if crate::library::scanner::AUDIO_EXTENSIONS.contains(&ext_lower.as_str()) {
-                        let name = path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("?")
-                            .to_string();
-                        audios.push(path.clone());
-                        items.push(FsItem::Audio(name));
-                    }
+                    items.push(FsItem::Dir { name, path });
+                } else if crate::library::scanner::is_audio_file(&path) {
+                    items.push(FsItem::Audio { name, path });
                 }
             }
         }
-        self.ui_state.file_browser_state.dirs = dirs;
-        self.ui_state.file_browser_state.audio_files = audios;
         self.ui_state.file_browser_state.fs_items = items;
         self.ui_state.file_browser_state.selected_fs_index = 0;
     }
@@ -317,9 +305,18 @@ mod tests {
             let s = &mut app.ui_state.file_browser_state;
             s.focused = BrowserPanel::Filesystem;
             s.fs_items = vec![
-                FsItem::Dir("a".into()),
-                FsItem::Dir("b".into()),
-                FsItem::Dir("c".into()),
+                FsItem::Dir {
+                    name: "a".into(),
+                    path: PathBuf::from("/a"),
+                },
+                FsItem::Dir {
+                    name: "b".into(),
+                    path: PathBuf::from("/b"),
+                },
+                FsItem::Dir {
+                    name: "c".into(),
+                    path: PathBuf::from("/c"),
+                },
             ];
         }
         press(&mut app, KeyCode::Down);
@@ -369,14 +366,18 @@ mod tests {
             let s = &app.ui_state.file_browser_state;
             s.fs_items
                 .iter()
-                .position(|i| matches!(i, FsItem::Dir(_)))
+                .position(|i| matches!(i, FsItem::Dir { .. }))
                 .expect("dir present")
         };
         app.ui_state.file_browser_state.selected_fs_index = dir_idx;
         press(&mut app, KeyCode::Enter);
 
         assert_eq!(app.ui_state.file_browser_state.current_dir, sub);
-        assert_eq!(app.ui_state.file_browser_state.audio_files.len(), 1);
+        assert_eq!(app.ui_state.file_browser_state.fs_items.len(), 1);
+        assert!(matches!(
+            app.ui_state.file_browser_state.fs_items.first(),
+            Some(FsItem::Audio { .. })
+        ));
         assert_eq!(app.ui_state.file_browser_state.selected_fs_index, 0);
     }
 
@@ -390,7 +391,7 @@ mod tests {
         app.refresh_file_browser();
         assert!(matches!(
             app.ui_state.file_browser_state.fs_items.first(),
-            Some(FsItem::Audio(_))
+            Some(FsItem::Audio { .. })
         ));
 
         press(&mut app, KeyCode::Enter);
@@ -409,6 +410,83 @@ mod tests {
             .filter(|p| **p == audio)
             .count();
         assert_eq!(count, 1);
+    }
+
+    /// A directory holding both subdirectories and audio files used to break
+    /// Enter: the handler indexed `dirs` / `audio_files` (each compacted to
+    /// only its own kind) with the position into `fs_items` (both kinds,
+    /// merged and sorted). With `[Dir(aaa), Audio(bbb.mp3), Audio(ccc.mp3)]`
+    /// that means picking row 1 opened `ccc.mp3`, and row 2 indexed past the
+    /// end of `audio_files` and panicked.
+    #[test]
+    fn test_enter_fs_mixed_directory_targets_the_selected_row() {
+        let mut app = test_app();
+        let root = scratch("mixed");
+        std::fs::create_dir_all(root.join("aaa")).unwrap();
+        std::fs::write(root.join("bbb.mp3"), b"x").unwrap();
+        std::fs::write(root.join("ccc.mp3"), b"x").unwrap();
+        set_dir(&mut app, root.clone());
+        app.refresh_file_browser();
+
+        // Sorting puts the directory first, so a naive index into a
+        // directories-only list would disagree from row 1 onward.
+        let s = &app.ui_state.file_browser_state;
+        assert!(matches!(s.fs_items.first(), Some(FsItem::Dir { .. })));
+        assert_eq!(s.fs_items.len(), 3);
+
+        // Row 1 is bbb.mp3 — it must add bbb.mp3, not ccc.mp3.
+        app.ui_state.file_browser_state.selected_fs_index = 1;
+        press(&mut app, KeyCode::Enter);
+        assert!(
+            app.ui_state
+                .file_browser_state
+                .library_paths
+                .contains(&root.join("bbb.mp3")),
+            "row 1 must target the row that is displayed there"
+        );
+        assert!(!app
+            .ui_state
+            .file_browser_state
+            .library_paths
+            .contains(&root.join("ccc.mp3")));
+
+        // Row 2 is the last audio file — this used to index out of bounds.
+        app.ui_state.file_browser_state.selected_fs_index = 2;
+        press(&mut app, KeyCode::Enter);
+        assert!(app
+            .ui_state
+            .file_browser_state
+            .library_paths
+            .contains(&root.join("ccc.mp3")));
+    }
+
+    /// The directory row must navigate to the directory shown on that row,
+    /// not to whichever directory happens to sit at that index.
+    #[test]
+    fn test_enter_fs_dir_row_navigates_to_that_directory() {
+        let mut app = test_app();
+        let root = scratch("mixed-nav");
+        std::fs::create_dir_all(root.join("zzz")).unwrap();
+        std::fs::write(root.join("aaa.mp3"), b"x").unwrap();
+        std::fs::write(root.join("bbb.mp3"), b"x").unwrap();
+        set_dir(&mut app, root.clone());
+        app.refresh_file_browser();
+
+        // [Audio(aaa.mp3), Audio(bbb.mp3), Dir(zzz)] — `dirs` has length 1, so
+        // the directory row at index 2 is the one that used to overflow.
+        let dir_idx = {
+            let s = &app.ui_state.file_browser_state;
+            s.fs_items
+                .iter()
+                .position(|i| matches!(i, FsItem::Dir { .. }))
+                .expect("dir present")
+        };
+        app.ui_state.file_browser_state.selected_fs_index = dir_idx;
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.ui_state.file_browser_state.current_dir,
+            root.join("zzz")
+        );
     }
 
     #[test]
@@ -472,8 +550,21 @@ mod tests {
 
         app.refresh_file_browser();
         let s = &app.ui_state.file_browser_state;
-        assert_eq!(s.dirs, vec![root.join("dirA")]);
-        assert_eq!(s.audio_files.len(), 3); // a.mp3, b.flac, upper.WAV (case-insensitive)
+        let dirs: Vec<_> = s
+            .fs_items
+            .iter()
+            .filter(|i| matches!(i, FsItem::Dir { .. }))
+            .collect();
+        let audios: Vec<_> = s
+            .fs_items
+            .iter()
+            .filter(|i| matches!(i, FsItem::Audio { .. }))
+            .collect();
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0].path(), root.join("dirA"));
+        // a.mp3, b.flac, upper.WAV (case-insensitive); notes.txt excluded.
+        assert_eq!(audios.len(), 3);
+        assert!(audios.iter().any(|i| i.path() == root.join("upper.WAV")));
         assert_eq!(s.fs_items.len(), 4);
         assert_eq!(s.selected_fs_index, 0);
     }
@@ -486,8 +577,6 @@ mod tests {
         app.ui_state.file_browser_state.current_dir = root;
         app.refresh_file_browser();
         let s = &app.ui_state.file_browser_state;
-        assert!(s.dirs.is_empty());
-        assert!(s.audio_files.is_empty());
         assert!(s.fs_items.is_empty());
     }
 }
