@@ -18,6 +18,12 @@
 - 顺序 / 随机 / 单曲 三种循环模式
 - **关掉界面音乐继续放**：播放器是独立的常驻进程，重新打开 TUI 接回同一首、同一个进度
 
+### 桌面集成（MPRIS2）
+- 在会话总线上以 `org.mpris.MediaPlayer2.tmper` 出现，**Plasma 媒体控件、媒体键、`playerctl` 直接可用**
+- 播放状态、曲目元数据（含微秒级时长）、循环/随机、音量都是双向的：桌面上改，TUI 里跟着变
+- 封面以 `file://` URL 指向 `$XDG_CACHE_HOME/tmper/` 里的缓存文件（保留最新 8 张）
+- 没有会话总线时（SSH、纯控制台）记一条日志照常播放
+
 ### 封面图显示
 - **三层渐进渲染**，由启动探测决定走哪一层：
   1. **Kitty 图形协议** — 原生像素渲染（Kitty、WezTerm、Ghostty、Konsole 26.08+）
@@ -104,6 +110,7 @@ export PATH="$HOME/path/to/tmper/target/release:$PATH"
 ```bash
 tmper                      # 交互模式
 tmper play ~/Music/歌曲.flac  # 播放指定文件
+tmper status                # 看正在运行的播放器在做什么
 ```
 
 `tmper play`（不带文件）让正在运行的播放器接着放——上次退出时停在哪一首的哪一秒，就从那里继续。
@@ -111,6 +118,8 @@ tmper play ~/Music/歌曲.flac  # 播放指定文件
 ### 后台播放：关掉窗口，音乐不停
 
 播放器与界面是两个进程：界面关掉后，常驻的 daemon 继续放，重新打开 TUI 会接回同一首歌、同一个进度。daemon 在**没有客户端连着、也没有出声**（播放或暂停）满 5 分钟后自己退出；退出前把队列和播放位置写进 `state.json`，所以下次 `tmper play` 接着放，不丢东西。
+
+TUI 打开着的时候 daemon 意外死了（崩溃、被 `kill`），界面**不会跟着退出**：顶部出现一条「玩家已断开」的横幅，后台自动重连——没有 daemon 在听就把它重新拉起来（每次断线只拉一次，不会变成 fork 循环）。这期间按下的键会排队，连接恢复后按顺序送达，按键的含义就是按下时的含义。想直接盯着播放器看，用 `tmper daemon` 在前台跑（日志在 `~/.local/state/tmper/tmper-daemon.log`）。
 
 不带文件时，这些动词是发给正在运行的播放器的消息，不会自己拉起一个：
 
@@ -231,9 +240,11 @@ theme = "dracula"
 配置遵循 XDG 目录规范：
 
 - 配置：`$XDG_CONFIG_HOME/tmper/`（通常为 `~/.config/tmper/`）
-- 曲库：`$XDG_DATA_HOME/tmper/library.db`
-- 状态、歌单和日志：`$XDG_STATE_HOME/tmper/`
-- 可用 `TMPER_CONFIG_DIR`、`TMPER_DATA_DIR`、`TMPER_STATE_DIR` 覆盖，便于测试和便携使用
+- 曲库与导出的 M3U：`$XDG_DATA_HOME/tmper/`
+- 状态、歌单与日志：`$XDG_STATE_HOME/tmper/`（`tmper.log` 是界面的，`tmper-daemon.log` 是播放器的）
+- 封面缓存：`$XDG_CACHE_HOME/tmper/`（供桌面控件读取，保留最新 8 张）
+- 通信 socket：`$XDG_RUNTIME_DIR/tmper/socket`（用户可读，退出时删除）
+- 可用 `TMPER_CONFIG_DIR`、`TMPER_DATA_DIR`、`TMPER_STATE_DIR`、`TMPER_RUNTIME_DIR` 覆盖，便于测试和便携使用
 
 ### ~/.config/tmper/config.toml
 
@@ -282,6 +293,17 @@ down = "j"
 ### Q: 播放没有声音？
 
 确认 PulseAudio / PipeWire / ALSA 正常工作。先用其他播放器测试。
+
+### Q: 桌面控件 / 媒体键看不到 tmper？
+
+先看播放器在不在总线上：
+
+```bash
+playerctl -p tmper status                    # 能打印 Playing/Paused/Stopped 就说明这一层是通的
+busctl --user list | grep tmper              # 看它有没有占到 org.mpris.MediaPlayer2.tmper
+```
+
+没有输出说明 daemon 没在跑（先 `tmper play`）或者环境里没有会话总线（`echo $DBUS_SESSION_BUS_ADDRESS` 为空——SSH、纯控制台就是这种，此时播放照常，只是桌面看不到）。总线这一层通了但 Plasma 仍然不显示，原因在桌面侧（比如媒体控件被设置成不显示、或媒体键被别的程序抢占），daemon 的日志 `~/.local/state/tmper/tmper-daemon.log` 会写清它启动时接没接上总线。
 
 ### Q: 封面图显示为像素块而非高清图？
 
@@ -341,21 +363,28 @@ tmper/
 ├── themes/                       # 编译进程序的五套默认主题
 ├── progress/                     # 历史开发记录，不代表当前实现
 │
-├── src/                          # 源代码 (~15,000 行 Rust)
-│   ├── main.rs                   #   入口
-│   ├── constants.rs              #   运行时调优常量
-│   ├── config.rs                 #   配置加载
+├── src/                          # 源代码 (~24,700 行 Rust，单 binary)
+│   ├── main.rs                   #   入口：按动词分流（daemon / 一次性命令 / TUI）
 │   ├── cli.rs                    #   命令行解析
-│   ├── error.rs                  #   错误类型
-│   ├── event.rs                  #   事件枚举
-│   ├── playlist.rs               #   播放列表数据结构
-│   ├── paths.rs                  #   路径工具
-│   ├── app/                      #   应用核心
+│   ├── client.rs                 #   一次性动词：连上、发一条、打印、退出
+│   ├── daemon.rs                 #   播放器进程：socket 监听、空闲退出、MPRIS 装配
+│   ├── ipc/                      #   进程间协议
+│   │   ├── mod.rs                #     行分隔 JSON 收发
+│   │   └── proto.rs              #     Request / Event —— 两侧唯一的契约
+│   ├── player/                   #   daemon 内核
+│   │   ├── mod.rs                #     引擎 + 队列 + 续播策略
+│   │   ├── library.rs            #     曲库索引与扫描任务
+│   │   ├── playlists.rs          #     歌单（身份是 id）
+│   │   ├── persistence.rs        #     state.json（唯一写入者）
+│   │   ├── cover.rs              #     封面缓存（供 artUrl）
+│   │   ├── fft.rs                #     频谱线程与订阅
+│   │   └── mpris.rs              #     MPRIS2 接口
+│   ├── app/                      #   TUI 客户端
 │   │   ├── mod.rs                #     App + 事件循环
-│   │   ├── playback.rs           #     播放控制
-│   │   ├── persistence.rs        #     状态持久化
+│   │   ├── handle.rs             #     PlayerHandle：socket / 本地两种实现
+│   │   ├── playback.rs           #     选曲与歌词装载
 │   │   └── handlers/             #     按键分发
-│   ├── audio/                    #   音频引擎
+│   ├── audio/                    #   音频引擎（daemon 侧）
 │   │   ├── decoder.rs            #     Symphonia 解码
 │   │   ├── output.rs             #     Rodio 输出
 │   │   └── engine.rs             #     播放/暂停/seek
@@ -398,7 +427,7 @@ tmper/
 ```bash
 cargo build                        # 调试编译
 cargo build --release              # 发布编译（资源已内嵌的可执行文件）
-cargo test                         # 默认：全部无需音频设备的测试（364 个）
+cargo test                         # 默认：全部无需音频设备的测试（520 个）
 cargo test audio_output_ -- --ignored --test-threads=1  # 需要真实/虚拟设备（6 个）
 cargo clippy -- -D warnings        # 代码检查
 cargo fmt --all                    # 格式化
@@ -424,7 +453,9 @@ cargo llvm-cov --all-features --workspace # 输出各模块行覆盖率与总计
 | 标签 | lofty | 元数据（ID3/Vorbis/APE/MP4） |
 | FFT | rustfft | 2048 点频谱分析 |
 | 数据库 | rusqlite (bundled) | SQLite 曲库索引 |
-| 图像 | image | 封面图解码 + Lanczos3 缩放 |
+| 图像 | image + icy_sixel | 封面图解码、缩放与进程内 SIXEL 编码 |
+| 桌面集成 | mpris-server (zbus) | MPRIS2 服务端：Plasma 媒体控件、媒体键、playerctl |
+| 进程间 | serde_json + Unix socket | 行分隔 JSON；不引入额外协议库 |
 | 配置 | toml + serde + clap | 配置文件 + 命令行参数 |
 | 编码 | encoding_rs | 歌词编码自动检测 |
 

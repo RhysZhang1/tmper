@@ -4,7 +4,7 @@
 > **语言**: Rust
 > **平台**: Linux（主要在 Arch Linux + KDE Plasma 验证）
 > **文档状态**: 当前实现
-> **最后更新**: 2026-08-25
+> **最后更新**: 2026-10-03
 
 ---
 
@@ -37,121 +37,246 @@ tmper 是一个运行在终端中的全功能音乐播放器。核心特性：
 - **7 个视图**: 播放器、曲库、歌词、频谱、歌单管理、文件浏览器、设置
 - **5 套主题**: Tokyo Night、Dracula、Nord、Solarized Dark、Catppuccin Mocha
 - **Vim 风格操作**: 模态键盘，双键序列（gg、dd），/ 搜索
+- **播放与界面分进程**: 关掉 TUI 音乐继续；重新打开接回同一首同一进度
+- **MPRIS2**: 桌面媒体控件、媒体键与 `playerctl` 驱动的是 TUI 看到的那份状态
 
 ---
 
 ## 2. 整体架构
 
-### 2.1 分层架构
+### 2.1 两个进程，一个 binary
+
+```
+                     ┌────────────────────────────┐
+                     │  tmper（TUI 客户端）        │
+                     │  App + UiState + ratatui   │
+                     │  曲库/歌单/扫描只是镜像      │
+                     └─────────────┬──────────────┘
+                                   │  NDJSON over
+                     unix socket   │  $XDG_RUNTIME_DIR/tmper/socket
+                                   │
+                     ┌─────────────▼──────────────┐        ┌──────────────┐
+                     │  tmper daemon              │◄──────►│ 会话总线      │
+                     │  Player：engine + 队列 +    │  zbus  │ org.mpris…   │
+                     │  策略 + 曲库 + 歌单 + 扫描   │        └──────────────┘
+                     └─────────────┬──────────────┘
+                                   │
+                       ┌───────────▼───────────┐
+                       │ rodio → 声卡           │
+                       │ FFT 线程 → 频谱帧       │
+                       │ state.json / *.db     │
+                       └───────────────────────┘
+```
+
+`main.rs` 按动词分流，三种身份：
+
+| 参数 | 走的路 | 说明 |
+|---|---|---|
+| `daemon` | `daemon::run()` | 前台跑播放器（正常由 TUI 按需分离启动） |
+| `pause` / `next` / `status` / `quit` /… | `client::run_control()` | 连上、发一条、打印、退出；**绝不启动 daemon** |
+| 无参数 / `play <文件>` | TUI | 连不上就拉起 daemon |
+
+判定收在 `cli::Command::controls_a_running_player()`。`play` 是唯一两种身份都有的动词：带文件是「打开界面播放它」，不带文件是「接着放」——也就是媒体键发的那个意思。
+
+**客户端分层**（`src/app/`，就是客户端，没有改名）：
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│  main.rs — tracing 初始化 → Config 加载 → App::run() │
+│  App (src/app/mod.rs) — 事件循环 + UiState            │
+│  ├─ handle.rs    — PlayerHandle trait                │
+│  │                 ├─ DaemonHandle（socket，生产）     │
+│  │                 └─ LocalHandle（进程内，仅测试）     │
+│  ├─ playback.rs   — 选曲、歌词装载                     │
+│  └─ handlers/     — 按键分发（mod/playlist/library/    │
+│                     browser/settings）                │
 └────────────────────────┬─────────────────────────────┘
                          │
 ┌────────────────────────▼─────────────────────────────┐
-│  App (src/app/) — 事件循环 + 全局状态                 │
-│  ├─ mod.rs       — App 结构体 + run() 事件循环        │
-│  ├─ handlers/    — 按键分发 + 播放逻辑                 │
-│  │  ├─ mod.rs    — handle_event(), 全局/播放器按键     │
-│  │  ├─ playlist.rs — 歌单视图按键                      │
-│  │  ├─ library.rs  — 曲库视图按键                      │
-│  │  ├─ browser.rs  — 文件浏览器视图按键                 │
-│  │  └─ settings.rs — 设置视图按键 + write_config()     │
-│  └─ persistence.rs — 状态保存/加载                    │
-└────────────────────────┬─────────────────────────────┘
-                         │
-┌────────────────────────▼─────────────────────────────┐
-│  UI (src/ui/) — 渲染层（只读 &AppState）               │
+│  UI (src/ui/) — 渲染层（只读 &UiState）                │
 │  ├─ mod.rs       — UiState, ViewMode, render()       │
-│  ├─ theme.rs     — 13 色槽语义主题（themes/*.toml）  │
+│  ├─ theme.rs     — 13 色槽语义主题（themes/*.toml）    │
 │  ├─ views/       — 7 个视图                           │
-│  │  ├─ player_view.rs  — 播放器（封面+频谱+歌词+列表） │
-│  │  ├─ library_view.rs — 曲库（三栏浏览+搜索）         │
-│  │  ├─ lyrics_view.rs  — 全屏歌词（KTV 风格）          │
-│  │  ├─ playlist_view.rs— 歌单管理器                    │
-│  │  ├─ file_browser_view.rs — 文件浏览器               │
-│  │  └─ settings_view.rs — 设置编辑器                   │
-│  └─ widgets/     — 可复用组件                          │
-│     ├─ help_popup.rs       — 帮助面板（键 8）           │
-│     └─ visualizer_panel.rs — 频谱渲染                   │
+│  └─ widgets/     — 帮助面板、频谱面板                   │
+└──────────────────────────────────────────────────────┘
+```
+
+**daemon 分层**（`src/player/` + `src/daemon.rs`）：
+
+```
+┌──────────────────────────────────────────────────────┐
+│  daemon.rs — 监听、每客户端一个任务、空闲退出、MPRIS 装配 │
 └────────────────────────┬─────────────────────────────┘
                          │
 ┌────────────────────────▼─────────────────────────────┐
-│  业务层                                               │
-│  ├─ AudioEngine (src/audio/engine.rs)                 │
-│  │  ├─ decoder.rs — Symphonia 解码适配                │
-│  │  └─ output.rs  — Rodio Sink 封装                   │
-│  ├─ LibraryDb (src/library/database.rs)               │
-│  │  ├─ scanner.rs        — 后台增量目录扫描           │
-│  │  └─ playlist_manager.rs — M3U 导入/导出             │
-│  ├─ LyricEngine (src/lyrics/engine.rs)                │
-│  │  ├─ parser.rs — LRC 解析 + 编码检测                │
-│  │  └─ types.rs  — LyricLine, LyricTrack              │
-│  ├─ Visualizer (src/visualizer/)                       │
-│  │  ├─ fft.rs       — FFT 分析（2048 点 Hann 窗）      │
-│  │  ├─ processor.rs — 频谱后处理（对数分桶+平滑）       │
-│  │  └─ render.rs    — 字符渲染（Block Elements）       │
-│  └─ MetadataReader (src/metadata/reader.rs)           │
+│  Player (src/player/mod.rs) — 引擎 + 队列 + 续播策略    │
+│  ├─ library.rs      — LibraryDb + 扫描任务登记         │
+│  ├─ playlists.rs    — 歌单 store（身份是 id）          │
+│  ├─ persistence.rs  — state.json（唯一写入者）          │
+│  ├─ cover.rs        — 封面缓存（供 mpris:artUrl）       │
+│  ├─ fft.rs          — 频谱线程 + 订阅                  │
+│  └─ mpris.rs        — MPRIS2 接口（zbus）              │
+└────────────────────────┬─────────────────────────────┘
+                         │
+┌────────────────────────▼─────────────────────────────┐
+│  audio/（engine + decoder + output）、library/（SQLite  │
+│  + scanner + M3U）、visualizer/{fft,processor}         │
 └──────────────────────────────────────────────────────┘
 ```
 
 ### 2.2 并发模型
 
+**daemon 的主循环**（`daemon::run`，单线程持有 `Player`）：
+
+```
+loop {
+  tokio::select! {
+    接受新连接        → spawn(serve_client)：握手、收请求、写事件
+    客户端消息到达     → client_joined / handle(request) / client_left
+    MPRIS 命令到达    → handle_mpris(request)
+    ticker（1/帧率）  → daemon.tick()：推进引擎、路由事件、推快照
+  }
+  if daemon.should_exit(now) { break }
+}
+```
+
+`Player` **是 `!Send`**（内部 cpal 流只能在建它的线程上驱动），所以循环直接持有它，客户端只能通过 channel 够到它——音频栈强加的单写者规则，恰好和项目其余部分一致。
+
+**daemon 永不等待客户端。** 每个连接一个**有界信箱**（`DAEMON_CLIENT_QUEUE`），投递用 `try_send`：满了就丢**快照与频谱帧**（下一帧就取代它们，代价是一次闪烁），而丢**队列变化或通知**意味着该客户端再也收不到的事实——那种情况下把客户端丢掉，播放不受影响。
+
+**客户端的主循环**（`App::run`）：
+
 ```
 ┌─────────────────────────────────────────────────────┐
 │                    主线程 (tokio)                     │
-│                                                      │
 │  tokio::select! {                                   │
-│      batch = event_rx.recv() => {                    │
-│          for event in batch {                        │
-│              KeyHandler 处理 → handle_event(event)    │
-│              → 修改 AppState                          │
-│          }                                           │
-│      }                                               │
+│      batch = event_rx.recv() => { 逐事件 → KeyHandler │
+│                                  → handle_event }    │
 │      _ = tick_interval.tick() => {                   │
-│          更新播放位置、FFT 数据、歌词同步              │
-│          检测曲目结束 → 自动切歌                       │
+│          handle_tick：poll+socket 事件 → apply_event │
+│          歌词同步、连接状态读取、必要时重绘            │
 │      }                                               │
 │  }                                                   │
 │  terminal.draw(...)  ← 每批/节流 tick 至多绘制一次     │
 └─────────────────────────────────────────────────────┘
-                         │
+```
+
+位置不再由客户端推进：daemon 每 tick 推一份 `StateSnapshot`，客户端只用它显示。歌词是位置的纯函数，仍在客户端逐 tick 计算（不需要过网）。
+
+```
 ┌────────────────────────▼─────────────────────────────┐
 │         输入线程 (spawn_blocking，burst 模式)           │
-│                                                      │
-│  loop {                                              │
-│    poll(80ms) 等待首个事件                            │
-│    → 批量 read() 排空 PTY 缓冲（终端 auto-repeat）     │
-│    → send(Vec<CrosstermEvent>)                       │
-│  }                                                   │
-└─────────────────────────────────────────────────────┘
-                         │
+│  loop { poll(80ms) → 批量 read() 排空 PTY 缓冲         │
+│         → send(Vec<CrosstermEvent>) }                │
+└──────────────────────────────────────────────────────┘
 ┌────────────────────────▼─────────────────────────────┐
-│               后台线程 (spawn_blocking)                │
-│                                                      │
-│  FFT 线程:                                           │
-│    loop {                                            │
-│      从 pcm_buffer 读取 PCM 采样                      │
-│      → FftAnalyzer.process()                         │
-│      → SpectrumProcessor.process()                   │
-│      → 写入共享 fft_data（Arc<Mutex<Vec<f32>>>），主循环 tick 读取      │
-│      sleep(32ms)  // ~31 FPS                         │
-│    }                                                 │
-│                                                      │
-│  InstrumentedSource (在 rodio 管线中):                │
-│    Source::next() 被调用时 → 拷贝采样到 pcm_buffer     │
-│    → FFT 线程读取                                     │
-└─────────────────────────────────────────────────────┘
+│  daemon 侧后台线程                                     │
+│  FFT 线程: 读 pcm_buffer → FftAnalyzer → Processor     │
+│            → Event::Visualizer（仅在有订阅者时）        │
+│  解码线程: spawn_blocking，按 ~2s 高水位背压            │
+│  InstrumentedSource: Source::next() 拷采样到 pcm_buffer│
+└──────────────────────────────────────────────────────┘
 ```
 
 **输入模型（burst 模式）**：后台线程通过 crossterm 等待首个事件，然后批量排空 PTY 缓冲，经 channel 发送事件批次。主循环处理整批事件后只绘制一次，避免终端按键自动重复造成绘制堆积。
+
+### 2.3 MPRIS2（只在 daemon 里）
+
+`mpris-server` 0.10（基于 zbus，复用 tokio 运行时），在会话总线上占名 `org.mpris.MediaPlayer2.tmper`。**桌面看到的状态和客户端看到的状态是同一份状态、播报一次**：`Daemon::route` 在把 `Event::Snapshot` 发给客户端的同时把它交给 MPRIS。
+
+| MPRIS | tmper |
+|---|---|
+| `PlaybackStatus` | Playing / Paused / Stopped（Loading、Seeking 归入 Playing） |
+| `LoopStatus` + `Shuffle` | Sequential→`None`；SingleTrack→`Track`；Shuffle→`Playlist` 且 `Shuffle(true)` |
+| `Volume` | 0.0–1.0 直通（取三位小数） |
+| `Metadata` | `mpris:trackid` 是对象路径 `/tmper/track/{:016x}`；`mpris:length` 是**微秒**；`xesam:title/artist/album`；`mpris:artUrl` 是封面缓存的 `file://` URL |
+| `CanRaise=false` / `Raise` | no-op：它是个 TUI，没有窗口可抬 |
+| `CanQuit=true` / `Quit` | 退出 daemon |
+
+三处细节是**承重**的：
+
+1. **只播报动了的属性。** 快照每秒来三十来个，绝大多数只差 `position_secs`，而位置不是 MPRIS 属性（客户端要位置时会问 `Position`）。`State::apply` 把自己和上次播报过的镜像做 diff。不 diff 就是每秒三十条 `PropertiesChanged` 和一块永远在重绘的控件。
+2. **音量要收窄。** `f32` 直接加宽到 `f64` 会得到 `0.800000011920929`——同一条 80% 挂了十一位噪声，而且不再往返（设 0.8、读回 0.8 却发现变了，diff 于是永远发现同一个「变化」）。`to_volume` 取三位小数。
+3. **setter 要先把值记进镜像。** zbus 对每个属性 `Set` 会**自己**发一条 `PropertiesChanged`，内容在 setter 返回那一刻从 getter 读——而 tmper 的 setter 是 fire-and-forget，返回时 daemon 还没应用。不记的话，每次调音量都被播报成「被替换掉的那个音量」，一毫秒后才是真的：滑条动一格先弹回去、再弹过来。记录的规则是**只记客户端点名的那一个 flag**：另一个若真被这次 `Set` 带着动了（`Shuffle=true` 就是 `Playlist`），随后那条快照会播报它，而那是控件**需要**知道的事实。同理 `set_shuffle(false)` 不是「停止循环」——它要回读循环轴再决定请求 `Sequential` 还是 `SingleTrack`（控件每次刷新都会重报自己的值）。
+
+seek 是唯一「结果在所有属性里都看不见」的命令，所以拿到 MPRIS 为此专设的那条信号：状态之后跟一条 `Seeked`。
+
+### 2.4 生命周期一览
+
+| 事件 | 结果 |
+|---|---|
+| `q` / `:quit` | 只关 TUI；daemon 与音乐继续 |
+| `:quit!` / `tmper quit` / MPRIS `Quit` | daemon 存盘、推 `Bye`、停播、退出；客户端收到 `Bye` 也退出 |
+| 空闲 5 分钟（无人连着且未出声） | daemon 存盘后自己退出 |
+| daemon 意外死亡，TUI 还开着 | 顶部横幅 + 后台重连；按键排队，恢复后按序送达 |
+| daemon 死亡，客户端是一次性动词 | 报告失败（`the player closed the connection`），**不**顺手拉起一个 |
+| socket 文件是死的 | 启动时删掉重建 |
 
 ---
 
 ## 3. 模块详解
 
-### 3.1 音频引擎 (src/audio/)
+### 3.1 IPC 与协议 (src/ipc/)
+
+`$XDG_RUNTIME_DIR/tmper/socket`（`cfg(test)` 下落到测试根），行分隔 JSON：一行一个对象，UTF-8，`\n` 结尾。选它是因为 `serde_json` 本来就是依赖、不引入新依赖，而且能用 `nc -U` 手工查。
+
+**协议是不对称的。** 客户端发 `Request`；daemon 说的一切都是 `Event`，**包括对请求的答复**（`LibraryArtists` 请求 → `Event::LibraryArtists`；失败 → `Event::Notice`）。这样客户端（一个 TUI）永远不必阻塞等回包。
+
+```rust
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum Request { Hello { proto, version }, Play { path }, Toggle, Pause, Resume,
+                   Stop, Next, Prev, SeekRelative { secs }, SetVolume { volume },
+                   VolumeStep { delta }, SetRepeat { mode }, QueuePush { path },
+                   QueueRemove { path }, SetActivePlaylist { id }, …, Shutdown }
+
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum Event { Welcome { proto, version, pid }, Snapshot(Box<StateSnapshot>),
+                 Queue { rev, tracks }, Visualizer { bars }, LibraryArtists { … },
+                 Playlists { … }, Notice { level, message }, Bye, … }
+```
+
+**状态整体推送，不做增量。** 每 tick 一份 `StateSnapshot`（位置、时长、状态、音量、循环、元数据、封面缓存路径、`queue_rev`、`active_playlist`）。快照是全量的，因此**重连不需要补课协议**——下一个快照就是补课。队列、歌单、曲库路径、事件都只在变化时推，各带一个版本号或键。
+
+**两条 framing 实现之间存在第二份代码，靠测试钉住。** `BufRead` 与 `AsyncBufRead` 没有共同父 trait，所以 `read_line` 的逻辑存在两次；约束被刻意收窄（上限、容忍 CRLF、区分 EOF 与截断），再由测试把**同一串字节**喂给两个实现断言结论一致。
+
+**读写各有一次踩过的坑。** `BufReader` 为了回答一次 `read_line` 会把能读到的字节全部搬进自己的缓冲，所以：握手必须用**客户端随后继续使用的那一个 reader**（`DaemonHandle::dial` → `read_events`），而 socket 的读任务**绝不能作为 `select!` 的分支**——分支被取消时读了一半的行连同缓冲区一起消失。详见 `progress/2026-10-03-daemon-split.md`。
+
+### 3.2 daemon (src/daemon.rs)
+
+- **陈旧 socket**：启动时若 socket 文件存在，先试着连它——连得上说明已有 daemon 在跑，第二个直接退出（一张声卡上两个播放器不是这个程序回答得了的问题）；连不上（`ECONNREFUSED`/`ENOENT`）说明是死掉的 daemon 留下的，删掉重建。daemon 退出时自己 `remove_file`。
+- **空闲退出**：`clients.is_empty() && !status.is_active()` 持续 `DAEMON_IDLE_EXIT_SECS`（300 秒）。**暂停算空闲**——它只是按住一个位置而不是在做事情，而一个暂停可以挂好几天，把它算作活动就等于永不退出。判定收在 `Daemon::should_exit(now)`，`now` 是参数，测试因此不必等五分钟。
+- **退出前存现场**：`Player::shutdown()` 先 `save_state()` 再静音设备——顺序是承重的（`stop_playback()` 是回卷，先静音就会把 `position_secs: 0.0` 存进去）。
+- **MPRIS 在 socket 之后装配，且从不致命**：没有会话总线就记一条日志照常播放。
+- **`spawn_detached` 在 `cfg(test)` 下拒绝执行**：测试二进制里 `current_exe()` 是测试 harness，spawn 它等于把整个测试套件脱离地重跑一遍。
+
+### 3.3 Player：daemon 的内核 (src/player/)
+
+`Player` 拥有 `AudioEngine`、队列、续播策略、曲库、歌单、`state.json`。对外只有两个动词：`execute(Request) -> Vec<Event>`（客户端要它做的事）和 `tick() -> Vec<Event>`（时间推进后它自己产生的事）。**换曲的唯一收口是 `Play`**，自动续播也走同一条路。
+
+- **位置**：仍由 daemon 的墙钟推导（`Instant` 补偿暂停），跨 IPC 后精度不变；客户端不做本地插值推进。
+- **`resume_at`**：从 `state.json` 恢复时把曲目和位置「停驻」在架上而不出声——针停在**声音**上：`AudioEngine::play_file_at(path, offset)` 把偏移同时交给时钟和 `spawn_decoder`，只拨时钟会让显示与扬声器整首歌都对不上。
+- **曲库（`library.rs`）**：`LibraryDb`（SQLite + FTS5）+ 扫描任务登记 + `library.json`。扫描的剪枝只在**完整走完**时进行（`complete` 标志）——一次部分遍历（有子目录读不了）绝不能删掉索引里的行。
+- **歌单（`playlists.rs`）**：身份是 **id**，不是名字（可以有两个都叫 "Mix" 的歌单），也不是位置（位置是调用者手里那份拷贝的光标，而那份拷贝可能刚被另一个客户端改过）。`#[serde(default)]` 让旧文件（全是 0）照常加载并在 load 时补号写回，迁移是一次性的。
+- **封面（`cover.rs`）**：`mpris:artUrl` 必须是个 URL，所以封面落盘到 `$XDG_CACHE_HOME/tmper`，文件名按**曲目路径**取而不是按内容（桌面只在元数据变化时取图）。快照里带路径，客户端直接读同一个文件——封面不必过 socket。
+- **MPRIS（`mpris.rs`）**：见 §2.3。
+
+### 3.4 客户端句柄 (src/app/handle.rs)
+
+```rust
+pub trait PlayerHandle {
+    fn dispatch(&mut self, request: Request) -> Vec<Event>;  // 命令
+    fn poll(&mut self) -> Vec<Event>;                        // 非阻塞取事件
+    fn tick(&mut self) -> Vec<Event>;                        // 推进时钟
+    fn connection(&self) -> Connection { Connection::Live }  // 还能不能连上
+}
+```
+
+**一个 trait，两种投递时机。** `LocalHandle` 直接持有 `Player`、同步应答，**只有测试构建它**；`DaemonHandle` 走 socket，`dispatch` 返回空、事件下一 tick 到货。**时机不同，别的一点都不能不同**——两者把事件交给同一个 `App::apply_event`，所以驱动 `LocalHandle` 的两百来个测试跑的就是 socket 客户端的代码。为测试补一条同步旁路会让绿色变得没有意义。
+
+**`Connection` 是状态而不是事件**（`watch`），这就是它走 channel 而不是走消息的原因：toast 会超时，「播放器没了」不会因为过了十秒就不再是事实。横幅画到它不再说 `Lost` 为止。
+
+`DaemonHandle` 自带监督：socket 断掉时置 `Lost`、把待发请求留在 outbox（连接恢复后按顺序送达，**按键的含义就是按下时的含义**）、反复拨号重连，并在每次断线期间**最多**用自己的 `current_exe()` 拉起一个 daemon（一次断线一次，崩溃循环不会变成 fork 循环）。`serve` 里唯一作为 `select!` 分支的是请求转发（对 channel 的 `send` 被取消是安全的），读 socket 永远在自己的任务里。
+
+### 3.5 音频引擎 (src/audio/)
 
 #### decoder.rs — Symphonia 解码适配
 
@@ -211,7 +336,7 @@ pub struct AudioEngine {
 
 ---
 
-### 3.2 元数据读取 (src/metadata/reader.rs)
+### 3.6 元数据读取 (src/metadata/reader.rs)
 
 ```rust
 pub struct TrackInfo {
@@ -242,7 +367,7 @@ pub struct TrackInfo {
 
 ---
 
-### 3.3 歌词系统 (src/lyrics/)
+### 3.7 歌词系统 (src/lyrics/)
 
 #### types.rs — 数据结构
 
@@ -288,7 +413,7 @@ pub struct LyricMetadata {
 
 ---
 
-### 3.4 频谱可视化 (src/visualizer/)
+### 3.8 频谱可视化 (src/visualizer/)
 
 #### fft.rs — FFT 分析
 
@@ -323,7 +448,7 @@ pub struct FftAnalyzer {
 
 ---
 
-### 3.5 音乐库 (src/library/)
+### 3.9 音乐库 (src/library/)
 
 #### database.rs — SQLite 索引
 
@@ -353,27 +478,30 @@ pub struct TrackRow { /* 对应 tracks 主表全部字段 */ }
 
 ---
 
-### 3.6 CLI (src/cli.rs)
+### 3.10 CLI (src/cli.rs)
 
 ```rust
-#[derive(Parser)]
-#[command(name = "tmper")]
-pub struct Cli {
-    #[command(subcommand)]
-    pub command: Option<Command>,
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    Play { file: Option<PathBuf> },   // 带文件=开界面播放；不带=接着放
+    Pause, Next, Prev, Stop,
+    Volume { percent: u8 },
+    Status, Quit,
+    Daemon,                           // 前台跑播放器，排障用
 }
 
-#[derive(Subcommand)]
-pub enum Command {
-    Play { file: PathBuf },
+impl Command {
+    pub fn controls_a_running_player(&self) -> bool { … }
 }
 ```
 
-支持：`tmper`（交互模式）、`tmper play <path>`（播放**单个文件**；目录播放暂未实现）。
+支持：`tmper`（交互模式）、`tmper play <path>`（播放**单个文件**；目录播放暂未实现）、`tmper play`（接着放）、`pause` / `next` / `prev` / `stop` / `volume <0-100>` / `status` / `quit`（发给正在运行的播放器）、`tmper daemon`（前台运行）。
+
+**一次性动词不启动 daemon。** 没东西在放的时候 `tmper pause` 应该说这句话，而不是悄悄起一个播放器好把它暂停。这条边界就是 `controls_a_running_player()`。
 
 ---
 
-### 3.7 错误处理 (src/error.rs)
+### 3.11 错误处理 (src/error.rs)
 
 ```rust
 #[derive(Error, Debug)]
@@ -394,39 +522,54 @@ pub type AppResult<T> = anyhow::Result<T>;
 ### 4.1 播放一首歌的完整流程
 
 ```
-1. 用户按 Enter 选歌
+TUI 进程                                     daemon 进程
+────────                                     ────────────
+1. Enter → handle_key_event → play_selected(path)
       │
-2. handle_key_event() → Enter → play_selected(path)
+2. DaemonHandle::dispatch(Request::Play{path})
       │
-3. AudioEngine::load_file(path):
+      ├─ 序列化成一行 JSON ──────── socket ──────► 连接任务读到
+      │                                             │
+      │                                   3. Player::execute(Play)
+      │                                      ├─ 不在队列里就入队
+      │                                      ├─ AudioEngine::play_file(path)
+      │                                      │    ├─ AudioDecoder::open(path)
+      │                                      │    │    └─ Symphonia 探测+建解码器
+      │                                      │    ├─ spawn_blocking 解码，
+      │                                      │    │   按 ~2s PCM 高水位背压
+      │                                      │    └─ InstrumentedSource::next()
+      │                                      │        拷贝采样到 pcm_buffer
+      │                                      └─ 产生 Snapshot 事件
+      │                                             │
+      ◄───────────── Event::Snapshot / Queue ───────┘
       │
-      ├─ AudioDecoder::open(path)
-      │    └─ Symphonia: 探测容器 → 选择音轨 → 创建解码器
+4. App::apply_event：更新 UiState（标题、时长、队列、封面路径）
       │
-      ├─ 循环 read_packet()，按约 2 秒 PCM 高水位施加背压
-      │    └─ 送入 InstrumentedSource → Rodio Sink
-      │         └─ InstrumentedSource::next() 拷贝采样到 pcm_buffer
+5. 每 tick（~33ms）：
+      ├─ DaemonHandle::poll() 取回该 tick 的新事件 → 同一个 apply_event
+      ├─ Snapshot.position_secs → 进度条
+      ├─ Snapshot.cover_path → 读缓存文件 → 封面渲染
+      ├─ LyricEngine::sync(position) → 当前歌词行
+      └─ 若订阅了频谱，Event::Visualizer.bars → UiState.visualizer_data
       │
-      └─ 记录 start_time, total_duration
+daemon 侧同 tick：
+      ├─ engine.position_secs() → 填进快照
+      ├─ 检测 Sink 真正排空 → Finished → 按 RepeatMode 自动切歌（同样走 Play）
+      └─ route(Snapshot)：客户端 + MPRIS 各收一份
       │
-4. 主循环 Tick (每 ~33ms):
-      │
-      ├─ engine.position_secs() → 更新 UI 进度条
-      ├─ 读取共享 fft_data（Arc<Mutex>）→ 更新频谱
-      ├─ LyricEngine::sync(position) → 更新当前歌词行
-      └─ 检测 is_playing() && sink.empty() → on_track_ended()
-            └─ 根据 RepeatMode 自动切歌 / 停止
-      │
-5. UI 渲染 (每次事件后):
+6. UI 渲染 (每次事件后)：
       └─ terminal.draw(|f| ui::render(f, &app))
            └─ 根据 active_view 分发到对应 view_render 函数
 ```
 
+**没有队列变化就没有队列消息。** 队列、歌单、曲库路径只在变化时推；快照每 tick 都推。客户端因此可能比 daemon 晚一个 tick 知道队列变了——所以按位置寻址的命令（删第 n 首）在协议里是按**路径**寻址的（队列里路径唯一，位置会 stale 一格）。
+
 ### 4.2 状态管理原则
 
-- **单一写入者**：AppState 只在 `handle_event()` 中修改
-- **只读渲染**：UI 渲染函数接收 `&AppState`，不做修改
-- **共享内存**：FFT 数据通过 `Arc<Mutex<Vec<f32>>>`（`fft_data`）写入 `UiState.visualizer_data`；播放位置经 `tokio::sync::watch` 推送
+- **单一写入者（进程内）**：`UiState` 只在 `handle_event` / `apply_event` 中修改
+- **单一写入者（进程间）**：`state.json`、`library.db`、`playlists.json`、`library.json` 各自只有 daemon 写；客户端经 IPC 请求改动。这是结构保证，不是约定
+- **只读渲染**：UI 渲染函数接收 `&UiState`，不做修改
+- **跨进程没有共享内存**：FFT 数据经 `Event::Visualizer` 过 socket（**仅在客户端订阅时**——没开可视器就不算 FFT、不占带宽）；位置经 `Event::Snapshot`
 - **不可变更新**：遵循"创建新值，不修改旧值"原则
 
 ---
@@ -450,28 +593,33 @@ pub type AppResult<T> = anyhow::Result<T>;
 ```rust
 pub struct UiState {
     pub theme: Theme,                    // 当前主题（UI 颜色统一来自 UiState.theme，不硬编码）
-    pub player: PlayerCore,              // 播放核心：曲目信息、position/duration、tracks、选中、滚动
+    pub player: PlayerCore,              // 镜像：曲目信息、position/duration、tracks、选中、滚动
     pub volume: f32,
     pub repeat_mode: RepeatMode,
     pub lyrics: LyricsState,             // 歌词：lyric_track、current_lyric_index、lyrics_offset_ms
-    pub visualizer_data: Vec<f32>,       // FFT 共享数据（后台线程写 Arc<Mutex<Vec<f32>>>，主循环读取）
+    pub visualizer_data: Vec<f32>,       // 最近一帧频谱（来自 Event::Visualizer）
     pub view: ViewState,                 // 当前视图 + 帮助标志（active_view、show_help）
     pub playlist_state: PlaylistManagerState,
     pub file_browser_state: FileBrowserState,
     pub library_state: LibraryState,
     pub settings_state: SettingsState,
-    pub active_playlist: Option<usize>,  // 跨视图播放上下文
-    pub active_playlist_song: Option<usize>,
-    pub playlist_name: String,
+    pub active_playlist: Option<u64>,    // 打开的歌单，**按 id**（位置会 stale，名字会重名）
     pub command_mode: bool,
     pub command_buffer: String,
     pub search_mode: bool,               // 全局 / 搜索（播放器队列实时过滤）
     pub search_query: String,
-    pub notification: Option<(String, std::time::Instant)>,
+    pub notification: Option<(String, std::time::Instant)>,  // 瞬时提示，会过期
+    pub connection: Connection,          // 持久状态：连接还在不在（断了就画横幅）
     pub visible_rows: Cell<usize>,
     pub cover_rect: Cell<(u16, u16, u16, u16)>,
+    pub cell_px: Cell<(u16, u16)>,       // 终端单元格像素，两个封面图层共用
+    pub native_cover: Cell<bool>,        // 原生图像在位时半块字符让位
 }
 ```
+
+`connection` 与 `notification` 并排放着，正是为了对照：**通知是「发生了什么」，连接是「现在是什么」**。所以前者会超时消失，后者是 `watch` 上的一个状态，说到它不再为真为止。
+
+`active_playlist` 从 `Option<usize>` 变成 `Option<u64>`（id）之后，`active_playlist_song` 与 `playlist_name` 一起消失了：前者是「播放在哪」的第二份拷贝，写在 A 视图、读在 B 视图，每次编辑歌单就 stale 一次；后者写了两处、从来没有读过。位置现在由 daemon 从当前曲目和它正在走的那个列表推导。
 
 ### 5.3 主题系统
 
@@ -515,9 +663,10 @@ pub enum AppEvent {
 
 ```rust
 pub async fn run(&mut self, cli: Cli) -> AppResult<()> {
-    // 1. 启用 raw mode + alternate screen
-    // 2. 加载 CLI 指定的文件
-    // 3. 启动 FFT 线程 + burst 输入线程（poll/read → unbounded_channel）
+    // 1. TerminalGuard::enter()：raw mode + alternate screen
+    // 2. probe_terminal_once()：一趟往返问单元格尺寸 + 图形能力
+    //    （必须在 enter 之后、输入线程之前：它读的是 TUI 自己的 tty）
+    // 3. 起 burst 输入线程（poll/read → unbounded_channel）
     // 4. 事件循环：
     loop {
         tokio::select! {
@@ -527,15 +676,22 @@ pub async fn run(&mut self, cli: Cli) -> AppResult<()> {
                 // 搜索/插入模式绕过 KeyHandler 双键延迟
             }
             _ = tick_interval.tick() => {
-                self.handle_event(AppEvent::Tick);
+                self.handle_event(AppEvent::Tick);   // → handle_tick
             }
         }
         terminal.draw(|f| ui::render(f, &self))?;
         if self.should_quit { break; }
     }
-    // 5. 停止 FFT、恢复终端
+    // 5. player.detach()（socket 实现什么都不做：音乐在别的进程里）
+    //    恢复终端
 }
 ```
+
+`handle_tick` 每 tick 做四件事，顺序有意：`player.tick()` 与 `player.poll()` 取事件 → **读一次 `player.connection()`** → `apply_event` 应用事件 → 歌词同步。
+
+**连接状态在应用事件之前读**，这样「一个快照」和「送来这个快照的连接没了」不会以相反的顺序被报告。它不属于事件流：横幅要一直挂到它不再为真，而事件没有「之后」可以忘掉。
+
+**daemon 侧一次 tick 做的一件事**是 `Player::tick()`：推进引擎的时钟、把 `Ready`/`Finished`/`Failed` 变成事件、按循环策略续播、填一份新快照。`route` 再把它按订阅关系分发给客户端，并顺手交给 MPRIS。
 
 ---
 
@@ -543,16 +699,24 @@ pub async fn run(&mut self, cli: Cli) -> AppResult<()> {
 
 ### 7.1 文件位置
 
-配置和运行时数据遵循 XDG：配置、数据、状态分别位于 XDG config/data/state 目录；测试可通过 `TMPER_*_DIR` 覆盖。
+配置和运行时数据遵循 XDG：配置、数据、状态、运行时、缓存分别位于对应的 XDG 目录；测试可通过 `TMPER_*_DIR` 覆盖（`cfg(test)` 下全部落到每个进程自己的测试根）。
 
-| 文件 | 用途 |
-|------|------|
-| 内嵌 `config/default.toml` | 默认配置模板（编译进二进制） |
-| `$XDG_CONFIG_HOME/tmper/config.toml` | 主配置（首次运行由内嵌模板生成） |
-| `$XDG_CONFIG_HOME/tmper/keybindings.toml` | 自定义快捷键（可选） |
-| `$XDG_STATE_HOME/tmper/state.json` | 退出时保存的状态 |
-| `$XDG_DATA_HOME/tmper/library.db` | 曲库 SQLite + FTS5 数据库 |
-| `$XDG_STATE_HOME/tmper/tmper.log` | 运行日志 |
+| 文件 | 写入者 | 用途 |
+|------|--------|------|
+| 内嵌 `config/default.toml` | — | 默认配置模板（编译进二进制） |
+| `$XDG_CONFIG_HOME/tmper/config.toml` | **客户端** | 主配置（首次运行由内嵌模板生成） |
+| `$XDG_CONFIG_HOME/tmper/keybindings.toml` | **客户端** | 自定义快捷键（可选） |
+| `$XDG_STATE_HOME/tmper/state.json` | **daemon** | 音量/循环/队列/位置/歌词偏移（客户端用 `SetLyricsOffset` 请它代写） |
+| `$XDG_STATE_HOME/tmper/playlists.json` | **daemon** | 歌单（带 id，一次性迁移旧文件） |
+| `$XDG_STATE_HOME/tmper/library.json` | **daemon** | 曲库目录列表 |
+| `$XDG_DATA_HOME/tmper/library.db` | **daemon** | 曲库 SQLite + FTS5 数据库 |
+| `$XDG_DATA_HOME/tmper/{name}.m3u` | **daemon** | 导出的歌单 |
+| `$XDG_CACHE_HOME/tmper/cover.*.png` | **daemon** | 封面缓存（供 `mpris:artUrl`，保留最新 8 张） |
+| `$XDG_RUNTIME_DIR/tmper/socket` | **daemon** | IPC 端点，权限 0600 |
+| `$XDG_STATE_HOME/tmper/tmper.log` | **客户端** | 界面日志（含图形探测结论） |
+| `$XDG_STATE_HOME/tmper/tmper-daemon.log` | **daemon** | 播放器日志 |
+
+**为什么日志要分两个文件**：`init_logging` 用 `File::create`，每次启动都会**截断**。两个进程共写一个文件，daemon 的历史——包括它临死前解释原因的那几行——会被下一次 `tmper` 抹掉。daemon 因此写自己的 `tmper-daemon.log`。README 让用户 `grep "graphics"` 的图形探测结论在客户端那一个里，位置不变。
 
 ### 7.2 配置结构
 
@@ -570,6 +734,8 @@ pub struct Config {
 
 **保存**：`write_config()` — `toml::to_string_pretty(&config)` → 写入文件（通过设置视图自动触发）
 
+**配置归客户端，但它不全归客户端用**：`num_bars` 与 `smoothing` 存在客户端的 `config.toml` 里，消耗它们的是 daemon 的 FFT 线程。客户端用 `Request::SetFftParams` 把它们推过去（变更时再推一次），而不是让 daemon 也去读那个文件——配置文件只有一个读者，规则才简单。`default_volume` 同理，在 `Hello` 时下发。
+
 ### 7.3 配置优先级
 
 ```
@@ -580,28 +746,35 @@ pub struct Config {
 
 ## 8. 持久化
 
-### 8.1 状态保存
+**一个文件一个写入者**，见表 §7.1。客户端不再自己写任何文件：`app/persistence.rs` 整个删除了，歌单、曲库路径、state 的读写都变成请求。
 
-退出时（`AppEvent::Quit` 或 `should_quit`）调用 `save_state()`：
+### 8.1 状态保存（daemon）
+
+`state.json` 在三种时刻由 daemon 写出：收到 `Shutdown`、空闲退出、以及收到 `Shutdown` 之前的 `stop` 收尾。
 
 ```json
 {
   "volume": 0.8,
   "repeat_mode": "Sequential",
   "lyrics_offset_ms": 0,
-  "last_track_path": "/home/user/Music/song.flac"
+  "last_track_path": "/home/user/Music/song.flac",
+  "queue": ["/home/user/Music/song.flac"],
+  "queue_index": 0,
+  "position_secs": 42.5
 }
 ```
 
-> 启动时 `load_state()` 仅恢复 **音量、循环模式、歌词偏移**；`last_track_path` 仅作记录，**不会**自动恢复播放。
+> 启动时 `load_state()` 恢复音量、循环模式、歌词偏移，**并把队列和位置停驻在架上**——曲目已经加载、进度条停在那一秒，但**不出声**，按播放才接着放。只存 `last_track_path` 是不够的：那只能让 `play` 从头再放一遍。恢复再叠一层保护：偏移夹到 `duration * 0.999`，正好落在最后一个采样上的 seek 会立刻结束、下一 tick 就换歌。
 
-### 8.2 播放列表持久化
+**存盘顺序是承重的。** `Player::shutdown()` 先 `save_state()` 再静音设备：`stop_playback()` 是回卷，先静音就会把 `position_secs: 0.0` 忠实地写进去。测试 `a_shutdown_saves_the_position_before_it_silences_the_player` 盯着这个顺序。
 
-`save_playlists()` / `load_playlists()` — 歌单名称 + 歌曲路径数组，JSON 格式。
+### 8.2 播放列表持久化（daemon）
 
-### 8.3 曲库路径持久化
+`playlists.json` — 歌单 `{ id, name, songs: [路径] }`。**id 是身份**：名字可以重复，位置是别人手里那份拷贝的光标。旧文件（无 `id`，全是 0）在 load 时补号并立刻写回，所以迁移是一次性的。
 
-`save_library_paths()` / `load_library_paths()` — 文件浏览器中的库路径列表。
+### 8.3 曲库路径持久化（daemon）
+
+`library.json` — 曲库目录列表，整体作为 `Event::LibraryPaths` 推给每个新客户端。
 
 ---
 
@@ -682,52 +855,56 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 
 > 下表统计的是**测试用例数量**，不是**行覆盖率**。行覆盖率需用 `cargo llvm-cov` 单独测量
 > （见 [10.3 行覆盖率](#103-行覆盖率)）。
-> **现状（2026-10-03 实测）**：总行覆盖率 **88.87%**（函数 88.77%、区域 89.48%；
-> 少数计时敏感测试会让该数字每次浮动 ~0.3%）。同日先由 80.09% 补到 88.78%，主要靠补齐
-> 此前零测试的模块：`input/handler.rs`（19%→98%）、`library/scanner.rs`（30%→98%）、
-> `app/persistence.rs`、`config.rs`、`app/playback.rs`、`ui/views/player_view.rs`（72%→92%）。
-> 随后封面几何修复新增了几行位于 `run()` 内的代码，总数因此回落到 88.22%；当日最后一轮
-> 用进程内 SIXEL 编码器替换 chafa 子进程，`ui/cover/mod.rs` 从 87.59% 升到 92.51%
-> （探测改为一趟往返的 `TerminalCaps`，读循环可以直接用管道驱动），总数回到 88.54%；
-> 再补上 `audio/output.rs` 的 sink 退休回归测试后为 88.57%；同日 daemon 生命周期改成「暂停也算
-> 空闲、退出前存现场」时，新增的 `player/persistence.rs`（97%）与 `player/mod.rs`（93%）把总数
-> 推到 **88.87%**。
+> **现状（2026-10-03 实测）**：总行覆盖率 **89.96%**（函数 88.63%、
+> 区域 90.61%；少数计时敏感测试会让该数字每次浮动 ~0.3%）。同日先是把测试从
+> 80.09% 补到 88.87%（补齐 `input/handler.rs`、`library/scanner.rs`、`config.rs` 等此前零测试的
+> 模块），随后守护进程拆分新增的模块——`ipc/`（`mod.rs` 99%、`proto.rs` 100%）、`daemon.rs`、
+> `player/*`、`app/handle.rs`、`client.rs`——在**继续涨**的情况下把总数推到
+> 89.96%。拆分新增的代码里覆盖率最低的是 `player/mpris.rs`
+> （82.22%：zbus 的接口层需要一条真总线才能跑到，能测的映射/diff/镜像逻辑都测了）。
 >
 > 剩余的未覆盖部分是**结构性**的，不是遗漏：
-> `audio/engine.rs` 73%（6 个 `#[ignore]` 设备测试的函数体本身计入未覆盖，另有 `new`/`play_file`
-> 需要真实声卡）、`audio/output.rs` 65%（`new` 要开真实设备，headless 路径已覆盖）、
-> `app/mod.rs` 62%（`TerminalGuard` 与 `run` 事件循环需要真实 tty）、
-> `paths.rs` 31%（非 `cfg(test)` 分支在测试构建下根本不参与编译）、`main.rs` 0%（二进制入口）。
+> `audio/engine.rs` 77.25%（6 个 `#[ignore]` 设备测试的函数体本身计入未覆盖，
+> 另有 `new`/`play_file` 需要真实声卡）、`audio/output.rs` 65.15%（`new` 要开真实设备，
+> headless 路径已覆盖）、`app/mod.rs` 70.02%（`TerminalGuard` 与 `run` 事件循环需要
+> 真实 tty）、`paths.rs` 53.38%（非 `cfg(test)` 分支在测试构建下根本不参与编译）、
+> `main.rs` 0%（二进制入口）。**测试数不是覆盖率**——要说「覆盖了」就跑
+> `cargo llvm-cov --all-features --workspace`。
 
 | 模块 | 测试数 | 覆盖内容 |
 |------|--------|----------|
-| audio/decoder.rs | 3 | 解码 WAV、不存在的文件、seek |
-| audio/engine.rs | 23 | 播放状态机、暂停/seek/完成（headless）、背压上界、会话替换丢弃陈旧事件、打开失败上报、`InstrumentedSource` 环形缓冲与 DoD 释放计数、会话辅助函数、队列诊断 |
-| audio/output.rs | 1 | 退休的 sink 仍可 `append`（`stop()` 过的 sink 会让下一个 `append` 卡在 rodio 的 `sleep_until_end` 里，而持有它的解码线程会把整个运行时拖住不退出） |
-| lyrics/parser.rs | 16 | 标准 LRC、元数据、多时间戳、逐字、空文件、损坏行、排序、BOM/UTF-8/GBK/Shift-JIS 编码检测、文件读取 |
-| visualizer/fft.rs | 1 | 440Hz 峰值检测 |
-| visualizer/processor.rs | 2 | 桶数量、平滑收敛 |
-| visualizer/render.rs | 6 | 渲染输出、颜色渐变、行宽恰为 width（含 num_bars > width）、`bar_at_column` 跨过居中留白、绘制与配色逐列对齐 |
+| ipc/proto.rs | 6 | 每个 `Request`/`Event` 变体的 serde 往返（新增变体没有 serde 形状会在这里红，而不是在 socket 那一端红）、浮点精确过网、tag 拼写被钉住、未知字段忽略而未知 tag 报错 |
+| ipc/mod.rs | 11 | 行分隔封帧：往返、载荷内的换行、超过读缓冲的长行重组、第二行等它自己那次读、EOF 在行间是干净的结束而在行中是错误、坏 JSON、超长行不缓冲就先拒绝、CRLF 容忍、空行、非 UTF-8 |
+| daemon.rs | 21 | 新客户端一次拿齐镜像（快照+队列+路径+歌单）、客户端 id 不复用、命令广播到每个客户端、离场客户端的命令被忽略、频谱只发给订阅者、FFT 跟随最后一个订阅者、卡住的客户端从不被等待、错过事实的客户端被丢弃、有人连着或出声就不空闲、暂停也算空闲、空闲计时被打断后重来、`Shutdown` 向所有人道别并结束循环、Hello 握手与版本拒绝、静默连接从不注册 |
+| client.rs | 6 | `tmper status` 的输出（播放中/空载/失败各一条）、每个控制动词都有对应的 `Request`、越界音量被夹住而不是照做 |
+| player/mod.rs | 37 | 队列与续播策略：播放即入队且去重、队列版本只在队列真变了时动、`Toggle`/`Stop`/`Resume`/seek 语义、删曲目时 `playing_index` 的移动、循环三模式、活动歌单优先于队列且两端环绕、shuffle 落在活动列表内、订阅才产频谱、曲库请求与回带 key 的答复（艺术家/专辑/曲目/搜索）、加路径与索引队列、扫描事件、`Shutdown` 只报一次 |
+| player/library.rs | 14 | 艺术家→专辑→曲目查询、前缀搜索、忘掉目录/单文件删行、**不完整或取消的扫描不剪枝**而完整扫描才剪枝、扫描索引目录并报告完成、路径列表往返并丢掉已消失的、同一路径加两次只留一条 |
+| player/playlists.rs | 12 | id 随歌单往返、载入时丢弃已不存在的歌、无 id 的文件补号并写回、重复 id 重新编号、同曲去重、按位置删曲、对不存在的 id 编辑是 no-op、**id 永不复用**、导入成为编号歌单、读不了的导入会报告、不指名歌曲的歌单仍是歌单、损坏文件被忽略 |
+| player/persistence.rs | 11 | state 往返与部分字段恢复、缺失/损坏文件、恢复后停在同曲同一秒、`resume` 从停驻处继续、`stop` 之后停驻位置不再生效、存盘记下队列与实时位置、**shutdown 先存盘后静音**（把顺序调回去这条会红）、越界 `queue_index` 被丢弃 |
+| player/cover.rs | 8 | PNG/JPEG 按扩展名落盘、未知格式不缓存、同曲复用同一文件、不同曲不同文件、缓存不随听歌历史增长、指纹稳定且互异、非 UTF-8 路径也有名字 |
+| player/fft.rs | 3 | 取最新样本窗口、样本不够时是 `None`、环形缓冲满了仍取尾部 |
+| player/mpris.rs | 25 | 首份快照播报全量而后续只播报动了的属性、位置移动不算变化、Loading/Seeking 对桌面是 Playing、循环模式映射到两个 flag、曲目变化的元数据、空载元数据、无时长不可 seek、传输方法发的就是按键发的那些请求、秒与分数过网、音量越界被夹、`SetPosition` 变成相对 seek、未加载曲目/空载的 `SetPosition` 无操作、getter 读的是 daemon 发布的值、**循环模式经总线往返**、清掉从未设过的 shuffle 不带走单曲循环、无封面就没有 `artUrl`、恢复的会话是「还没有封面的曲目」、track id 由路径拼出、`file://` 转义、时间是微秒、一次 `Set` 不播报两次、音量经加宽仍往返 |
+| app/handle.rs | 11 | `LocalHandle` 同步应答、`poll` 恒空、`tick` 报出引擎动过之后的状态、`detach` 停播、只有本地句柄拿得到 player；`DaemonHandle`：**欢迎词后面的问候不被吞**、握手前就走的 daemon 被报告、socket 中途死掉终结一次性动词、daemon 死了竖横幅并接回来、故障期间发出的命令在恢复后到达、永不回来的 daemon 也不拖垮客户端 |
+| app/mod.rs | 14 | 视图切换、音量、循环、加载播放、停止、命令模式、搜索、文本输入模式旁路集合（含 4 个 tokio 集成式） |
+| app/playback.rs | 8 | 播放选中项、越界是 no-op、选择移动的两端 clamp 与滚动跟随、空队列 no-op、换曲清掉上一首的歌词、歌词偏移生效 |
+| app/handlers/mod.rs | 42 | 键位匹配、视图分发切换、滚动 clamp、命令分发全分支（quit/theme/volume/seek/shuffle/view/import/export 及失败路径）、`AppEvent` 分发、帮助覆盖层按键、tick 的频谱衰减与配置同步、tick 读取连接状态、test_support 辅助 |
+| app/handlers/browser.rs | 16 | 焦点切换、库/文件系统导航与 clamp、Enter 进入目录/加库去重、混合目录（子目录+音频）选中行不串位、Backspace 边界、刷新过滤排序 |
+| app/handlers/library.rs | 22 | 面板导航、搜索输入/回车/回退、`clamp_scroll`、答复到达时替换列表并夹住光标、加目录请求扫描、加文件只排队不声称扫描、Enter 播放、队列被顺带索引 |
+| app/handlers/playlist.rs | 18 | 焦点切换、新建歌单插入模式、展开/删除/重复保护、M3U 导出、flat-model 解析、clamp |
+| app/handlers/settings.rs | 16 | 布局 19 行、j/k 导航 clamp、主题/柱数/平滑/音量/步长/封面循环、跳过行、Enter 动作、M3U 导出、config 持久化（写同一个 `config.toml` 的测试用 `paths::config_file_lock()` 串行化：每个 cycle 都会落盘，读回校验的那个测试会被并发的写入者灌进别人的配置） |
 | library/database.rs | 10 | upsert、重复更新、搜索、artists、albums、delete、前缀精确匹配、`delete_missing_under` 不误伤同前缀兄弟目录 |
 | library/scanner.rs | 10 | 扩展名过滤、遍历错误使列表不完整（缺失根、不可读子目录）、指纹命中跳过与变更重读、元数据失败计入 failed 但不影响 complete、取消、进度上报 |
 | library/playlist_manager.rs | 2 | M3U 往返、相对路径 |
+| audio/decoder.rs | 3 | 解码 WAV、不存在的文件、seek |
+| audio/engine.rs | 24 (18+6) | 播放状态机、暂停/seek/完成（headless）、背压上界、会话替换丢弃陈旧事件、打开失败上报、`InstrumentedSource` 环形缓冲与 DoD 释放计数、会话辅助函数、队列诊断；6 个 `#[ignore]` 的需要真实/虚拟声卡 |
+| audio/output.rs | 1 | 退休的 sink 仍可 `append`（`stop()` 过的 sink 会让下一个 `append` 卡在 rodio 的 `sleep_until_end` 里，而持有它的解码线程会把整个运行时拖住不退出） |
+| lyrics/parser.rs | 16 | 标准 LRC、元数据、多时间戳、逐字、空文件、损坏行、排序、BOM/UTF-8/GBK/Shift-JIS 编码检测、文件读取 |
 | metadata/reader.rs | 3 | FLAC、WAV（无标签）、不存在的文件 |
+| visualizer/fft.rs | 1 | 440Hz 峰值检测 |
+| visualizer/processor.rs | 2 | 桶数量、平滑收敛 |
+| visualizer/render.rs | 6 | 渲染输出、颜色渐变、行宽恰为 width（含 num_bars > width）、`bar_at_column` 跨过居中留白、绘制与配色逐列对齐 |
+| ui/mod.rs | 10 | 最小支持尺寸渲染（七个视图）、极窄终端不 panic、通知弹窗绘制与过期、**连接横幅**（双宽字形按格写，所以按字符逐个断言）、播放器还在时不画横幅、命令面板、帮助覆盖层优先级、全屏频谱画出**带颜色的**柱 |
 | ui/theme.rs | 5 | hex 颜色解析（有效/无效回退）、多字节输入不 panic、缺失主题回退默认、真实主题 13 色槽加载 |
-| input/command.rs | 4 | quit、theme、volume、unknown |
-| input/handler.rs | 15 | 双键序列、非组合键两个按键都按序投递、超时释放挂起键、过期前缀不再配对、Ctrl+D 永不解析为 dd、退出键清理挂起、控制字符过滤 |
-| input/keymap.rs | 5 | 单字符/^X/特殊名称、非 ASCII 单字符不再静默变空格、未知名称回退 |
-| playlist.rs | — | （v3.5 后仅存 `PlaylistData` 数据模型，逻辑并入 playlist_view） |
-| paths.rs | 2 | XDG 目录拼接、测试期重定向到临时根（三个目录都隔离）；另有测试用的 `config_file_lock()`（不是测试，是给共用 `config.toml` 的测试串行化的锁） |
-| config.rs | 11 | 模板与代码默认值一致、clamp 上下界与放行、`cell_px` 覆盖的读取与校验、f32 两位小数序列化、往返、部分/空/含未知键的文档解析 |
-| app/mod.rs | 14 | 视图切换、音量、循环、加载播放、停止、命令模式、搜索、文本输入模式旁路集合（含 4 个 tokio 集成式） |
-| app/playback.rs | 17 | 陈旧歌单游标下 prev/next 不越界、空歌单 no-op、曲终三模式（歌单与全局两条路径）、全局队列两端停住、shuffle 落在范围内、FFT 取最新样本窗口、播放选中项 |
-| app/persistence.rs | 11 | state 往返与部分字段恢复、缺失/损坏文件、歌单往返且丢弃已不存在的歌曲、库路径往返与去重、写入内容 |
-| app/handlers/mod.rs | 41 | 键位匹配、视图分发切换、滚动 clamp、命令分发全分支（quit/theme/volume/seek/shuffle/view/import/export 及失败路径）、AppEvent 分发、帮助覆盖层按键、tick 的频谱衰减与配置同步、test_support 辅助 |
-| app/handlers/browser.rs | 16 | 焦点切换、库/文件系统导航与 clamp、Enter 进入目录/加库去重、混合目录（子目录+音频）选中行不串位、Backspace 边界、刷新过滤排序 |
-| app/handlers/library.rs | 19 | 面板导航、搜索输入/回车/回退、clamp_scroll、库加载 upsert 与去重、Enter 播放、扫描完成才剪枝（含 1 个 tokio 集成式） |
-| app/handlers/playlist.rs | 18 | 焦点切换、新建歌单插入模式、展开/删除/重复保护、M3U 导出、flat-model 解析、clamp |
-| app/handlers/settings.rs | 16 | 布局 19 行、j/k 导航 clamp、主题/柱数/平滑/音量/步长/封面循环、跳过行、Enter 动作、M3U 导出、config 持久化（写同一个 `config.toml` 的测试用 `paths::config_file_lock()` 串行化：每个 cycle 都会落盘，读回校验的那个测试会被并发的写入者灌进别人的配置） |
-| ui/render_tests | 7 | 最小支持尺寸渲染、极窄终端不 panic、通知弹窗绘制与过期、命令面板、帮助覆盖层优先级 |
 | ui/views/file_browser_view.rs | 3 | 空/填充渲染、聚焦样式 |
 | ui/views/library_view.rs | 6 | 三面板标题、数据行、搜索栏、光标闪烁、长列表滚动保持选中行可见 |
 | ui/views/lyrics_view.rs | 4 | 空提示、歌词+当前高亮、offset 标签、滚动保持当前行可见 |
@@ -736,7 +913,13 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 | ui/views/player_view.rs | 21 | cover 块渲染（空字节/零面积/内存 PNG）、封面矩形自适应（正方形/带余量的一边/宽图/竖图/退化输入/永不越界）、原生图层生效时字符画让位、渲染冒烟、搜索命中与无匹配、迷你歌单、歌词区（空/当前行/跟随滚动）、歌曲信息各槽位、控制栏进度与零时长 |
 | ui/cover/mod.rs | 43 | 一次性发送不变量、区域重发、视图切换/隐藏/无封面清除、编码失败不重试、Kitty 尺寸变化重发、搜索覆盖层清理两个协议、载荷尺寸即矩形像素（含退化矩形）、Kitty 载荷三规则（定位用光标移动且 `p` 槽为空、超长载荷只有首块带命令头、`f=100` 的载荷必须真是 PNG）、真实编码器（PNG → SIXEL 栅格头、非图片字节报错）、单元格尺寸解析与回退、DA1 解析（属性 4 / 参数按数值匹配 / 半包不算答复 / 混在其他回复中）、`a=q` 答复解析（含半包与非答复流量）、复用器识别与「复用器下不问图形问题」、探测读循环（管道：应答/半包拼接/DA1 屏障提前返回/超时/EOF）与查询写入、抑制字符画时的重发（注入式 writer/encoder/fd） |
 | ui/widgets/help_popup.rs | 4 | 帮助文案与当前键位/XDG 路径一致、绘制、滚动到底后 clamp、小于自身边距的终端 |
-| **总计** | **370** | **364 默认运行 + 6 设备门控（`#[ignore]`）** |
+| input/command.rs | 5 | `:q` / `:q!` 的区别、theme、volume、unknown |
+| input/handler.rs | 15 | 双键序列、非组合键两个按键都按序投递、超时释放挂起键、过期前缀不再配对、Ctrl+D 永不解析为 dd、退出键清理挂起、控制字符过滤 |
+| input/keymap.rs | 5 | 单字符/^X/特殊名称、非 ASCII 单字符不再静默变空格、未知名称回退 |
+| paths.rs | 5 | XDG 目录拼接、测试期重定向到临时根、运行时目录的优先级（覆盖变量 → XDG_RUNTIME_DIR → 状态目录下的 `run`）、socket 落在运行时目录里、`ensure_runtime_dir` 幂等；另有测试用的 `config_file_lock()`（不是测试，是给共用 `config.toml` 的测试串行化的锁） |
+| config.rs | 11 | 模板与代码默认值一致、clamp 上下界与放行、`cell_px` 覆盖的读取与校验、f32 两位小数序列化、往返、部分/空/含未知键的文档解析 |
+| playlist.rs | — | （仅存 `PlaylistData` 数据模型，逻辑在 `player/playlists.rs`） |
+| **总计** | **526** | **520 默认运行 + 6 设备门控（`#[ignore]`）** |
 
 #### 测试分层
 
@@ -800,28 +983,43 @@ tmper/
 │   ├── 2026-07-13-rewrite-and-fixes.md
 │   └── 2026-07-13-cleanup.md
 │
-├── src/                        # 源代码
-│   ├── main.rs                 #   入口：tracing init、config load、App::run()
-│   ├── cli.rs                  #   clap CLI 参数解析
+├── src/                        # 源代码（一个 binary，两个角色）
+│   ├── main.rs                 #   入口：按动词分流 → daemon::run() / client::run_control() / TUI
+│   ├── cli.rs                  #   clap CLI：daemon 与一次性控制动词
+│   ├── daemon.rs               #   ★ daemon：socket 监听、每客户端任务、空闲退出、MPRIS 装配
+│   ├── client.rs               #   ★ 一次性动词的实现（连上、发一条、打印、退出）
 │   ├── config.rs               #   Config 加载/默认值
 │   ├── constants.rs            #   运行时调优常量（集中管理 magic numbers）
 │   ├── error.rs                #   AppError + AppResult<T>
-│   ├── event.rs                #   AppEvent 枚举
+│   ├── event.rs                #   AppEvent 枚举（客户端内部事件）
 │   ├── playlist.rs             #   PlaylistData 数据结构（唯一歌单模型）
-│   ├── paths.rs                #   XDG 路径与旧数据迁移
+│   ├── paths.rs                #   XDG 路径（含 runtime/cache）与旧数据迁移
 │   │
-│   ├── app/                    #   应用核心
+│   ├── ipc/                    #   ★ 两个进程之间的唯一契约
+│   │   ├── mod.rs              #     行分隔 JSON 封帧：读一行、写一行、超时
+│   │   └── proto.rs            #     Request / Event 枚举 + PROTOCOL_VERSION
+│   │
+│   ├── player/                 #   ★ daemon 的内核（播放真值在这里）
+│   │   ├── mod.rs              #     Player：引擎 + 队列 + 续播策略 + 每 tick 的推进
+│   │   ├── library.rs          #     曲库索引与扫描任务（面板查询也在这里回答）
+│   │   ├── playlists.rs        #     歌单的增删改与编号
+│   │   ├── persistence.rs      #     state.json 的读写（daemon 是唯一写入者）
+│   │   ├── cover.rs            #     封面缓存文件（供 MPRIS 的 file:// URL）
+│   │   ├── fft.rs              #     订阅者的频谱：取 PCM 环形缓冲的最新窗口
+│   │   └── mpris.rs            #     MPRIS2 接口（zbus）
+│   │
+│   ├── app/                    #   客户端：TUI 的应用核心
 │   │   ├── mod.rs              #     App struct + run() 事件循环
-│   │   ├── playback.rs         #     播放控制：move_selection, next_track, FFT 线程
-│   │   ├── persistence.rs      #     状态/歌单/路径 保存和加载
+│   │   ├── handle.rs           #     ★ PlayerHandle trait + LocalHandle（测试）/ DaemonHandle（socket）
+│   │   ├── playback.rs         #     选择移动、歌词跟随（播放控制已改为发请求）
 │   │   └── handlers/           #     按键事件处理器
 │   │       ├── mod.rs          #       handle_event、switch_view、全局按键
 │   │       ├── playlist.rs     #       歌单视图按键
-│   │       ├── library.rs      #       曲库视图按键
+│   │       ├── library.rs      #       曲库视图按键（查询改为 IPC 请求）
 │   │       ├── browser.rs      #       文件浏览器按键
 │   │       └── settings.rs     #       设置视图按键 + write_config
 │   │
-│   ├── audio/                  #   音频引擎
+│   ├── audio/                  #   daemon 私有的音频引擎
 │   │   ├── decoder.rs          #     Symphonia 解码适配
 │   │   ├── output.rs           #     Rodio Sink 封装
 │   │   └── engine.rs           #     AudioEngine: 播放/暂停/seek/位置
@@ -829,23 +1027,23 @@ tmper/
 │   ├── metadata/               #   元数据
 │   │   └── reader.rs           #     lofty 标签读取 → TrackInfo
 │   │
-│   ├── lyrics/                 #   歌词系统
+│   ├── lyrics/                 #   歌词系统（客户端：位置是快照里来的）
 │   │   ├── types.rs            #     LyricLine、LyricTrack、LyricMetadata
 │   │   ├── parser.rs           #     LRC 解析 + 编码检测
 │   │   └── engine.rs           #     歌词查找 + 同步
 │   │
-│   ├── visualizer/             #   频谱可视化
+│   ├── visualizer/             #   频谱可视化（客户端渲染）
 │   │   ├── fft.rs              #     FFT 分析 (2048 点 Hann 窗)
 │   │   ├── processor.rs        #     对数分桶 + 平滑 + 归一化
 │   │   └── render.rs           #     Block Elements 字符渲染
 │   │
-│   ├── library/                #   音乐库
+│   ├── library/                #   音乐库的底层实现（归 daemon 调用）
 │   │   ├── database.rs         #     SQLite CRUD + 搜索
 │   │   ├── scanner.rs          #     后台增量目录扫描
 │   │   └── playlist_manager.rs #     M3U 导入/导出
 │   │
 │   ├── ui/                     #   用户界面
-│   │   ├── mod.rs              #     UiState、ViewMode、render() 入口
+│   │   ├── mod.rs              #     UiState、ViewMode、render() 入口（含连接横幅）
 │   │   ├── theme.rs            #     13 色槽语义主题（themes/*.toml 加载）
 │   │   ├── cover/              #     封面图渲染（终端协议直接输出）
 │   │   │   └── mod.rs          #       CoverRenderer: 能力探测、Kitty/SIXEL 互斥、一次性发送、几何对齐、43 测试
@@ -872,6 +1070,8 @@ tmper/
         └── test_notags.wav     #     无标签 WAV（验证 fallback）
 ```
 
+★ = 守护进程拆分新增的模块。
+
 ---
 
 ## 12. 依赖清单
@@ -890,11 +1090,17 @@ tmper/
 | 图像 | image | 0.25 | 封面解码 + Lanczos3 缩放（半块字符与 SIXEL 共用） |
 | SIXEL | icy_sixel | 0.5 | 进程内 sixel 编码（quantette：Wu 量化 + Floyd–Steinberg 抖动，≤256 色） |
 | 配置 | toml | 0.8 | TOML 序列化/反序列化 |
-| 序列化 | serde + serde_json | 1 | 配置/状态 JSON |
+| 序列化 | serde + serde_json | 1 | 配置/状态 JSON；**也是 IPC 的线格式**（行分隔 JSON，无额外协议库） |
+| 桌面集成 | mpris-server | 0.10 | MPRIS2 服务端（`tokio` feature，走 zbus 5）；没有会话总线时只是记日志，不拒绝启动 |
+| 终端探测 | libc | 0.2 | 单元尺寸探测要 `poll(2)`：等 tty 但不从它读走字节 |
 | CLI | clap | 4 | 命令行参数解析 |
 | 数据库 | rusqlite | 0.32 | SQLite（bundled） |
 | 目录遍历 | walkdir | 2 | 递归目录扫描 |
 | 正则 | regex | 1 | LRC 解析正则 |
 | 编码 | encoding_rs | 0.8 | GBK/Shift-JIS 歌词编码检测 |
-| 日志 | tracing + tracing-subscriber | 0.1/0.3 | 结构化日志 |
+| 日志 | tracing + tracing-subscriber | 0.1/0.3 | 结构化日志（客户端与 daemon 各写各的文件） |
 | 错误 | thiserror + anyhow | 2/1 | 错误类型 + 传播 |
+| 路径 | dirs | 6 | 家目录与 XDG 兜底 |
+| 文本宽度 | unicode-width | 0.2 | 中日韩宽字符的列宽（通知横幅按格写） |
+| Base64 | base64 | 0.22 | Kitty 图形载荷编码 |
+| 随机 | rand | 0.8 | shuffle 洗牌 |

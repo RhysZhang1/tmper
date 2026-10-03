@@ -575,19 +575,54 @@ mod render_tests {
         }
     }
 
-    /// Draw the full UI and flatten the buffer to text.
-    fn render_to_string(state: &UiState, width: u16, height: u16) -> String {
+    /// Draw the full UI and hand back the buffer it wrote.
+    fn render_buffer(state: &UiState, width: u16, height: u16) -> ratatui::buffer::Buffer {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
         terminal
             .draw(|frame| render(frame, state))
             .expect("renders");
-        terminal
-            .backend()
-            .buffer()
+        terminal.backend().buffer().clone()
+    }
+
+    /// Draw the full UI and flatten the buffer to text.
+    fn render_to_string(state: &UiState, width: u16, height: u16) -> String {
+        render_buffer(state, width, height)
             .content()
             .iter()
             .map(|c| c.symbol())
             .collect()
+    }
+
+    /// The full-screen spectrum view, given something to draw.
+    ///
+    /// Every other render test runs on a default `UiState`, whose spectrum is
+    /// empty — which is the early return in `render_visualizer`. Without this
+    /// one the panel's body (the bar layout and the per-column colour lookup)
+    /// is never executed by the suite at all.
+    #[test]
+    fn the_visualizer_view_draws_coloured_bars() {
+        let mut state = UiState {
+            visualizer_data: vec![0.05, 0.9, 0.4, 0.2, 0.75, 0.3, 0.1, 0.6],
+            ..Default::default()
+        };
+        state.view.active_view = ViewMode::Visualizer;
+
+        let buffer = render_buffer(&state, 40, 12);
+        let bars: Vec<_> = buffer
+            .content()
+            .iter()
+            .filter(|cell| "▁▂▃▄▅▆▇█".contains(cell.symbol()))
+            .collect();
+
+        assert!(!bars.is_empty(), "the bars are drawn, not an empty panel");
+        // The colour comes from `bar_at_column` — the same function that laid
+        // the bars out — so a column that drifts out of step would show up
+        // here as every bar sharing one colour.
+        let colours: std::collections::HashSet<_> = bars.iter().map(|cell| cell.fg).collect();
+        assert!(
+            colours.len() > 1,
+            "bars are coloured by height: {colours:?}"
+        );
     }
 
     // ── Overlays ──
