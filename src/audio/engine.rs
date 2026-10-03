@@ -16,7 +16,7 @@ use crate::error::AppResult;
 /// operation, so the guarded data is always left in a consistent state;
 /// `into_inner()` is therefore safe and avoids crashing the player — or, worse,
 /// a background decode/FFT thread — on an unrelated panic elsewhere.
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
