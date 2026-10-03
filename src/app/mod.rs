@@ -144,6 +144,24 @@ impl App {
         Ok(app)
     }
 
+    /// True while some part of the UI is capturing raw text.
+    ///
+    /// `KeyHandler` resolves `gg`/`dd` and owns the quit binding, both of which
+    /// must be inert here — otherwise typing `dd` into a search box deletes the
+    /// selected track, a `d` or `g` in a query is swallowed, and `q` quits the
+    /// app mid-word. `handle_key_event` routes these modes to their own input
+    /// handlers before any global key, so bypassing is consistent with the
+    /// documented dispatch order.
+    fn in_text_entry(&self) -> bool {
+        self.ui_state.command_mode
+            || self.ui_state.search_mode
+            || self.ui_state.library_state.search_mode
+            || matches!(
+                self.ui_state.playlist_state.insert_mode,
+                crate::ui::views::playlist_view::InsertMode::Typing(_)
+            )
+    }
+
     pub async fn run(&mut self, cli: Cli) -> crate::error::AppResult<()> {
         let mut terminal_guard = TerminalGuard::enter()?;
 
@@ -221,11 +239,19 @@ impl App {
                             for event in events {
                                 match event {
                                     CrosstermEvent::Key(key) => {
-                                        let needs_bypass = matches!(self.ui_state.playlist_state.insert_mode, crate::ui::views::playlist_view::InsertMode::Typing(_));
-                                        if needs_bypass {
+                                        // While the user is typing text, the
+                                        // double-key machinery and the quit
+                                        // binding both stand down: a query
+                                        // containing `d` must not delete a
+                                        // track, and one containing `q` must
+                                        // not exit the app.
+                                        if self.in_text_entry() {
+                                            self.key_handler.discard_pending();
                                             self.handle_event(crate::event::AppEvent::Key(key));
-                                        } else if let Some(app_event) = self.key_handler.process(key) {
-                                            self.handle_event(app_event);
+                                        } else {
+                                            for app_event in self.key_handler.process(key) {
+                                                self.handle_event(app_event);
+                                            }
                                         }
                                     }
                                     CrosstermEvent::Resize(_, _) => {}
@@ -238,6 +264,12 @@ impl App {
                     }
                 }
                 _ = tick_interval.tick() => {
+                    // A held `g`/`d` is released by time as well as by the
+                    // next key, so a lone prefix is not stuck until the user
+                    // happens to press something else.
+                    if let Some(event) = self.key_handler.flush_expired() {
+                        self.handle_event(event);
+                    }
                     self.handle_event(AppEvent::Tick);
                     let now = std::time::Instant::now();
                     if now.duration_since(last_draw) >= min_draw_interval {
@@ -362,6 +394,42 @@ mod tests {
 
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from("tests/fixtures").join(name)
+    }
+
+    // ── Text entry bypass ──
+
+    /// Every mode that captures raw text must be in the bypass set. Missing one
+    /// is not cosmetic: the double-key machinery deletes the selected track on
+    /// `dd` and swallows `g`/`d` keystrokes, and the quit binding fires on `q`,
+    /// so a query like "queen" would exit the app.
+    #[test]
+    fn test_text_entry_modes_bypass_key_handler() {
+        let mut ta = TestApp::new();
+        assert!(!ta.app.in_text_entry(), "normal browsing");
+
+        // Player queue search (`/` in the player view).
+        ta.app.ui_state.search_mode = true;
+        assert!(ta.app.in_text_entry(), "player search");
+        ta.app.ui_state.search_mode = false;
+
+        // Library search.
+        ta.app.ui_state.library_state.search_mode = true;
+        assert!(ta.app.in_text_entry(), "library search");
+        ta.app.ui_state.library_state.search_mode = false;
+
+        // Command line (`:`).
+        ta.app.ui_state.command_mode = true;
+        assert!(ta.app.in_text_entry(), "command mode");
+        ta.app.ui_state.command_mode = false;
+
+        // Playlist rename.
+        ta.app.ui_state.playlist_state.insert_mode =
+            crate::ui::views::playlist_view::InsertMode::Typing("new".into());
+        assert!(ta.app.in_text_entry(), "playlist rename");
+
+        ta.app.ui_state.playlist_state.insert_mode =
+            crate::ui::views::playlist_view::InsertMode::Off;
+        assert!(!ta.app.in_text_entry(), "back to normal browsing");
     }
 
     // ── P0: View switching ──
