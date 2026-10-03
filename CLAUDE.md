@@ -121,7 +121,7 @@ cargo llvm-cov --all-features --workspace # prints per-module line coverage + a 
 - The default suite is **device-free**: App/engine tests build a headless engine (`App::new_headless` → `AudioEngine::new_headless` → `Sink::new_idle()`), so `cargo test` passes with no sound card. Exactly 6 tests touch real output; they are named `audio_output_*` and marked `#[ignore]`
 - Logical modules have `#[cfg(test)] mod tests { ... }` inline
 - Tests follow Arrange-Act-Assert pattern; cover normal paths + boundary conditions
-- **Line coverage 88.57%** (measured 2026-10-03 via `cargo llvm-cov`; a few timing-sensitive tests
+- **Line coverage 88.87%** (measured 2026-10-03 via `cargo llvm-cov`; a few timing-sensitive tests
   make this wobble by ~0.3% between runs). What remains is structural, not neglected:
   `audio/engine.rs` (73% — the six `#[ignore]`d device tests count as uncovered, plus `new` and
   `play_file` need a real sound card), `audio/output.rs` (65% — `new` opens a device; the headless

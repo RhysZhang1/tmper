@@ -210,6 +210,13 @@ impl Daemon {
 
     /// Whether the daemon should exit now.
     ///
+    /// Idle means exactly two things: nobody is attached, and no sound is
+    /// being produced. A paused player counts as idle — it is holding a place,
+    /// not playing, and a daemon that stayed alive for a pause would never
+    /// exit at all, since a pause can be left standing for days. The place is
+    /// not lost: `state.json` carries the queue and the position, and the next
+    /// run comes back parked on the same track at the same second.
+    ///
     /// `now` is a parameter because the idle timeout is the one piece of
     /// daemon policy with a clock in it, and a test should not have to wait
     /// five minutes to see it fire.
@@ -217,7 +224,7 @@ impl Daemon {
         if self.player.should_shutdown() {
             return true;
         }
-        if !self.clients.is_empty() || self.player.state().status.is_engaged() {
+        if !self.clients.is_empty() || self.player.state().status.is_active() {
             self.idle_since = None;
             return false;
         }
@@ -742,8 +749,7 @@ mod tests {
         assert!(daemon.should_exit(later + Duration::from_secs(runtime::DAEMON_IDLE_EXIT_SECS)));
     }
 
-    /// Playing — and, by [`crate::audio::engine::PlaybackState::is_engaged`],
-    /// pausing — is the other reason to live. This is the whole point of the
+    /// Playing is the other reason to live. This is the whole point of the
     /// daemon: the music outlives the window.
     #[tokio::test]
     async fn playback_keeps_the_daemon_alive() {
@@ -753,6 +759,32 @@ mod tests {
 
         let start = Instant::now();
         assert!(!daemon.should_exit(start + Duration::from_secs(86_400)));
+    }
+
+    /// A pause is not playback. It holds a place, and the daemon that held it
+    /// forever would be a daemon nobody could get rid of short of `tmper
+    /// quit` — the session it was holding comes back from `state.json` anyway.
+    #[tokio::test]
+    async fn a_paused_daemon_is_idle_like_any_other() {
+        let mut daemon = daemon();
+        let path = std::fs::canonicalize("tests/fixtures/test.wav").expect("fixture");
+        daemon.apply_to_player(Request::Play { path });
+        daemon.apply_to_player(Request::Pause);
+        assert!(
+            matches!(
+                daemon.player.state().status,
+                crate::audio::engine::PlaybackState::Paused
+            ),
+            "the test needs a pause to be about a pause"
+        );
+
+        let start = Instant::now();
+        assert!(!daemon.should_exit(start), "a pause is not playback");
+        assert!(
+            !daemon.should_exit(start + Duration::from_secs(runtime::DAEMON_IDLE_EXIT_SECS - 1)),
+            "one second early is still early"
+        );
+        assert!(daemon.should_exit(start + Duration::from_secs(runtime::DAEMON_IDLE_EXIT_SECS)));
     }
 
     /// `:quit!` and `tmper quit` reach every attached client, so a TUI that is

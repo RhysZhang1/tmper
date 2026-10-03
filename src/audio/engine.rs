@@ -45,17 +45,6 @@ impl PlaybackState {
     pub fn is_active(&self) -> bool {
         matches!(self, Self::Loading | Self::Playing | Self::Seeking)
     }
-
-    /// The user is somewhere in the middle of a track: playing it, or paused
-    /// inside it.
-    ///
-    /// What the daemon keys its idle exit off. A paused player is a session
-    /// waiting to be resumed, not an idle one — leaving a queue paused and
-    /// coming back to it is exactly the behaviour the daemon exists for, so it
-    /// counts as being busy. A stopped, finished or failed one is not.
-    pub fn is_engaged(&self) -> bool {
-        self.is_active() || matches!(self, Self::Paused)
-    }
 }
 
 /// Events produced by the active decoder and consumed by the app tick.
@@ -303,14 +292,42 @@ impl AudioEngine {
         Ok(())
     }
 
+    /// [`Self::play_file_at`] from the top, spelled without the zero.
+    ///
+    /// Test-only for the same reason [`Self::play_file`] is: the player always
+    /// has an offset in hand — `play` passes 0.0 and a restore passes the saved
+    /// position — so the shortened spelling would be a second door into the
+    /// same room.
+    #[cfg(test)]
     pub fn play_file_async(&mut self, path: &Path) -> AppResult<()> {
+        self.play_file_at(path, 0.0)
+    }
+
+    /// Start `path` at `offset_secs` rather than at the beginning.
+    ///
+    /// What a restored session needs. Moving the clock alone is not enough:
+    /// the decoder has to skip the same amount, or the sound and the display
+    /// disagree for the whole track — the position would claim 4:30 while the
+    /// speakers were at 0:00. The offset goes into [`Self::reset_position`] as
+    /// the base *and* into the decoder, and `drain_events` re-reads the base
+    /// when the decoder reports ready, so it survives the Loading → Playing
+    /// transition.
+    pub fn play_file_at(&mut self, path: &Path, offset_secs: f64) -> AppResult<()> {
         let path_buf = path.to_path_buf();
         let (generation, cancel, queued, peak) = self.begin_session();
         let sink = self.output.sink_arc();
         self.current_path = Some(path_buf.clone());
-        self.reset_position(0.0, false);
+        self.reset_position(offset_secs, false);
         self.state = PlaybackState::Loading;
-        self.spawn_decoder(path_buf, 0.0, generation, cancel, queued, peak, sink);
+        self.spawn_decoder(
+            path_buf,
+            offset_secs,
+            generation,
+            cancel,
+            queued,
+            peak,
+            sink,
+        );
         Ok(())
     }
 
@@ -836,6 +853,48 @@ mod tests {
         second.finished(&engine);
         assert_eq!(engine.drain_events(), vec![PlaybackEvent::Finished]);
         assert_eq!(engine.state(), &PlaybackState::Finished);
+    }
+
+    /// A restored session needs the clock *and* the decoder moved: a display
+    /// reading 4:30 over speakers playing 0:00 is worse than starting over.
+    /// The part worth pinning is that the offset outlives the decoder becoming
+    /// ready — that transition re-reads the base from the live position state,
+    /// and a base of zero there would silently undo the restore.
+    #[tokio::test]
+    async fn a_session_started_at_an_offset_keeps_it_once_it_is_ready() {
+        let mut engine = AudioEngine::new_headless();
+        engine
+            .play_file_at(Path::new("tests/fixtures/test.flac"), 1.0)
+            .expect("start at an offset");
+
+        assert_eq!(engine.state(), &PlaybackState::Loading);
+        assert!(
+            (1.0..1.5).contains(&engine.position_secs()),
+            "the clock starts at the offset, not at zero"
+        );
+
+        // Headless, nothing drains the sink, so a two-second file can report
+        // ready *and* finish inside one `drain_events`. What is asserted is
+        // therefore not the state it was in but the one number that transition
+        // can destroy — the base offset, which `drain_events` re-reads when
+        // the decoder reports ready.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut ready = false;
+        while Instant::now() < deadline && !ready {
+            for event in engine.drain_events() {
+                ready |= matches!(event, PlaybackEvent::Ready { .. });
+            }
+            if !ready {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        }
+
+        assert!(ready, "the decoder reported ready before the deadline");
+        let position = engine.position_secs();
+        assert!(
+            (1.0..=2.0).contains(&position),
+            "the offset must survive the transition to playing: {position}"
+        );
     }
 
     // ── InstrumentedSource: the FFT ring buffer and its backpressure ledger ──

@@ -75,6 +75,12 @@ fn init_logging(is_daemon: bool) {
     } else {
         "tmper.log"
     };
+    // Before the `File::create`, not after: on a fresh install nothing has
+    // made the state directory yet — `main` does, a few lines further down —
+    // and a log that cannot be created falls back to `/dev/null` in silence.
+    // The first run of either half is then the one run with nothing to read.
+    let _ = std::fs::create_dir_all(state_dir());
+
     let log_file = std::fs::File::create(state_dir().join(name))
         .unwrap_or_else(|_| std::fs::File::create("/dev/null").expect("/dev/null"));
 

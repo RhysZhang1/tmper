@@ -88,3 +88,59 @@ daemon 的历史（包括它临死前解释原因的那几行）会被下一次 
 - **阶段 3**：MPRIS2（`mpris-server` + zbus）；封面缓存成真文件供 `mpris:artUrl`。
 - **阶段 4**：daemon 中途死掉后的**自动重连**（现在读到 EOF 会提示并退出 TUI）、陈旧 socket
   的显式处理、四份文档、`cargo llvm-cov` 复测。
+
+## 追加（同日）：暂停即空闲，退出前把现场存下来
+
+`tmper stop` 修好之后剩下的那条规则悬着：暂停算不算「在做事」？原来的答案算（`is_engaged()`
+把 `Paused` 和播放并列），于是**一个暂停的 daemon 永远不会退**——暂停可以挂好几天，空闲计时
+永远不开始。你选了「暂停也算空闲」，代价是退出前必须把现场存下来，否则那 5 分钟会吃掉进度。
+规则因此变成：**没人连着、也没出声（停止或暂停）才开始计时，5 分钟后退出；播放中永不退出**
+（关掉 TUI 音乐继续，是 daemon 存在的理由）。
+
+**只存 `last_track_path` 是不够的**，那只能让 `play` 从头再放一遍。现在 `state.json` 里还有
+`queue`、`queue_index` 和 `position_secs`（退出那一刻的实时位置），启动时全部恢复——但**不出声**：
+曲目在架上、进度条停在那一秒，按播放才接着放（`Player::resume_at` 是被「停驻」的针，第一次
+start 用掉它）。
+
+**针要停在声音上，不只是停在数字上。** `play_file_async` 原来硬编码从 0 解码，只把时钟拨到
+4:30 会让显示和扬声器整首歌都对不上。`AudioEngine::play_file_at(path, offset)` 把偏移同时交给
+`reset_position` 和 `spawn_decoder`（后者本来就收 `offset_secs`，`seek_relative` 一直这么用），
+`drain_events` 的 `Ready` 分支重读 `base_offset`，所以偏移活过 Loading → Playing。恢复再叠加
+一层：`offset` 夹到 `duration * 0.999`，正好落在最后一个采样上的 seek 会立刻结束、下一 tick 就
+换歌。`Player::play` 与 `Player::start(path, offset)` 是同一条路径，不给自己留第二条。
+
+**顺手改掉的两个真 bug：**
+
+1. `Request::Shutdown` 原来先 `stop_playback()` 再让 daemon 存盘——而 stop 是回卷，于是每次
+   `tmper quit` / `:quit!` 都忠实地把 `position_secs: 0.0` 写进去。现在安静设备这一步挪到
+   `Player::shutdown()`，在 `save_state()` **之后**跑（测试 `a_shutdown_saves_the_position_before_it_silences_the_player`
+   盯着这个顺序，把 `stop_playback()` 挪回去会红）。
+2. `init_logging` 在 `create_dir_all` 之前就 `File::create`：全新安装时 state 目录还不存在，
+   日志静默落到 `/dev/null`——**第一次运行恰好是唯一没有日志可读的那次**。现在先建目录。
+
+`Stop` 会清掉停驻的针（停止就是回卷，这是 `stop` 的定义），`resume` 之后从头开始；只有
+「从 `state.json` 恢复」这条路才带着偏移。
+
+## 验证（本次）
+
+自动：452 通过 / 6 ignored，clippy 干净。新增测试都验证过有牙：把 `Ready` 分支的
+`base_offset` 改成 `0.0` → 偏移测试红（位置塌到 0.0000036）；把 `stop_playback()` 挪回
+`Request::Shutdown` → 存盘顺序测试红（存下来的是 0）。
+
+真桌面上跑通整条链路（`TMPER_*_DIR` 全指向临时目录）：
+
+1. play → pause（0.73s）→ `tmper quit`：`state.json` 记下 `position_secs: 0.73`、`queue: 1`、
+   `queue_index: 0`。
+2. 起一个新 daemon：`tmper status` 显示曲目已在架上、`queue 1 tracks, playing #1`，**没有声音**。
+3. `resume`：第一帧位置 1.03（= 0.73 + 已过时间），音轨在 1.53s 后自然结束——2 秒的文件从 0.73
+   开始只剩约 1.27 秒，所以**声音真的从偏移开始**，不只是时钟。
+4. 把 `DAEMON_IDLE_EXIT_SECS` 临时改成 5 秒重跑：暂停后断开所有客户端，daemon 自己退出、
+   清掉 socket，`state.json` 里位置 0.678；再起一个 daemon，`play` 从 0.678 接着放。常量已改回 300。
+
+用户真实的 `~/.local/state/tmper/` 全程未被触碰；临时目录与进程都已清理。
+
+文档：README（后台播放一节 + `tmper play` 不带文件 = 接着放 + `q`/`:quit!` 的区别 + 持久化
+那条从「不自动恢复上次曲目」改掉）与 STATUS（能力、空闲退出规则、MPRIS 之外「桌面上还看不到
+这个播放器」）已按本次改动更新；行覆盖率复测 **88.87%**（升自 88.57%），CLAUDE.md 与
+DESIGN.md 里的数字与那句话同步。**但 DESIGN.md 的架构叙述（以及 CLAUDE.md 的布局与并发模型）
+仍写着拆分前的单进程样子**——那是阶段 4 的整体对账，这次只动了被本次改动直接证伪的行。

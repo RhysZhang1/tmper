@@ -77,9 +77,12 @@ pub mod runtime {
     /// How long the daemon stays alive with no client attached and nothing
     /// playing before it exits.
     ///
-    /// Paused counts as playing, so this only runs while the player is
-    /// genuinely silent — leaving a paused queue behind and coming back to it
-    /// is exactly the behaviour the daemon exists for.
+    /// Idle is exactly that: nobody attached, and no sound being made. A pause
+    /// counts — it holds a place rather than doing anything, and a daemon that
+    /// counted it as work would never exit at all, since a pause can be left
+    /// standing for days. The place is not lost with it: `state.json` carries
+    /// the queue and the position, and the next run comes back parked on the
+    /// same track at the same second.
     pub const DAEMON_IDLE_EXIT_SECS: u64 = 300;
 
     /// Messages one client may be behind by before the daemon gives up on it.

@@ -33,6 +33,27 @@ struct NowPlaying {
     duration_secs: f64,
 }
 
+impl NowPlaying {
+    /// The four fields a queue row carries, and nothing else.
+    ///
+    /// For putting a restored session back on the deck: album, genre, year and
+    /// codec live only in the tags, and re-reading them at startup would mean
+    /// touching the file (and failing) on the way to showing a title. They
+    /// fill in the first time the track is started.
+    fn from_queue_track(track: &QueueTrack) -> Self {
+        Self {
+            path: track.path.clone(),
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+            album: String::new(),
+            genre: String::new(),
+            year: String::new(),
+            codec: String::new(),
+            duration_secs: track.duration_secs,
+        }
+    }
+}
+
 pub struct Player {
     engine: AudioEngine,
     /// The global queue. Insertion-ordered, unique by path.
@@ -50,6 +71,14 @@ pub struct Player {
     /// falls back to when the deck is empty, so `play` after a restart means
     /// "carry on" instead of "nothing happened".
     last_track: Option<PathBuf>,
+    /// Where a restored session's needle was, in seconds, until it is used.
+    ///
+    /// A session the daemon saved on its way out comes back parked: the deck
+    /// has a track on it and this is the offset it will start from, but
+    /// nothing is sounding. It is consumed by the first start — after that the
+    /// engine's own clock is the truth again — so a `stop` after a restore
+    /// still rewinds rather than resuming the old position.
+    resume_at: Option<f64>,
     repeat: RepeatMode,
     volume: f32,
     lyrics_offset_ms: i64,
@@ -86,6 +115,7 @@ impl Player {
             active_list: Vec::new(),
             now_playing: None,
             last_track: None,
+            resume_at: None,
             repeat: RepeatMode::Sequential,
             volume: config.playback.default_volume,
             lyrics_offset_ms: 0,
@@ -211,8 +241,11 @@ impl Player {
             }
             Request::GetState => Vec::new(),
             Request::Shutdown => {
+                // Deliberately not silenced here. `Player::shutdown` does that,
+                // and it runs *after* the daemon has written `state.json` —
+                // stopping first would rewind the position out from under the
+                // save and lose the user's place on every `tmper quit`.
                 self.shutdown = true;
-                self.stop_playback();
                 Vec::new()
             }
             Request::Hello { .. } => Vec::new(),
@@ -253,12 +286,30 @@ impl Player {
                 .duration_secs()
                 .or_else(|| now.map(|n| n.duration_secs))
                 .unwrap_or(0.0),
-            position_secs: self.engine.position_secs(),
+            position_secs: self.position_secs(),
             volume: self.volume,
             repeat: self.repeat,
             playing_index: self.playing_index,
             queue_rev: self.queue_rev,
             lyrics_offset_ms: self.lyrics_offset_ms,
+        }
+    }
+
+    /// Where the needle is: the engine's clock while a session exists, and the
+    /// parked offset of one that was restored but not started yet.
+    ///
+    /// Asked of the player rather than of the engine directly because the two
+    /// differ exactly once — a restored session reports zero from an engine
+    /// that has no session, and the place `Resume` will start from is the
+    /// honest answer there. It is also what `save_state` writes, so a daemon
+    /// that comes up and goes back down without being played keeps the
+    /// position instead of forgetting it on the second exit.
+    pub fn position_secs(&self) -> f64 {
+        match self.engine.state() {
+            state if state.is_active() || matches!(state, PlaybackState::Paused) => {
+                self.engine.position_secs()
+            }
+            _ => self.resume_at.unwrap_or(0.0),
         }
     }
 
@@ -304,11 +355,24 @@ impl Player {
 
     // ── Playback ──
 
-    /// Load a track, queueing it first if it is new, and start it.
+    /// Load a track, queueing it first if it is new, and start it from the top.
     ///
     /// This is the one way a track starts, wherever the request came from: a
     /// keypress, the browser, the CLI, and (later) MPRIS.
     fn play(&mut self, path: &Path) -> Vec<Event> {
+        self.start(path, 0.0)
+    }
+
+    /// [`Player::play`], but with the needle placed `offset_secs` in.
+    ///
+    /// Only a restored session asks for the offset; everything a user clicks
+    /// on starts at the beginning, and this is the same code path so the two
+    /// cannot drift apart.
+    fn start(&mut self, path: &Path, offset_secs: f64) -> Vec<Event> {
+        // Whatever a restore parked here is spent: this call decides where the
+        // needle goes, and leaving it set would replay the offset on the next
+        // start after a stop.
+        self.resume_at = None;
         let mut events = Vec::new();
         let info = match read_metadata(path) {
             Ok(info) => info,
@@ -343,7 +407,16 @@ impl Player {
         }
         self.playing_index = self.queue.iter().position(|t| t.path == info.path);
 
-        match self.engine.play_file_async(path) {
+        // A decoder seeked onto the very last sample finishes the moment it
+        // starts, so a restored needle lands just short of the end —
+        // `seek_relative` clamps to the same fraction for the same reason.
+        let offset_secs = if duration_secs > 0.0 {
+            offset_secs.clamp(0.0, duration_secs * 0.999)
+        } else {
+            offset_secs.max(0.0)
+        };
+
+        match self.engine.play_file_at(path, offset_secs) {
             Ok(()) => {
                 self.now_playing = Some(NowPlaying {
                     path: info.path,
@@ -439,18 +512,23 @@ impl Player {
                 self.engine.resume();
                 Vec::new()
             }
-            // Stopped, or a load that failed. `Stop` rewound the position, so
-            // this is a restart rather than a continuation. With even the deck
-            // empty the track the last run ended on is the answer — otherwise a
+            // Stopped, or a load that failed. With even the deck empty the
+            // track the last run ended on is the answer — otherwise a
             // restarted daemon turns `play` into a key that does nothing.
+            //
+            // Where it starts from is the difference between a `stop` and a
+            // restored session: a stop rewound the position and `resume_at` is
+            // empty, so this plays from the top; a session that came back from
+            // `state.json` parked its needle, so this carries on from there.
             _ => {
                 let path = self
                     .now_playing
                     .as_ref()
                     .map(|now| now.path.clone())
                     .or_else(|| self.last_track.clone());
+                let offset = self.resume_at.unwrap_or(0.0);
                 match path {
-                    Some(path) => self.play(&path),
+                    Some(path) => self.start(&path, offset),
                     None => Vec::new(),
                 }
             }
@@ -462,6 +540,11 @@ impl Player {
     fn stop_playback(&mut self) {
         self.engine.stop();
         self.playing_index = None;
+        // A stop rewinds, and a parked position is precisely what a rewind
+        // undoes. Leaving it set would make a stop *after* a restore resume
+        // from the old place instead of starting the track over — the one
+        // thing `stop` is defined not to do.
+        self.resume_at = None;
     }
 
     /// Silence the player *and* take the track off the deck.

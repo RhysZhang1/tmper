@@ -7,8 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::Player;
-use crate::ipc::proto::RepeatMode;
+use super::{NowPlaying, Player};
+use crate::ipc::proto::{QueueTrack, RepeatMode};
 use crate::paths;
 
 /// Persisted on exit, restored at startup.
@@ -26,6 +26,18 @@ struct SavedState {
     /// Remembered so `Resume` has somewhere to fall back to. Startup itself
     /// deliberately does not resume playback (see [`Player::load_state`]).
     last_track_path: Option<String>,
+    /// The queue as it stood, so reopening tmper finds the songs still lined
+    /// up rather than an empty panel.
+    queue: Option<Vec<QueueTrack>>,
+    /// Where in that queue the needle was.
+    queue_index: Option<usize>,
+    /// How far into `last_track_path` the needle was, in seconds.
+    ///
+    /// Restored as a *parked* position — the track comes back loaded and the
+    /// progress bar shows where it stopped, but nothing sounds until something
+    /// asks for it. Rounding is deliberate: the value is a JSON float, and the
+    /// engine's clock is second-granular to the ear anyway.
+    position_secs: Option<f64>,
 }
 
 fn state_path() -> std::path::PathBuf {
@@ -47,6 +59,9 @@ impl Player {
                 .now_playing
                 .as_ref()
                 .map(|n| n.path.to_string_lossy().to_string()),
+            queue: Some(self.queue.clone()),
+            queue_index: self.playing_index,
+            position_secs: Some(self.position_secs()),
         };
 
         if let Ok(json) = serde_json::to_string_pretty(&saved) {
@@ -85,7 +100,38 @@ impl Player {
         // Remembered, not played: the daemon stays silent until something asks
         // for sound, and this is what `Resume` asks with.
         self.last_track = saved.last_track_path.map(std::path::PathBuf::from);
-        tracing::info!("Restored saved state (volume={:.2})", self.volume);
+
+        // The queue comes back whole — it is the part a client cannot
+        // reconstruct, and the daemon is the only thing that has it.
+        if let Some(queue) = saved.queue {
+            self.queue = queue;
+        }
+        // Guarded rather than trusted: a cursor is only meaningful against the
+        // queue it was written with, and an out-of-range index would reach the
+        // client through the snapshot.
+        self.playing_index = saved.queue_index.filter(|index| *index < self.queue.len());
+
+        // The deck, in the shape the player expects: the queue row already
+        // carries the three fields the strip shows, and the rest (album,
+        // genre, year, codec) comes back the first time the track is started,
+        // when the tag reader runs anyway.
+        if let Some(track) = self
+            .last_track
+            .as_ref()
+            .and_then(|path| self.queue.iter().find(|track| &track.path == path))
+        {
+            self.now_playing = Some(NowPlaying::from_queue_track(track));
+        }
+        // A NaN or an infinity in a hand-edited file would reach the decoder's
+        // seek and turn every start into a failure; a position is a finite
+        // number of seconds or it is nothing.
+        self.resume_at = saved.position_secs.filter(|secs| secs.is_finite());
+
+        tracing::info!(
+            "Restored saved state (volume={:.2}, {} queued)",
+            self.volume,
+            self.queue.len()
+        );
     }
 }
 
@@ -189,8 +235,201 @@ mod tests {
         );
     }
 
+    /// A session that was saved comes back *parked*: the track is on the deck
+    /// and the progress bar shows where it stopped, but nothing is sounding.
+    /// Making noise the moment a daemon starts is a thing users learn to fear.
+    #[tokio::test]
+    async fn a_saved_session_comes_back_parked_on_the_same_track() {
+        let _guard = lock();
+        let track = std::fs::canonicalize("tests/fixtures/test.wav").expect("fixture file");
+        let other = std::fs::canonicalize("tests/fixtures/test.flac").expect("fixture file");
+        write_state_file(
+            "state.json",
+            &format!(
+                r#"{{
+                    "last_track_path": {:?},
+                    "position_secs": 1.2,
+                    "queue_index": 1,
+                    "queue": [
+                        {{"path": {:?}, "title": "First", "artist": "A", "duration_secs": 2.0}},
+                        {{"path": {:?}, "title": "Second", "artist": "B", "duration_secs": 2.0}},
+                        {{"path": {:?}, "title": "Third", "artist": "C", "duration_secs": 2.0}}
+                    ]
+                }}"#,
+                track.to_string_lossy().as_ref(),
+                other.to_string_lossy().as_ref(),
+                track.to_string_lossy().as_ref(),
+                other.to_string_lossy().as_ref(),
+            ),
+        );
+
+        let mut player = new_player();
+        player.load_state();
+        let state = player.state();
+
+        assert_eq!(state.status, crate::audio::engine::PlaybackState::Stopped);
+        assert_eq!(
+            state.path.as_deref(),
+            Some(track.as_path()),
+            "the deck has the track the last run ended on"
+        );
+        assert_eq!(state.title, "Second", "and shows it, from the queue row");
+        assert!(
+            state.position_secs > 1.0 && state.position_secs < 1.5,
+            "the needle is parked where it stopped, got {}",
+            state.position_secs
+        );
+        assert_eq!(state.playing_index, Some(1));
+        assert_eq!(player.queue().len(), 3, "the queue came back whole");
+    }
+
+    /// A parked needle is not a rewind: the next `play` carries on from it,
+    /// which is the difference between a restored session and a stop.
+    #[tokio::test]
+    async fn resuming_a_restored_session_continues_where_it_left_off() {
+        let _guard = lock();
+        let track = std::fs::canonicalize("tests/fixtures/test.wav").expect("fixture file");
+        write_state_file(
+            "state.json",
+            &format!(
+                r#"{{
+                    "last_track_path": {:?},
+                    "position_secs": 1.2,
+                    "queue_index": 0,
+                    "queue": [{{"path": {:?}, "title": "T", "artist": "A", "duration_secs": 2.0}}]
+                }}"#,
+                track.to_string_lossy().as_ref(),
+                track.to_string_lossy().as_ref(),
+            ),
+        );
+
+        let mut player = new_player();
+        player.load_state();
+        player.execute(crate::ipc::proto::Request::Resume);
+
+        let position = player.state().position_secs;
+        assert!(player.state().status.is_active(), "resume makes sound");
+        assert!(
+            position > 1.0 && position < 1.5,
+            "it starts a fifth of a second in, not at the top: {position}"
+        );
+    }
+
+    /// A saved position is spent by the start it paid for: stopping afterwards
+    /// rewinds, exactly as it does for a session that was never restored.
+    #[tokio::test]
+    async fn a_restored_position_does_not_survive_a_stop() {
+        let _guard = lock();
+        let track = std::fs::canonicalize("tests/fixtures/test.wav").expect("fixture file");
+        write_state_file(
+            "state.json",
+            &format!(
+                r#"{{
+                    "last_track_path": {:?},
+                    "position_secs": 1.2,
+                    "queue_index": 0,
+                    "queue": [{{"path": {:?}, "title": "T", "artist": "A", "duration_secs": 2.0}}]
+                }}"#,
+                track.to_string_lossy().as_ref(),
+                track.to_string_lossy().as_ref(),
+            ),
+        );
+
+        let mut player = new_player();
+        player.load_state();
+        player.execute(crate::ipc::proto::Request::Stop);
+        player.execute(crate::ipc::proto::Request::Resume);
+
+        assert!(
+            player.state().position_secs < 0.05,
+            "a stop is still a rewind, even on a restored session"
+        );
+    }
+
+    /// What `save_state` writes is the live position — and it is still live at
+    /// the moment it is written. The daemon silences the device *after*
+    /// persisting for exactly this reason: a stop first would rewind the clock
+    /// out from under the save.
+    #[tokio::test]
+    async fn saving_a_session_records_the_queue_and_the_live_position() {
+        let _guard = lock();
+        let track = std::fs::canonicalize("tests/fixtures/test.wav").expect("fixture file");
+        let other = std::fs::canonicalize("tests/fixtures/test.flac").expect("fixture file");
+
+        let mut player = new_player();
+        player.execute(crate::ipc::proto::Request::Play {
+            path: track.clone(),
+        });
+        player.execute(crate::ipc::proto::Request::QueuePush { path: other });
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        player.save_state();
+
+        // Read back through a fresh player, which is the path that matters.
+        let mut reloaded = new_player();
+        reloaded.load_state();
+        assert_eq!(reloaded.queue().len(), 2);
+        assert_eq!(reloaded.state().playing_index, Some(0));
+        assert!(
+            reloaded.state().position_secs > 0.05,
+            "the position was written while the clock was running, got {}",
+            reloaded.state().position_secs
+        );
+        assert_eq!(reloaded.state().path.as_deref(), Some(track.as_path()));
+    }
+
+    /// Every clean exit — `tmper quit`, and the idle timeout — runs
+    /// `save_state` and *then* silences the device. The order is the whole
+    /// test: silencing is a `stop`, a stop rewinds, and a save after it would
+    /// faithfully record 0:00 on every exit and lose the user's place in the
+    /// one case the state file exists for.
+    #[tokio::test]
+    async fn a_shutdown_saves_the_position_before_it_silences_the_player() {
+        let _guard = lock();
+        let track = std::fs::canonicalize("tests/fixtures/test.wav").expect("fixture file");
+        let mut player = new_player();
+        player.execute(crate::ipc::proto::Request::Play {
+            path: track.clone(),
+        });
+        std::thread::sleep(std::time::Duration::from_millis(80));
+
+        // The daemon's exit sequence, in its order.
+        player.execute(crate::ipc::proto::Request::Shutdown);
+        player.save_state();
+        player.shutdown();
+
+        let mut reloaded = new_player();
+        reloaded.load_state();
+        assert_eq!(
+            reloaded.state().path.as_deref(),
+            Some(track.as_path()),
+            "the deck survives the exit"
+        );
+        assert!(
+            reloaded.state().position_secs > 0.05,
+            "and so does the place in the track, got {}",
+            reloaded.state().position_secs
+        );
+    }
+
+    /// A cursor is only meaningful against the queue it was written with; a
+    /// hand-edited file must not push an index past the end of it.
+    #[tokio::test]
+    async fn an_out_of_range_queue_index_is_dropped() {
+        let _guard = lock();
+        write_state_file(
+            "state.json",
+            r#"{"queue_index": 7, "queue": [{"path": "/nowhere/a.flac", "title": "A", "artist": "B", "duration_secs": 1.0}]}"#,
+        );
+
+        let mut player = new_player();
+        player.load_state();
+
+        assert_eq!(player.state().playing_index, None);
+    }
+
     /// Restoring a track is not starting it — but it is what makes `play` mean
-    /// something on a daemon that has just come up with an empty deck.
+    /// something on a daemon that has just come up with an empty deck. A state
+    /// file from a build that saved only the path (no queue) still works.
     #[tokio::test]
     async fn a_restored_track_is_what_resume_falls_back_to() {
         let _guard = lock();
