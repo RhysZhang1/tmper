@@ -123,9 +123,9 @@ for five minutes it writes the queue and playback position to `state.json` and e
   is not a reason to refuse to start
 
 ### Cover art
-- **Three tiers, chosen by a single startup probe:**
-  1. **Kitty graphics protocol** — native pixels (Kitty, WezTerm, Ghostty, Konsole 26.08+)
-  2. **SIXEL** — encoded in-process (Konsole on Plasma 6+, xterm, foot…), no external program
+- **Three tiers, chosen by a single startup probe** (the order is the priority):
+  1. **Kitty graphics protocol** — native pixels (Kitty, Konsole 26.08+, WezTerm, Ghostty)
+  2. **SIXEL** — encoded in-process (foot, `xterm -ti vt340`…), no external program
   3. **Half-blocks** — Lanczos3 resize plus Floyd–Steinberg dithering, the universal fallback
 - Payloads are sent once per change, and the raster is sized to the exact pixel box of the cover
   rectangle — the same box the block art uses
@@ -387,10 +387,27 @@ daemon's log says whether it reached the bus at startup.
 
 One of these applies:
 
-- **Kitty / WezTerm / Ghostty / Konsole 26.08+** — native pixels via the Kitty protocol
-- **Konsole on Plasma 6, xterm, foot…** — SIXEL, encoded in-process, nothing to install
+- **Kitty / Konsole 26.08+ / WezTerm / Ghostty** — native pixels via the Kitty protocol
+- **foot, `xterm -ti vt340`…** — SIXEL, encoded in-process, nothing to install
 - **Anything else** — half-block characters (`▄` with foreground/background doubling the
   vertical resolution)
+
+> **xterm depends on how you start it.** SIXEL is a VT340 feature. xterm compiles it in but
+> advertises it on DA1 according to its terminal type, so a default xterm truthfully answers "no"
+> and gets block art. `xterm -ti vt340` gets native pixels. That is not a defect: tmper believes
+> what the terminal says about itself right now.
+
+Measured on 2026-10-04 across five terminals (method in
+`progress/2026-10-04-terminal-compat-matrix.md`):
+
+| Terminal | DA1 says SIXEL | `a=q` says Kitty | tmper picks |
+|---|---|---|---|
+| Konsole 26.08.1 | yes | yes | Kitty (first in order) |
+| kitty 0.48.2 | no | yes | Kitty |
+| foot 1.28.0 | yes | no | SIXEL |
+| xterm 411 (`-ti vt340`) | yes | no | SIXEL |
+| xterm 411 (default) | no | no | half-blocks |
+| alacritty 0.17.0 | no | no | half-blocks |
 
 The box is aspect-fitted and aligned using the cell size the terminal reports. That size is
 probed once at startup and logged: `grep "cell size" ~/.local/state/tmper/tmper.log`. Terminals

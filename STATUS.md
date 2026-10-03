@@ -8,6 +8,10 @@
 - 约两秒高水位的有界流式解码；切歌和 seek 会取消旧会话。
 - Rodio 音频输出、暂停、音量、顺序/随机/单曲循环和真实 seek。
 - LRC/增强 LRC 歌词、实时 FFT 频谱、内嵌封面与多级终端图像回退。
+- **三层图像回退都在真实终端上实测过**（2026-10-04）：Konsole 26.08 与 kitty 0.48 走 Kitty 协议，
+  foot 1.28 与 `xterm -ti vt340` 走 SIXEL，默认 xterm 411 与 alacritty 0.17 走半块字符——
+  六种配置各自的封面都以对应方式画了出来，不只是探测日志说选对了。SIXEL 与字符画两条路此前
+  在本机从未运行过。方法与截图见 `progress/2026-10-04-terminal-compat-matrix.md`。
 - 从文件浏览器添加**目录**到曲库并在后台增量扫描；CLI 的 `tmper play` 只接受**单个文件**。
 - SQLite 曲库索引与 FTS5 前缀全文搜索，覆盖标题、艺术家、专辑和流派；曲库、扫描器与歌单都归 daemon，客户端经 IPC 读写。
 - M3U 导入/导出、七个 TUI 视图、主题与自定义快捷键。
@@ -23,7 +27,7 @@
 - 只正式支持 Linux；macOS 和 Windows 未验证。
 - CLI 尚不能把目录直接作为临时播放队列，目录导入需在文件浏览器中操作。
 - 原生 Kitty/SIXEL 图像位于 Ratatui 缓冲区之外，终端兼容性取决于协议支持；通用回退是半块字符封面。封面矩形按图片宽高比自适应，并依赖终端上报的单元格像素尺寸：启动时用一趟探测拿到（`CSI 16 t`，Konsole 走这条；拿不到再试 `CSI 14 t` ÷ `CSI 18 t`，仍无则 `TIOCGWINSZ`），都不上报时（部分 tmux 配置、少数模拟器）退回 10×20 的假设值，此时封面比例仍正确但可能小一圈，可用配置里的 `cell_px` 覆盖。结果写进日志。
-- **两种图形协议都靠探测，但复用器里一律退字符画**：同一趟启动探测先问 Kitty 协议自己的能力查询（`ESC _ G … a=q`，Konsole 26.08 会答 `OK`），再用 `CSI c`（DA1）问 SIXEL 属性位，只有终端明确回答支持才发送对应载荷——VTE 系（GNOME Terminal、xfce4-terminal）、Alacritty 两种都不支持，封面因此是字符画而不是空白面板。识别到 `tmux` / `screen` / `zellij` 时**不问也不采信**图形能力，直接半块字符：复用器默认吞掉 DCS/APC 载荷，而查询回答可能仍来自底下的真终端，那正是「回答支持但面板空白」的组合；passthrough 包装未实现（需要 tmux 3.4+ 且 `allow-passthrough on`，属于用户侧配置）。实测与三个 Kitty 载荷 bug 的记录见 `progress/2026-10-03-terminal-graphics-probe.md`。
+- **两种图形协议都靠探测，但复用器里一律退字符画**：同一趟启动探测先问 Kitty 协议自己的能力查询（`ESC _ G … a=q`，Konsole 26.08 会答 `OK`），再用 `CSI c`（DA1）问 SIXEL 属性位，只有终端明确回答支持才发送对应载荷——Alacritty 两种都不支持（已实测），封面因此是字符画而不是空白面板。**xterm 的答案取决于启动参数**：SIXEL 是 VT340 特性，xterm 编译了它但按终端类型决定要不要上报，默认答「不支持」走字符画，`-ti vt340` 才答支持——探测采信的是终端当下的回答，这正是想要的行为。VTE 系（GNOME Terminal、xfce4-terminal）同上，但本机没装、未实测。识别到 `tmux` / `screen` / `zellij` 时**不问也不采信**图形能力，直接半块字符：复用器默认吞掉 DCS/APC 载荷，而查询回答可能仍来自底下的真终端，那正是「回答支持但面板空白」的组合；passthrough 包装未实现（需要 tmux 3.4+ 且 `allow-passthrough on`，属于用户侧配置）。实测与三个 Kitty 载荷 bug 的记录见 `progress/2026-10-03-terminal-graphics-probe.md`。
 - **MPRIS 只在有会话总线时生效**：没有 D-Bus（SSH、纯控制台）时 daemon 记一条日志照常播放，不因此拒绝启动；这条路径没有桌面可验，是设计而不是缺陷。
 - 没有均衡器、在线歌词和桌面通知。
 - **daemon 会在空闲 5 分钟后自己退出**：没有客户端连着、也没有出声（停止或暂停）就开始计时。暂停也算空闲——它只是按住一个位置，不是在做事情；退出前把队列和播放位置写进 `state.json`，下次 `tmper play` 从那一秒接着放，不丢东西。

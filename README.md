@@ -111,9 +111,9 @@ tmper 是一个跑在终端里的本地音乐播放器：Vim 风格键盘操作�
 - 没有会话总线时（SSH、纯控制台）记一条日志照常播放，不因此拒绝启动
 
 ### 封面图显示
-- **三层渐进渲染**，由启动探测决定走哪一层：
-  1. **Kitty 图形协议** — 原生像素渲染（Kitty、WezTerm、Ghostty、Konsole 26.08+）
-  2. **SIXEL** — 程序内编码（Konsole Plasma 6+、xterm、foot…），无外部依赖
+- **三层渐进渲染**，由启动探测决定走哪一层（顺序即优先级）：
+  1. **Kitty 图形协议** — 原生像素渲染（Kitty、Konsole 26.08+、WezTerm、Ghostty）
+  2. **SIXEL** — 程序内编码（foot、`xterm -ti vt340`…），无外部依赖
   3. **半块字符** — Lanczos3 缩放 + Floyd–Steinberg 误差扩散抖动（通用回退）
 - 图形载荷只在封面变化时发送一次；栅格尺寸就是封面矩形的像素尺寸，与半块字符图层共用同一个盒子
 - 启动时探测一次终端能力：Kitty 协议自己的能力查询（`ESC _ G … a=q`）+ `CSI c`（DA1）的
@@ -403,9 +403,24 @@ busctl --user list | grep tmper              # 看它有没有占到 org.mpris.M
 
 需要满足以下条件之一：
 
-- **Kitty / WezTerm / Ghostty / Konsole 26.08+**：自动使用原生像素渲染（Kitty 协议）
-- **Konsole (Plasma 6+)、xterm、foot 等**：自动使用 SIXEL 渲染（无需额外安装任何东西）
+- **Kitty / Konsole 26.08+ / WezTerm / Ghostty**：自动使用原生像素渲染（Kitty 协议）
+- **foot、`xterm -ti vt340` 等**：自动使用 SIXEL 渲染（无需额外安装任何东西）
 - 其他终端：使用半块字符渲染（`▄` + 前后景两倍垂直分辨率）
+
+> **xterm 要看启动参数。** SIXEL 是 VT340 的特性，xterm 虽然编译了它，但按终端类型决定要不
+> 要在 DA1 里上报——默认的 xterm 会如实回答「不支持」，于是走半块字符。用 `xterm -ti vt340`
+> 启动即可拿到原生图。这不是缺陷：tmper 只采信终端当下的回答。
+
+2026-10-04 在五款终端上实测的结果（方法见 `progress/2026-10-04-terminal-compat-matrix.md`）：
+
+| 终端 | DA1 报 SIXEL | `a=q` 报 Kitty | tmper 选择 |
+|---|---|---|---|
+| Konsole 26.08.1 | 是 | 是 | Kitty（顺序优先） |
+| kitty 0.48.2 | 否 | 是 | Kitty |
+| foot 1.28.0 | 是 | 否 | SIXEL |
+| xterm 411（`-ti vt340`） | 是 | 否 | SIXEL |
+| xterm 411（默认） | 否 | 否 | 半块字符 |
+| alacritty 0.17.0 | 否 | 否 | 半块字符 |
 
 封面区域会按图片宽高比自动调整，并读取终端上报的单元格像素尺寸来对齐原生图像。单元格
 尺寸在启动时探测一次，结果写在日志里：`grep "cell size" ~/.local/state/tmper/tmper.log`。
