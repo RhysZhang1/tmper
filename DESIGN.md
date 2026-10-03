@@ -180,7 +180,7 @@ pub struct AudioOutput {
 }
 ```
 
-**关键实现**：`stop_and_replace()` — 解决 rodio 0.20 的 `sink.stop()` 永久断连问题。创建全新 Sink 替换旧 Sink。
+**关键实现**：`stop_and_replace()` — 换会话时**只替换、绝不 `stop()`**。旧 Sink 由「最后一个 `Arc` 消失」退休：rodio 的 `stop()` 只置一个标志位（`sink.rs:312`），而**下一次** `append` 落在「已置位且 `sound_count > 0`」的 Sink 上时会调 `sleep_until_end`（`sink.rs:111-114`），阻塞等待一个「声音结束」信号——在一个没人轮询的 Sink 上（headless、或卡住的设备）这个信号永远不会来。处于两次 `append` 之间的解码线程就此永久停在 rodio 里，而 `Runtime::drop` 会一直等这个 `spawn_blocking` 任务，于是整个进程（测试时是整个测试套件）间歇性挂死。丢引用触发 `Drop` 的静音机制与 `stop()` 完全相同（置 `stopped` + 清 `keep_alive_if_empty`，`sink.rs:356-365`），区别只是标志位落下的**时刻**推迟到解码线程下一次取消轮询（10ms / 收尾时 20ms），且**不可能**落在一次进行中的 `append` 下面。见 `progress/2026-10-03-sink-retirement.md`。
 
 #### engine.rs — 播放引擎
 
@@ -642,15 +642,17 @@ crossterm KeyEvent
 SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），Konsole 等终端可能把转义字节误读为 stdin 产生虚假按键。2026-08-03 起的设计（详见 `progress/2026-08-03-cover-refactor.md`）：
 
 1. **一次性发送**：SIXEL/Kitty 是持久图形层——发送后不随 ratatui 重绘消失。封面只在变化时发送一次（换歌、改渲染区域、切回播放器视图），不再每帧重发。**每帧重发是伪按键与卡顿的历史根因**（见 `progress/2026-08-01-cover-rollback.md`）。
-2. **协议互斥**：Kitty 与 SIXEL 按终端能力检测二选一，避免两者同时写入争抢同一区域。
+2. **协议互斥**：Kitty 与 SIXEL 按终端能力检测二选一，避免两者同时写入争抢同一区域。Kitty 载荷有三条硬性要求，都属于「载荷看着正常、终端一声不响地丢掉」的类型（实测见 `progress/2026-10-03-terminal-graphics-probe.md`）：`f=100` 声明的格式是 **PNG**，载荷就必须是 PNG（曾经发的是裸 RGB，尺寸像素都对，Konsole 按 PNG 解不开就整张丢弃）；`p` 是 **placement id** 而不是像素坐标，定位必须用 `CSI <row>;<col> H` 先把光标移到封面矩形；超过一条转义序列的载荷只有**第一块**带完整命令头，后续块是 `ESC _ G m=<more>;<data> ESC \`（每块重复命令头 = N 张被截断的图，Konsole 对每张回 `ENOENT`，而那条 APC 回复会被读成按键）。所有图形命令带 `q=2`（不回复），原因相同。
 3. **输入零防御**：不再需要 guard / 帧抑制 / 控制字符过滤等防御层。`handle_key_event` 不拦截任何按键。
 4. **清理**：离开播放器视图、隐藏封面、或新曲目无封面时，置 `clear_pending` → 事件循环 `terminal.clear()` 覆盖 SIXEL 残留（Konsole 对 ED 清 SIXEL 的 workaround）。
 5. **几何对齐**（2026-10-03，详见 `progress/2026-10-03-cover-aspect-fit.md`、`progress/2026-10-03-chafa-cell-units.md`、`progress/2026-10-03-icy-sixel-encoder.md`）：封面矩形由 `player_view::fit_cover_rect` 按图片**像素**宽高比收缩居中，两个图层共用这一个盒子。SIXEL 载荷由 `IcySixelEncoder` 在进程内编码，**请求的尺寸就是矩形的像素**（`rect 格数 × cell_px`）——chafa 时代这里要先换算成「chafa 的格」：chafa 会自己从 `TIOCGWINSZ` 读单元格（读不到用它自己的 10×20），再把 `--size` 乘回去，于是 tmper 必须用 `chafa_cell_px()` 而不是 `terminal_cell_px()` 去除，除错时整张图按两者之比缩放（Konsole 上封面曾只占盒子的 0.8×0.75）。编码器搬进进程后这个「第二个单元格」不复存在，整类不匹配随之消失。单元格像素每帧经 `terminal_cell_px()` 读取，优先级：启动探测值 → `TIOCGWINSZ` 的 `ws_xpixel`/`ws_ypixel`（ioctl，不写 stdin）→ `FALLBACK_CELL_PX`（10×20）。
 6. **终端探测（一次往返，两个答案）**（2026-10-03）：`probe_terminal_once()` 在 `App::run` 里 `TerminalGuard::enter()` 之后、输入线程启动之前**只问一次**——此时 tty 刚进 raw 模式（否则行规程会扣住回复），且没有第二个读者。查询串 = 单元格尺寸（`CSI 16 t`，拿不到则 `CSI 14 t` ÷ `CSI 18 t`）+ **DA1**（`CSI c`），DA1 放在最后：回复按查询顺序返回，且所有终端都答 DA1，因此「收到完整的 DA1 回复」即屏障——它之前的答案都已到达，可以立刻停止等待。等待用 `poll(2)` + 80ms 预算：只看不取，不回答的终端只损失预算、绝不吞按键；迟到的 `CSI 16 t` 回复落在输入线程上只会被 crossterm 丢弃（终字节 `t` 不在其解析表内，`read()` 用 `if let Ok`），迟到的 DA1 回复更安静——crossterm 把它解析成 `InternalEvent::PrimaryDeviceAttributes`，没有对应的公开 `Event`，读线程直接忽略。结果缓存进 `OnceLock`（`terminal_caps()`），并在日志里留下「测到多少 / 支持与否」或「为什么没测到」。单元格尺寸两者都不上报的终端可用 `[ui] cell_px` 手工指定（clamp 丢弃非单元格值）。
 
-   **图形能力判定**：DA1 参数里含 `4`（xterm 的「Sixel graphics」属性）才写 SIXEL 载荷，否则一律画半块字符。Konsole 回 `CSI ? 62 ; 1 ; 4 c`，foot 回 `CSI ? 62 ; 4 ; 22 ; 28 ; 52 c`；VTE 系（GNOME Terminal、xfce4-terminal）、Alacritty 的回答里没有 `4`，它们本来也显示不了 sixel——以前这里只检查 `chafa` 二进制是否存在，于是那些终端上封面区是空白（`native_active` 一置位就把字符画撤了）。参数按**数值**匹配，「24」不会被当成「4」。
+   **图形能力判定（两个协议，一次往返）**：同一趟探测里先发 Kitty 图形协议自己的能力查询（`ESC _ G i=31,s=1,v=1,a=q,t=d,f=24;AAAA ESC \`），答 `OK` 即支持；DA1 的参数里含 `4`（xterm 的「Sixel graphics」属性）则支持 SIXEL。二者都**只认终端的明确回答**，选择顺序 Kitty → SIXEL → 半块字符（真彩 vs 256 色寄存器）。Konsole 26.08 回 `ESC _ G i=31;OK ESC \` 与 `CSI ? 62 ; 1 ; 4 c`（它就是靠这条才被判成 Kitty 终端——它一个相关环境变量都不设，环境变量判据认不出它）；foot 回 `CSI ? 62 ; 4 ; 22 ; 28 ; 52 c`；VTE 系（GNOME Terminal、xfce4-terminal）、Alacritty 两问皆无回答，封面区保持字符画而不是空白（以前只检查 `chafa` 二进制是否存在，于是那些终端上封面区是空白——`native_active` 一置位就把字符画撤了）。DA1 参数按**数值**匹配，「24」不会被当成「4」。
+
+   **复用器（`TMUX` / `STY` / `ZELLIJ`）**：检测到就不发图形查询、也不采信图形回答——复用器默认吞掉 DCS/APC 载荷，而查询回答可能仍来自底下的真终端，「回答支持 + 载荷被吞」正是空白面板的组合。passthrough 包装（`ESC Ptmux;…`）需要 tmux 3.4+ 且 `allow-passthrough on`，属于用户侧配置，探测不到，因此不做，直接退半块字符。
 7. **字符画让位**：原生图像生效时（`CoverRenderer::native_active`）用 `Clear` 抹掉封面矩形内的半块字符，而不是不画——`Block` 只重置样式，保留的 `▄▀` 会以默认色露出成像素块。因写入单元格会擦除下层图形层，`blocks_suppressed` 并入 SIXEL 缓存键，在被改写的那一帧重发一次。
-8. 渲染器经注入式 writer + encoder 可测试，探测的读循环经注入式 fd 在管道上可测试（`query_terminal_on`），共 33 个单元测试锁定（`src/ui/cover/mod.rs`）。
+8. 渲染器经注入式 writer + encoder 可测试，探测的读循环经注入式 fd 在管道上可测试（`query_terminal_on`），共 43 个单元测试锁定（`src/ui/cover/mod.rs`）。注意单元测试只能断言「字节发对了」，断言不了「终端接受了」——载荷格式类的问题（见第 2 条）是靠「抓流 + 回放进真终端」发现的。
 
 ### 9.4 全局快捷键
 
@@ -680,23 +682,26 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 
 > 下表统计的是**测试用例数量**，不是**行覆盖率**。行覆盖率需用 `cargo llvm-cov` 单独测量
 > （见 [10.3 行覆盖率](#103-行覆盖率)）。
-> **现状（2026-10-03 实测）**：总行覆盖率 **88.54%**（函数 88.96%、区域 89.52%；
+> **现状（2026-10-03 实测）**：总行覆盖率 **88.57%**（函数 88.88%、区域 89.58%；
 > 少数计时敏感测试会让该数字每次浮动 ~0.3%）。同日先由 80.09% 补到 88.78%，主要靠补齐
 > 此前零测试的模块：`input/handler.rs`（19%→98%）、`library/scanner.rs`（30%→98%）、
 > `app/persistence.rs`、`config.rs`、`app/playback.rs`、`ui/views/player_view.rs`（72%→92%）。
 > 随后封面几何修复新增了几行位于 `run()` 内的代码，总数因此回落到 88.22%；当日最后一轮
 > 用进程内 SIXEL 编码器替换 chafa 子进程，`ui/cover/mod.rs` 从 87.59% 升到 92.51%
-> （探测改为一趟往返的 `TerminalCaps`，读循环可以直接用管道驱动），总数回到 88.54%。
+> （探测改为一趟往返的 `TerminalCaps`，读循环可以直接用管道驱动），总数回到 88.54%；
+> 再补上 `audio/output.rs` 的 sink 退休回归测试后为 88.57%。
 >
 > 剩余的未覆盖部分是**结构性**的，不是遗漏：
 > `audio/engine.rs` 73%（6 个 `#[ignore]` 设备测试的函数体本身计入未覆盖，另有 `new`/`play_file`
-> 需要真实声卡）、`app/mod.rs` 62%（`TerminalGuard` 与 `run` 事件循环需要真实 tty）、
-> `paths.rs` 29%（非 `cfg(test)` 分支在测试构建下根本不参与编译）、`main.rs` 0%（二进制入口）。
+> 需要真实声卡）、`audio/output.rs` 65%（`new` 要开真实设备，headless 路径已覆盖）、
+> `app/mod.rs` 62%（`TerminalGuard` 与 `run` 事件循环需要真实 tty）、
+> `paths.rs` 31%（非 `cfg(test)` 分支在测试构建下根本不参与编译）、`main.rs` 0%（二进制入口）。
 
 | 模块 | 测试数 | 覆盖内容 |
 |------|--------|----------|
 | audio/decoder.rs | 3 | 解码 WAV、不存在的文件、seek |
 | audio/engine.rs | 23 | 播放状态机、暂停/seek/完成（headless）、背压上界、会话替换丢弃陈旧事件、打开失败上报、`InstrumentedSource` 环形缓冲与 DoD 释放计数、会话辅助函数、队列诊断 |
+| audio/output.rs | 1 | 退休的 sink 仍可 `append`（`stop()` 过的 sink 会让下一个 `append` 卡在 rodio 的 `sleep_until_end` 里，而持有它的解码线程会把整个运行时拖住不退出） |
 | lyrics/parser.rs | 16 | 标准 LRC、元数据、多时间戳、逐字、空文件、损坏行、排序、BOM/UTF-8/GBK/Shift-JIS 编码检测、文件读取 |
 | visualizer/fft.rs | 1 | 440Hz 峰值检测 |
 | visualizer/processor.rs | 2 | 桶数量、平滑收敛 |
@@ -710,7 +715,7 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 | input/handler.rs | 15 | 双键序列、非组合键两个按键都按序投递、超时释放挂起键、过期前缀不再配对、Ctrl+D 永不解析为 dd、退出键清理挂起、控制字符过滤 |
 | input/keymap.rs | 5 | 单字符/^X/特殊名称、非 ASCII 单字符不再静默变空格、未知名称回退 |
 | playlist.rs | — | （v3.5 后仅存 `PlaylistData` 数据模型，逻辑并入 playlist_view） |
-| paths.rs | 2 | XDG 目录拼接、测试期重定向到临时根（三个目录都隔离） |
+| paths.rs | 2 | XDG 目录拼接、测试期重定向到临时根（三个目录都隔离）；另有测试用的 `config_file_lock()`（不是测试，是给共用 `config.toml` 的测试串行化的锁） |
 | config.rs | 11 | 模板与代码默认值一致、clamp 上下界与放行、`cell_px` 覆盖的读取与校验、f32 两位小数序列化、往返、部分/空/含未知键的文档解析 |
 | app/mod.rs | 14 | 视图切换、音量、循环、加载播放、停止、命令模式、搜索、文本输入模式旁路集合（含 4 个 tokio 集成式） |
 | app/playback.rs | 17 | 陈旧歌单游标下 prev/next 不越界、空歌单 no-op、曲终三模式（歌单与全局两条路径）、全局队列两端停住、shuffle 落在范围内、FFT 取最新样本窗口、播放选中项 |
@@ -719,7 +724,7 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 | app/handlers/browser.rs | 16 | 焦点切换、库/文件系统导航与 clamp、Enter 进入目录/加库去重、混合目录（子目录+音频）选中行不串位、Backspace 边界、刷新过滤排序 |
 | app/handlers/library.rs | 19 | 面板导航、搜索输入/回车/回退、clamp_scroll、库加载 upsert 与去重、Enter 播放、扫描完成才剪枝（含 1 个 tokio 集成式） |
 | app/handlers/playlist.rs | 18 | 焦点切换、新建歌单插入模式、展开/删除/重复保护、M3U 导出、flat-model 解析、clamp |
-| app/handlers/settings.rs | 16 | 布局 19 行、j/k 导航 clamp、主题/柱数/平滑/音量/步长/封面循环、跳过行、Enter 动作、M3U 导出、config 持久化 |
+| app/handlers/settings.rs | 16 | 布局 19 行、j/k 导航 clamp、主题/柱数/平滑/音量/步长/封面循环、跳过行、Enter 动作、M3U 导出、config 持久化（写同一个 `config.toml` 的测试用 `paths::config_file_lock()` 串行化：每个 cycle 都会落盘，读回校验的那个测试会被并发的写入者灌进别人的配置） |
 | ui/render_tests | 7 | 最小支持尺寸渲染、极窄终端不 panic、通知弹窗绘制与过期、命令面板、帮助覆盖层优先级 |
 | ui/views/file_browser_view.rs | 3 | 空/填充渲染、聚焦样式 |
 | ui/views/library_view.rs | 6 | 三面板标题、数据行、搜索栏、光标闪烁、长列表滚动保持选中行可见 |
@@ -727,9 +732,9 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 | ui/views/playlist_view.rs | 8 | flat-model 行数/行号/解析、styled lines（展开/输入/播放前缀）、渲染与通知弹出 |
 | ui/views/settings_view.rs | 3 | rebuild_settings 布局与配置值、渲染冒烟（含 scroll clamp） |
 | ui/views/player_view.rs | 21 | cover 块渲染（空字节/零面积/内存 PNG）、封面矩形自适应（正方形/带余量的一边/宽图/竖图/退化输入/永不越界）、原生图层生效时字符画让位、渲染冒烟、搜索命中与无匹配、迷你歌单、歌词区（空/当前行/跟随滚动）、歌曲信息各槽位、控制栏进度与零时长 |
-| ui/cover/mod.rs | 33 | 一次性发送不变量、区域重发、视图切换/隐藏/无封面清除、编码失败不重试、Kitty 尺寸变化重发、搜索覆盖层清理两个协议、载荷尺寸即矩形像素（含退化矩形）、真实编码器（PNG → SIXEL 栅格头、非图片字节报错）、单元格尺寸解析与回退、DA1 解析（属性 4 / 参数按数值匹配 / 半包不算答复 / 混在其他回复中）、探测读循环（管道：应答/半包拼接/DA1 屏障提前返回/超时/EOF）与查询写入、抑制字符画时的重发（注入式 writer/encoder/fd） |
+| ui/cover/mod.rs | 43 | 一次性发送不变量、区域重发、视图切换/隐藏/无封面清除、编码失败不重试、Kitty 尺寸变化重发、搜索覆盖层清理两个协议、载荷尺寸即矩形像素（含退化矩形）、Kitty 载荷三规则（定位用光标移动且 `p` 槽为空、超长载荷只有首块带命令头、`f=100` 的载荷必须真是 PNG）、真实编码器（PNG → SIXEL 栅格头、非图片字节报错）、单元格尺寸解析与回退、DA1 解析（属性 4 / 参数按数值匹配 / 半包不算答复 / 混在其他回复中）、`a=q` 答复解析（含半包与非答复流量）、复用器识别与「复用器下不问图形问题」、探测读循环（管道：应答/半包拼接/DA1 屏障提前返回/超时/EOF）与查询写入、抑制字符画时的重发（注入式 writer/encoder/fd） |
 | ui/widgets/help_popup.rs | 4 | 帮助文案与当前键位/XDG 路径一致、绘制、滚动到底后 clamp、小于自身边距的终端 |
-| **总计** | **359** | **353 默认运行 + 6 设备门控（`#[ignore]`）** |
+| **总计** | **370** | **364 默认运行 + 6 设备门控（`#[ignore]`）** |
 
 #### 测试分层
 
@@ -841,7 +846,7 @@ tmper/
 │   │   ├── mod.rs              #     UiState、ViewMode、render() 入口
 │   │   ├── theme.rs            #     13 色槽语义主题（themes/*.toml 加载）
 │   │   ├── cover/              #     封面图渲染（终端协议直接输出）
-│   │   │   └── mod.rs          #       CoverRenderer: Kitty/SIXEL 互斥、一次性发送、几何对齐、15 测试
+│   │   │   └── mod.rs          #       CoverRenderer: 能力探测、Kitty/SIXEL 互斥、一次性发送、几何对齐、43 测试
 │   │   ├── views/              #     视图
 │   │   │   ├── player_view.rs  #       播放器主视图
 │   │   │   ├── library_view.rs #       曲库浏览器

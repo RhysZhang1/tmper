@@ -18,7 +18,7 @@
 - 只正式支持 Linux；macOS 和 Windows 未验证。
 - CLI 尚不能把目录直接作为临时播放队列，目录导入需在文件浏览器中操作。
 - 原生 Kitty/SIXEL 图像位于 Ratatui 缓冲区之外，终端兼容性取决于协议支持；通用回退是半块字符封面。封面矩形按图片宽高比自适应，并依赖终端上报的单元格像素尺寸：启动时用一趟探测拿到（`CSI 16 t`，Konsole 走这条；拿不到再试 `CSI 14 t` ÷ `CSI 18 t`，仍无则 `TIOCGWINSZ`），都不上报时（部分 tmux 配置、少数模拟器）退回 10×20 的假设值，此时封面比例仍正确但可能小一圈，可用配置里的 `cell_px` 覆盖。结果写进日志。
-- **图形能力只探测了 SIXEL**：同一趟启动探测会用 `CSI c`（DA1）询问终端是否支持 SIXEL，只有终端明确回答支持才发送图形载荷，否则一律保留半块字符画——VTE 系（GNOME Terminal、xfce4-terminal）、Alacritty 上封面因此是字符画而不是空白面板。Kitty 路径仍只看环境变量（`KITTY_WINDOW_ID` 等），认不出「设了变量但不支持图形协议」的终端；`tmux` / `screen` 下也没做 DCS passthrough 包装，载荷会被复用器吞掉（此时退回字符画）。改进方向与实测见 `progress/2026-10-03-encoder-and-terminal-compat.md`。
+- **两种图形协议都靠探测，但复用器里一律退字符画**：同一趟启动探测先问 Kitty 协议自己的能力查询（`ESC _ G … a=q`，Konsole 26.08 会答 `OK`），再用 `CSI c`（DA1）问 SIXEL 属性位，只有终端明确回答支持才发送对应载荷——VTE 系（GNOME Terminal、xfce4-terminal）、Alacritty 两种都不支持，封面因此是字符画而不是空白面板。识别到 `tmux` / `screen` / `zellij` 时**不问也不采信**图形能力，直接半块字符：复用器默认吞掉 DCS/APC 载荷，而查询回答可能仍来自底下的真终端，那正是「回答支持但面板空白」的组合；passthrough 包装未实现（需要 tmux 3.4+ 且 `allow-passthrough on`，属于用户侧配置）。实测与三个 Kitty 载荷 bug 的记录见 `progress/2026-10-03-terminal-graphics-probe.md`。
 - 没有 MPRIS2、均衡器、在线歌词和桌面通知；播放与 TUI 同进程，退出即停播，也没有可重新接管的常驻进程。
 - 音频输出测试需要真实声卡或虚拟 ALSA，默认测试集合会跳过它们。
 
