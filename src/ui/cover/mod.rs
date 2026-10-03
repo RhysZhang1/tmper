@@ -389,7 +389,7 @@ impl CoverRenderer {
         self.last_chafa_rect = Some(rect);
         self.last_blocks_suppressed = params.blocks_suppressed;
 
-        let (box_w, box_h) = chafa_box(rect, params.cell_px);
+        let (box_w, box_h) = chafa_box(rect, params.cell_px, chafa_cell_px());
         match self.encoder.encode(&cover, box_w, box_h) {
             Ok(payload) if !payload.is_empty() => {
                 self.chafa_sixel_cache = Some(payload.clone());
@@ -431,23 +431,30 @@ impl CoverRenderer {
 
 // ── Helpers ──
 
-/// Translate the cover rect from terminal cells into the cell counts chafa has
-/// to be asked for, so that the SIXEL it emits covers the rect's *pixels*.
+/// Translate the cover rect — `rect` cells drawn with `cell_px`-sized cells —
+/// into the cell count chafa has to be asked for so that the SIXEL it emits
+/// covers the rect's *pixels*.
 ///
-/// chafa sizes its output at [`runtime::CHAFA_SIXEL_CELL_W`] ×
-/// [`runtime::CHAFA_SIXEL_CELL_H`] px per requested cell and cannot see this
-/// terminal, so passing the rect's own cell counts — what the code used to do —
-/// was only correct on a terminal whose cells happen to be that size. Everywhere
-/// else the payload came out the wrong size, and the half-block art drawn
-/// underneath showed around it.
+/// The divisor is [`chafa_cell_px`], chafa's own idea of a cell, because chafa
+/// multiplies its `--size` back up by the cell size *it* sees. Dividing by
+/// anything else scales the picture by the ratio between the two, and the
+/// result is a cover that stops short of the box: on a Konsole answering the
+/// probe (8×15 cells) but leaving chafa on its 10×20 fallback, the old
+/// division by 10/20 asked for 26×13 chafa cells inside a 33×18-cell box and
+/// got a 208×195 px raster in a 264×270 px box — a fifth of the width and a
+/// quarter of the height left blank.
 ///
 /// Rounded down on purpose: a payload a few pixels short leaves a clean margin,
 /// while one that is too big would spill over the panel border.
-fn chafa_box(rect: (u16, u16, u16, u16), cell_px: (u16, u16)) -> (u16, u16) {
+fn chafa_box(
+    rect: (u16, u16, u16, u16),
+    cell_px: (u16, u16),
+    chafa_cell: (u16, u16),
+) -> (u16, u16) {
     let px_w = rect.2 as u32 * cell_px.0.max(1) as u32;
     let px_h = rect.3 as u32 * cell_px.1.max(1) as u32;
-    let cols = px_w / runtime::CHAFA_SIXEL_CELL_W;
-    let rows = px_h / runtime::CHAFA_SIXEL_CELL_H;
+    let cols = px_w / chafa_cell.0.max(1) as u32;
+    let rows = px_h / chafa_cell.1.max(1) as u32;
     (cols.max(1) as u16, rows.max(1) as u16)
 }
 
@@ -470,6 +477,23 @@ pub fn terminal_cell_px() -> (u16, u16) {
             .unwrap_or(runtime::FALLBACK_CELL_PX),
         Err(_) => runtime::FALLBACK_CELL_PX,
     }
+}
+
+/// The cell size *chafa* will lay its sixel out on — the divisor its `--size`
+/// is measured in.
+///
+/// chafa reads the terminal's pixel size itself, from the same `TIOCGWINSZ`
+/// fields [`cell_px_from_window`] reads, and falls back to
+/// [`runtime::FALLBACK_CELL_PX`] when the terminal reports none. What it does
+/// *not* see is the startup probe's answer, so this is deliberately not
+/// [`terminal_cell_px`]: on a terminal that answers `CSI 16 t` while leaving
+/// the window's pixel fields at zero, chafa is still on its 10×20 fallback
+/// even though the cover box was measured with the probed cell.
+fn chafa_cell_px() -> (u16, u16) {
+    crossterm::terminal::window_size()
+        .ok()
+        .and_then(|ws| cell_px_from_window((ws.columns, ws.rows, ws.width, ws.height)))
+        .unwrap_or(runtime::FALLBACK_CELL_PX)
 }
 
 /// Sanity-check a reported window size and reduce it to a cell size.
@@ -872,35 +896,47 @@ mod tests {
 
     // ── chafa geometry ──
 
-    /// chafa emits a fixed 10×20 px per requested cell — its own fallback cell,
-    /// which it cannot correct for because it cannot see this terminal — so the
-    /// rect has to be converted into chafa's units. A 10×20 terminal cell *is*
-    /// chafa's cell, so that case maps one-to-one; a 20×20 one needs twice as
-    /// many chafa columns to span the same pixels.
+    /// When chafa sees the same cell tmper measured the box with — the normal
+    /// case, both read the same terminal — one requested chafa cell is one
+    /// terminal cell, and the raster comes out exactly the box.
     #[test]
-    fn chafa_box_converts_cells_to_chafa_pixels() {
-        assert_eq!(chafa_box((0, 0, 10, 10), (10, 20)), (10, 10));
-        assert_eq!(chafa_box((0, 0, 10, 10), (20, 20)), (20, 10));
+    fn chafa_box_is_the_rect_when_chafa_sees_the_same_cell() {
+        assert_eq!(chafa_box((0, 0, 33, 18), (8, 15), (8, 15)), (33, 18));
+        assert_eq!(chafa_box((0, 0, 10, 10), (10, 20), (10, 20)), (10, 10));
+        assert_eq!(chafa_box((0, 0, 10, 10), (20, 20), (20, 20)), (10, 10));
+    }
+
+    /// The two disagree when the probe answered but `TIOCGWINSZ` did not:
+    /// chafa stays on its 10×20 fallback while the box was measured with the
+    /// probed cell. The request then has to shrink, or the raster overshoots.
+    #[test]
+    fn chafa_box_rescales_when_chafa_assumes_a_different_cell() {
+        // A Konsole 8×15 cover panel: 33 cells wide, 18 tall.
+        assert_eq!(chafa_box((0, 0, 33, 18), (8, 15), (10, 20)), (26, 13));
         // Half-width cells: 8 px over chafa's 10 leaves one chafa column per
         // terminal column only once there are enough of them to add up.
-        assert_eq!(chafa_box((0, 0, 5, 4), (8, 17)), (4, 3));
+        assert_eq!(chafa_box((0, 0, 5, 4), (8, 17), (10, 20)), (4, 3));
     }
 
     /// Rounded down, never up: a payload a few pixels short leaves a clean
     /// margin, one that is too big spills over the panel border.
     #[test]
     fn chafa_box_never_overflows_the_rect() {
-        for cell in [(10u16, 20u16), (8, 17), (12, 24), (20, 20)] {
-            for (w, h) in [(13u16, 7u16), (40, 20), (3, 30), (4, 4)] {
-                let (bw, bh) = chafa_box((0, 0, w, h), cell);
-                let px_w = bw as u32 * runtime::CHAFA_SIXEL_CELL_W;
-                let px_h = bh as u32 * runtime::CHAFA_SIXEL_CELL_H;
-                assert!(
-                    px_w <= w as u32 * cell.0.max(1) as u32,
-                    "box {bw} cells wide overflows {w} columns at cell {cell:?}"
-                );
-                assert!(px_h <= h as u32 * cell.1.max(1) as u32);
-                assert!(bw >= 1 && bh >= 1, "chafa needs a non-zero box");
+        let cells = [(10u16, 20u16), (8, 15), (8, 17), (12, 24), (20, 20)];
+        for chafa_cell in cells {
+            for cell in cells {
+                for (w, h) in [(13u16, 7u16), (40, 20), (3, 30), (4, 4)] {
+                    let (bw, bh) = chafa_box((0, 0, w, h), cell, chafa_cell);
+                    let px_w = bw as u32 * chafa_cell.0.max(1) as u32;
+                    let px_h = bh as u32 * chafa_cell.1.max(1) as u32;
+                    assert!(
+                        px_w <= w as u32 * cell.0.max(1) as u32,
+                        "box {bw} cells wide overflows {w} columns at cell {cell:?} \
+                         (chafa cell {chafa_cell:?})"
+                    );
+                    assert!(px_h <= h as u32 * cell.1.max(1) as u32);
+                    assert!(bw >= 1 && bh >= 1, "chafa needs a non-zero box");
+                }
             }
         }
     }
@@ -911,10 +947,11 @@ mod tests {
     /// matters here is that it stays usable rather than collapsing to zero.
     #[test]
     fn chafa_box_stays_usable_for_a_sub_cell_rect() {
-        assert_eq!(chafa_box((0, 0, 1, 1), (10, 20)), (1, 1));
+        assert_eq!(chafa_box((0, 0, 1, 1), (10, 20), (10, 20)), (1, 1));
 
-        // An unknown cell size is clamped instead of dividing by zero.
-        assert_eq!(chafa_box((0, 0, 4, 4), (0, 0)), (1, 1));
+        // A zero cell size is clamped to one pixel per cell rather than
+        // dividing by zero: the rect's cells become chafa's cells.
+        assert_eq!(chafa_box((0, 0, 4, 4), (0, 0), (0, 0)), (4, 4));
     }
 
     // ── Cell size detection ──
