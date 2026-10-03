@@ -83,8 +83,8 @@ daemon 的历史（包括它临死前解释原因的那几行）会被下一次 
 
 ## 还没做
 
-- **阶段 2**：`LibraryDb`、扫描器、歌单搬进 daemon；曲库搜索/下钻变成 `LibraryQuery`；
-  客户端不再打开 SQLite。
+- ~~**阶段 2**：`LibraryDb`、扫描器、歌单搬进 daemon；曲库搜索/下钻变成 `LibraryQuery`；
+  客户端不再打开 SQLite。~~ **已完成，见下。**
 - **阶段 3**：MPRIS2（`mpris-server` + zbus）；封面缓存成真文件供 `mpris:artUrl`。
 - **阶段 4**：daemon 中途死掉后的**自动重连**（现在读到 EOF 会提示并退出 TUI）、陈旧 socket
   的显式处理、四份文档、`cargo llvm-cov` 复测。
@@ -144,3 +144,69 @@ start 用掉它）。
 这个播放器」）已按本次改动更新；行覆盖率复测 **88.87%**（升自 88.57%），CLAUDE.md 与
 DESIGN.md 里的数字与那句话同步。**但 DESIGN.md 的架构叙述（以及 CLAUDE.md 的布局与并发模型）
 仍写着拆分前的单进程样子**——那是阶段 4 的整体对账，这次只动了被本次改动直接证伪的行。
+
+## 追加（同日）：阶段 2 —— 曲库、扫描器与歌单搬进 daemon
+
+阶段 1 之后，daemon 拥有声音，客户端仍然拥有**索引和歌单**。这条缝很别扭：`Next` 走的是
+客户端手里那份歌单，而歌单是「要放的东西」，本来就该和播放器待在一起。这一阶段把它搬完，
+分三刀落地：
+
+- **2a：索引与扫描器。** `LibraryDb`（SQLite + FTS5）与 `scan_incremental` 移入 `player/`；
+  曲库面板的搜索与艺术家→专辑→曲目下钻变成 `LibraryQuery` 请求，进度变成
+  `ScanProgress` / `ScanFinished`。客户端不再打开 SQLite。
+- **2b-A：曲库目录（`library.json`）。** 加入/移除目录变成请求，目录表整体作为
+  `Event::LibraryPaths` 推送——和队列一样，它只在变化时推。
+- **2b-B：歌单。** 如下。
+
+### 歌单的身份是一个 id
+
+**名字不是身份。** UI 从来没有禁止过两个歌单都叫 "Mix"，按名字寻址的编辑会悄悄落在
+daemon 先找到的那一个上。**位置也不是**——那是对「调用者手里那份拷贝」的光标，而那份
+拷贝正是另一个客户端可能刚改过的。所以 `PlaylistData` 加了 `id`：由 store 发放、永不复用。
+`#[serde(default)]` 让旧文件（全是 0）照常加载，`number()` 在 load 时补号并**立刻写回**，
+所以迁移是一次性的，不是每次加载都要重做的。手改过的文件里重复的 id 同样重新编号——
+这正是 id 要排除的那种失败（编辑落到错误歌单），所以宁可改号也不拒绝。
+
+「打开的歌单」也是 id（`StateSnapshot.active_playlist`），并且 daemon **每次调用都从 store
+现读**那份歌单（`active_list()`），而不是在字段里留一份拷贝。于是「编辑正在播放的歌单」
+**就是**编辑正在走的那个列表，`sync_active_list` 从所有改动点消失了。
+
+### 事件顺序：先镜像，后指认
+
+`PlaylistCreate` 先推 `Event::Playlists`（整个 store）再推 `PlaylistAdded { id }`。
+反过来就是把一个客户端还没见过的 id 交给它——`apply_playlist_added` 拿着 id 去镜像里找行，
+找不到就直接返回，新歌单不会被展开。**引用某个状态的事件必须跟在该状态之后**，和
+「快照先于队列」是同一条规则。客户端测试红过一次才发现的。
+
+**创建与导入是两个事件**（`PlaylistAdded` / `PlaylistImported`），因为两个动词在客户端
+有真正不同的反应：创建要把光标移到新行，导入要报条数。从一个事件里分辨这两者需要客户端
+跟踪在途请求——为了省一个 enum 变体而引入一套状态机，不划算。
+
+### 删掉的东西
+
+`src/app/persistence.rs` 整个删除——客户端不再自己写任何文件。`ui_state.playlist_name`
+（写了两处、从没读过）、`save_playlists()`、`sync_active_list()`、`Request::SetActiveList`
+一并消失。导出仍然由 daemon 写文件，但只回报**事实**（写成的路径 + 失败数），句子由客户端
+从事实里组——「2/3」是两个事实，不是一个措辞。
+
+**两种通知各归其位**：面板自己的 `notification` 是**按键反馈**（「请先展开一个歌单」），
+不往返；daemon 的答复走全局通知——它到达时用户可能已经在别的视图里了，答案不该落在一个
+看不见的面板里。
+
+### 验证
+
+自动：**480 通过 / 6 ignored**，clippy 干净。真 socket + 隔离 `TMPER_*` 目录跑通全部动词：
+建、加曲、去重、按位置删曲、两个同名歌单拿到不同 id、按 id 编辑只落在被点名的那一个、
+对不存在的 id 编辑是 no-op、`set_active_playlist`、导出单个/全部、导入（不存在的路径被丢掉）、
+导入失败变成一条 notice 而不是崩溃、删除正在打开的歌单后 `active_playlist` 归 None。
+`state/playlists.json` 由 daemon 写出，`data/` 里是导出的 M3U。
+
+**用户真实的 `~/.local/state/tmper/playlists.json` 全程未被触碰**（mtime 仍是 14:48，
+文件里仍然没有 `id` 字段）。注意：**下一次真实启动会重写它**——补上 id 并写回，这是设计里
+的一次性迁移，不是意外。内容不变（名字、歌曲、顺序都不动），只是多了 id 字段。
+
+### 还没做
+
+- **阶段 3**：MPRIS2（`mpris-server` + zbus）；封面缓存成真文件供 `mpris:artUrl`。
+- **阶段 4**：daemon 中途死掉后的自动重连、陈旧 socket 的显式处理、四份文档对账、
+  `cargo llvm-cov` 复测。
