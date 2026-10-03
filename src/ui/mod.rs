@@ -540,6 +540,7 @@ pub(crate) fn search_matches(tracks: &[TrackDisplay], query: &str) -> Vec<usize>
 mod render_tests {
     use super::*;
     use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
     use ratatui::Terminal;
 
     #[test]
@@ -626,6 +627,200 @@ mod render_tests {
     }
 
     // ── Overlays ──
+
+    /// Draw the player view on a made-up but plausible session, and print it.
+    ///
+    /// This exists so the screenshot in `README.md` is something the renderer
+    /// actually produced rather than a drawing of what it is supposed to
+    /// produce — a hand-drawn mock is a second implementation, and it goes
+    /// wrong quietly. Regenerate with:
+    ///
+    /// ```text
+    /// cargo test -- --ignored --nocapture print_the_player_view
+    /// ```
+    ///
+    /// It is `#[ignore]`d because it asserts nothing: it is a tool, and the
+    /// suite should not carry a test that cannot fail.
+    #[test]
+    #[ignore = "prints the README screenshot; run with --ignored --nocapture"]
+    fn print_the_player_view() {
+        use crate::lyrics::types::{LyricLine, LyricMetadata, LyricTrack};
+        use crate::ui::views::playlist_view::PlaylistManagerState;
+        use std::time::Duration;
+
+        let line = |secs: u64, text: &str| LyricLine {
+            timestamp: Duration::from_secs(secs),
+            text: text.to_string(),
+            word_timestamps: Vec::new(),
+        };
+
+        let track = |title: &str, artist: &str, secs: f64| TrackDisplay {
+            path: std::path::PathBuf::from(format!("/music/{title}.flac")),
+            title: title.to_string(),
+            artist: artist.to_string(),
+            duration_secs: secs,
+        };
+
+        let mut state = UiState {
+            player: PlayerCore {
+                title: "Bohemian Rhapsody".into(),
+                artist: "Queen".into(),
+                album: "A Night at the Opera".into(),
+                genre: "Rock".into(),
+                year: "1975".into(),
+                codec: "FLAC".into(),
+                position: 192.0,
+                duration: 355.0,
+                is_playing: true,
+                tracks: vec![
+                    track("Bohemian Rhapsody", "Queen", 355.0),
+                    track("Love of My Life", "Queen", 219.0),
+                    track("Don't Stop Me Now", "Queen", 209.0),
+                    track("Somebody to Love", "Queen", 296.0),
+                    track("Under Pressure", "Queen", 248.0),
+                ],
+                playing_index: Some(0),
+                selected_index: 1,
+                show_cover_art: true,
+                cover_art: Some(std::sync::Arc::new(screenshot_cover())),
+                ..Default::default()
+            },
+            volume: 0.8,
+            lyrics: LyricsState {
+                lyric_track: Some(LyricTrack {
+                    metadata: LyricMetadata::default(),
+                    lines: vec![
+                        line(170, "Too late, my time has come"),
+                        line(174, "Sends shivers down my spine"),
+                        line(178, "Body's aching all the time"),
+                        line(182, "Goodbye, everybody, I've got to go"),
+                        line(186, "Gotta leave you all behind and face the truth"),
+                        line(190, "Mama, ooh (any way the wind blows)"),
+                        line(194, "I don't wanna die"),
+                        line(198, "I sometimes wish I'd never been born at all"),
+                        line(202, "I see a little silhouetto of a man"),
+                        line(206, "Scaramouche, Scaramouche, will you do the Fandango?"),
+                        line(210, "Thunderbolt and lightning, very, very frightening me"),
+                        line(214, "(Galileo) Galileo, (Galileo) Galileo, Galileo Figaro"),
+                    ],
+                }),
+                current_lyric_index: 8,
+                lyrics_offset_ms: 0,
+            },
+            visualizer_data: vec![
+                0.05, 0.18, 0.42, 0.71, 0.93, 0.66, 0.38, 0.55, 0.81, 0.47, 0.22, 0.34, 0.60, 0.76,
+                0.41, 0.19, 0.28, 0.52, 0.67, 0.35, 0.14, 0.09, 0.23, 0.44, 0.31, 0.12, 0.06, 0.16,
+                0.29, 0.21, 0.11, 0.04,
+            ],
+            playlist_state: PlaylistManagerState {
+                playlists: vec![
+                    crate::playlist::PlaylistData {
+                        id: 1,
+                        name: "Late Night".into(),
+                        songs: vec![
+                            std::path::PathBuf::from("/music/Bohemian Rhapsody.flac"),
+                            std::path::PathBuf::from("/music/Love of My Life.flac"),
+                            std::path::PathBuf::from("/music/Don't Stop Me Now.flac"),
+                            std::path::PathBuf::from("/music/Somebody to Love.flac"),
+                            std::path::PathBuf::from("/music/Under Pressure.flac"),
+                        ],
+                    },
+                    crate::playlist::PlaylistData {
+                        id: 2,
+                        name: "Focus".into(),
+                        songs: vec![
+                            std::path::PathBuf::from("/music/Time.flac"),
+                            std::path::PathBuf::from("/music/Shine On You Crazy Diamond.flac"),
+                        ],
+                    },
+                ],
+                // The sidebar shows playlists flat, so opening one is what
+                // puts its songs on screen — the screenshot wants both.
+                expanded_playlist: Some(0),
+                sidebar_selected: 0,
+                ..Default::default()
+            },
+            active_playlist: Some(1),
+            ..Default::default()
+        };
+        state.view.active_view = ViewMode::Player;
+        // Both cover layers size themselves from the cell, and the probe is
+        // not running here — so state what the probe would have found.
+        state.cell_px.set((10, 20));
+
+        let width = 110;
+        let height = 34;
+        let buffer = render_buffer(&state, width, height);
+
+        println!("---8<--- README.md screenshot ---8<---");
+        // Rows come from the cell grid, not from splitting the flattened
+        // string: a cell holds a multi-byte glyph and a wide one is two
+        // columns, so counting bytes per row shears every CJK line.
+        //
+        // Each cell keeps its colours: GitHub renders ```ansi code blocks
+        // with real SGR, so the cover and the spectrum come out as the
+        // terminal would have drawn them rather than as a field of blocks.
+        for row in buffer.content().chunks(width as usize) {
+            let mut line = String::new();
+            let mut style: Option<(Color, Color)> = None;
+            for cell in row {
+                let want = (cell.fg, cell.bg);
+                if style != Some(want) {
+                    line.push_str(&sgr(want));
+                    style = Some(want);
+                }
+                line.push_str(cell.symbol());
+            }
+            println!("{}\x1b[0m", line.trim_end());
+        }
+        println!("--->8------------------------------->8---");
+    }
+
+    /// The SGR sequence for a cell's colours.
+    fn sgr((fg, bg): (Color, Color)) -> String {
+        let part = |base: u8, color: Color| match color {
+            Color::Rgb(r, g, b) => format!("{base};2;{r};{g};{b}"),
+            // 39/49 are the "default" codes and are 30 apart from 38/48,
+            // which is why this one is not a range over `base`.
+            Color::Reset => format!("{}", if base == 38 { 39 } else { 49 }),
+            Color::Indexed(n) => format!("{base};5;{n}"),
+            Color::Black => format!("{}", base - 8),
+            Color::Red => format!("{}", base - 7),
+            Color::Green => format!("{}", base - 6),
+            Color::Yellow => format!("{}", base - 5),
+            Color::Blue => format!("{}", base - 4),
+            Color::Magenta => format!("{}", base - 3),
+            Color::Cyan => format!("{}", base - 2),
+            Color::Gray => format!("{}", base - 1),
+            Color::DarkGray => format!("{base};5;8"),
+            Color::LightRed => format!("{base};5;9"),
+            Color::LightGreen => format!("{base};5;10"),
+            Color::LightYellow => format!("{base};5;11"),
+            Color::LightBlue => format!("{base};5;12"),
+            Color::LightMagenta => format!("{base};5;13"),
+            Color::LightCyan => format!("{base};5;14"),
+            Color::White => format!("{base};5;15"),
+        };
+        format!("\x1b[0;{};{}m", part(38, fg), part(48, bg))
+    }
+
+    /// A 32×32 gradient standing in for album art, as a PNG in memory.
+    fn screenshot_cover() -> Vec<u8> {
+        let img = image::RgbaImage::from_fn(32, 32, |x, y| {
+            let r = (x * 8) as u8;
+            let g = (y * 8) as u8;
+            let b = 200u8.saturating_sub((x + y) as u8 * 3);
+            image::Rgba([r, g, b, 255])
+        });
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .expect("encodes");
+        bytes
+    }
 
     #[test]
     fn a_fresh_notification_is_drawn_over_the_view() {

@@ -919,7 +919,7 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 | paths.rs | 5 | XDG 目录拼接、测试期重定向到临时根、运行时目录的优先级（覆盖变量 → XDG_RUNTIME_DIR → 状态目录下的 `run`）、socket 落在运行时目录里、`ensure_runtime_dir` 幂等；另有测试用的 `config_file_lock()`（不是测试，是给共用 `config.toml` 的测试串行化的锁） |
 | config.rs | 11 | 模板与代码默认值一致、clamp 上下界与放行、`cell_px` 覆盖的读取与校验、f32 两位小数序列化、往返、部分/空/含未知键的文档解析 |
 | playlist.rs | — | （仅存 `PlaylistData` 数据模型，逻辑在 `player/playlists.rs`） |
-| **总计** | **526** | **520 默认运行 + 6 设备门控（`#[ignore]`）** |
+| **总计** | **528** | **521 默认运行 + 7 忽略（6 个设备门控 + 1 个生成 README 截图的工具）** |
 
 #### 测试分层
 
