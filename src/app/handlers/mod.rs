@@ -201,14 +201,13 @@ impl App {
                             && song_index < ps.playlists[pl_idx].songs.len()
                         {
                             let path = ps.playlists[pl_idx].songs[song_index].clone();
-                            self.ui_state.active_playlist = Some(pl_idx);
-                            self.ui_state.playlist_name = ps.playlists[pl_idx].name.clone();
+                            let id = ps.playlists[pl_idx].id;
                             let _ = ps;
                             let _ = model;
                             // The list first, then the track: the player has
                             // to know what it is walking before it starts
                             // walking, or the very first `Next` uses the queue.
-                            self.sync_active_list();
+                            self.set_active_playlist(Some(id));
                             self.dispatch(Request::Play { path });
                             return true;
                         }
@@ -216,18 +215,23 @@ impl App {
                     LineTarget::PlaylistName(i) => {
                         let _ = model;
                         let new_sel = self.sidebar_line_index_of_playlist(i);
-                        {
+                        let opened = {
                             let ps = &mut self.ui_state.playlist_state;
                             if ps.expanded_playlist == Some(i) {
                                 ps.expanded_playlist = None;
+                                None
                             } else {
                                 ps.expanded_playlist = Some(i);
-                                self.ui_state.active_playlist = Some(i);
-                                self.ui_state.playlist_name = ps.playlists[i].name.clone();
+                                Some(ps.playlists[i].id)
                             }
+                        };
+                        if let Some(id) = opened {
+                            self.set_active_playlist(Some(id));
+                        }
+                        {
+                            let ps = &mut self.ui_state.playlist_state;
                             ps.sidebar_selected = new_sel;
                         }
-                        self.sync_active_list();
                         let sidebar_total = self.sidebar_line_count();
                         self.clamp_sidebar_scroll(sidebar_total);
                     }
@@ -541,50 +545,32 @@ impl App {
                 self.ui_state.view.active_view = view;
             }
             crate::input::command::Command::Import(path) => {
-                let import_path = std::path::PathBuf::from(&path);
-                match crate::library::playlist_manager::import_m3u(&import_path) {
-                    Ok(playlist_data) => {
-                        let count = playlist_data.songs.len();
-                        self.ui_state.playlist_state.playlists.push(playlist_data);
-                        self.save_playlists();
+                // The daemon reads the file: it is the store's owner, and the
+                // store is where the imported playlist lands (with an id).
+                self.dispatch(Request::PlaylistImport {
+                    path: std::path::PathBuf::from(&path),
+                });
+            }
+            crate::input::command::Command::Export(name) => {
+                // Names are what the user types; ids are what the store
+                // answers to. The client's mirror is enough to make the one
+                // into the other, and a name that matches nothing needs no
+                // round trip to report.
+                let found = self
+                    .ui_state
+                    .playlist_state
+                    .playlists
+                    .iter()
+                    .find(|playlist| playlist.name.to_lowercase() == name.to_lowercase())
+                    .map(|playlist| playlist.id);
+                match found {
+                    Some(id) => self.dispatch(Request::PlaylistExport { id: Some(id) }),
+                    None => {
                         self.ui_state.notification = Some((
-                            format!("Imported: {count} tracks"),
+                            format!("Playlist not found: {name}"),
                             std::time::Instant::now(),
                         ));
                     }
-                    Err(e) => {
-                        self.ui_state.notification =
-                            Some((format!("Import failed: {e}"), std::time::Instant::now()));
-                    }
-                }
-            }
-            crate::input::command::Command::Export(name) => {
-                let ps = &self.ui_state.playlist_state;
-                if let Some((_, pl_data)) = ps
-                    .playlists
-                    .iter()
-                    .enumerate()
-                    .find(|(_, p)| p.name.to_lowercase() == name.to_lowercase())
-                {
-                    let export_path =
-                        crate::paths::data_dir().join(format!("{}.m3u", pl_data.name));
-                    match crate::library::playlist_manager::export_m3u(pl_data, &export_path) {
-                        Ok(()) => {
-                            self.ui_state.notification = Some((
-                                format!("Exported to {}", export_path.display()),
-                                std::time::Instant::now(),
-                            ));
-                        }
-                        Err(e) => {
-                            self.ui_state.notification =
-                                Some((format!("Export failed: {e}"), std::time::Instant::now()));
-                        }
-                    }
-                } else {
-                    self.ui_state.notification = Some((
-                        format!("Playlist not found: {name}"),
-                        std::time::Instant::now(),
-                    ));
                 }
             }
             crate::input::command::Command::Unknown(cmd) => {
@@ -596,14 +582,19 @@ impl App {
 
     fn handle_remove_selected(&mut self) {
         if self.ui_state.view.active_view == ViewMode::Playlists {
-            let state = &mut self.ui_state.playlist_state;
+            let state = &self.ui_state.playlist_state;
             if state.selected_playlist > 0 {
                 let model = PlaylistFlatModel::new(&state.playlists, state.expanded_playlist);
                 if let LineTarget::PlaylistName(i) = model.resolve(state.selected_playlist) {
-                    state.playlists.remove(i);
-                    state.selected_playlist = state.selected_playlist.min(state.playlists.len());
-                    state.expanded_playlist = None;
-                    self.save_playlists();
+                    let id = state.playlists[i].id;
+                    // Deleting the playlist you had open closes it; deleting
+                    // some other row leaves the one you were working in open.
+                    // (The cursor itself is clamped when the new store
+                    // arrives — that is the first moment its size is known.)
+                    if state.expanded_playlist == Some(i) {
+                        self.ui_state.playlist_state.expanded_playlist = None;
+                    }
+                    self.dispatch(Request::PlaylistDelete { id });
                 }
             }
             return;
@@ -752,9 +743,29 @@ pub(crate) mod test_support {
     /// Convenience playlist for tests.
     pub(crate) fn pl(name: &str, songs: &[&str]) -> PlaylistData {
         PlaylistData {
+            id: next_playlist_id(),
             name: name.to_string(),
             songs: songs.iter().map(PathBuf::from).collect(),
         }
+    }
+
+    /// A fresh id per helper call: two playlists built by one test have to be
+    /// as distinguishable as two built by the store.
+    fn next_playlist_id() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Give the player these playlists, and mirror them into the client.
+    ///
+    /// A playlist now has two halves that have to agree: the store the edits
+    /// land in, and the copy the panel draws and resolves a keypress against.
+    /// Seeding one alone is what a test does when it wants the two to disagree,
+    /// which is not what any of these tests are about.
+    pub(crate) fn seed_playlists(app: &mut App, playlists: Vec<PlaylistData>) {
+        app.player_mut().set_playlists(playlists.clone());
+        app.apply_playlists(playlists);
     }
 
     /// Mirror `switch_view(Settings)`'s setup so settings handlers can run.
@@ -770,7 +781,7 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::handlers::test_support::{pl, test_app};
+    use crate::app::handlers::test_support::{pl, seed_playlists, test_app};
     use crate::event::AppEvent;
     use crate::ui::{RepeatMode, TrackDisplay, ViewMode};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -922,9 +933,9 @@ mod tests {
     fn test_remove_selected_playlists_view() {
         let mut app = test_app();
         app.ui_state.view.active_view = ViewMode::Playlists;
+        seed_playlists(&mut app, vec![pl("Alpha", &[]), pl("Beta", &[])]);
         {
             let s = &mut app.ui_state.playlist_state;
-            s.playlists = vec![pl("Alpha", &[]), pl("Beta", &[])];
             s.selected_playlist = 2; // line 0 = "…", 1 = Alpha, 2 = Beta
             s.expanded_playlist = None;
         }
@@ -1206,7 +1217,7 @@ mod tests {
     fn command_export_writes_an_m3u_for_a_known_playlist() {
         let mut app = test_app();
         let song = std::fs::canonicalize("tests/fixtures/test.flac").unwrap();
-        app.ui_state.playlist_state.playlists = vec![pl("Road", &[song.to_str().unwrap()])];
+        seed_playlists(&mut app, vec![pl("Road", &[song.to_str().unwrap()])]);
 
         // The lookup is case-insensitive.
         run_command(&mut app, "export road");

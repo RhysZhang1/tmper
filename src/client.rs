@@ -185,6 +185,7 @@ mod tests {
             playing_index: Some(2),
             queue_rev: 4,
             lyrics_offset_ms: 0,
+            active_playlist: None,
         }
     }
 

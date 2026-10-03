@@ -356,6 +356,7 @@ mod tests {
 
     fn pl(name: &str, songs: &[&str]) -> PlaylistData {
         PlaylistData {
+            id: 0,
             name: name.to_string(),
             songs: songs.iter().map(PathBuf::from).collect(),
         }

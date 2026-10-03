@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::audio::engine::PlaybackState;
+use crate::playlist::PlaylistData;
 
 /// Bumped whenever an existing field changes meaning or is removed. Additive
 /// changes (a new `Request` variant, a new optional field) do not need a bump;
@@ -145,13 +146,42 @@ pub enum Request {
     QueueRemove {
         path: PathBuf,
     },
-    /// The list that `Next`/`Prev`/auto-advance walk, when the user has one
-    /// open. The client owns the playlist store for now and pushes a copy
-    /// here whenever the active one changes or is edited; an empty list means
-    /// "no active list, use the queue". Phase 2 moves the store itself into
-    /// the daemon and deletes this.
-    SetActiveList {
-        songs: Vec<PathBuf>,
+    /// The playlist `Next`/`Prev`/auto-advance walk, or `None` for the queue.
+    ///
+    /// An id, not the songs: the store is the daemon's, so an edit to the
+    /// playlist *is* an edit to the list being walked — there is no second
+    /// copy to keep in step.
+    SetActivePlaylist {
+        id: Option<u64>,
+    },
+
+    /// A new, empty playlist. Answered by [`Event::PlaylistAdded`] and the
+    /// whole store.
+    PlaylistCreate {
+        name: String,
+    },
+    /// Append a song to one playlist. A song it already holds is not added
+    /// twice.
+    PlaylistAddSong {
+        id: u64,
+        path: PathBuf,
+    },
+    /// Drop one entry, by position within the playlist.
+    PlaylistRemoveSong {
+        id: u64,
+        index: usize,
+    },
+    PlaylistDelete {
+        id: u64,
+    },
+    /// Read an M3U file and add it as a new playlist.
+    PlaylistImport {
+        path: PathBuf,
+    },
+    /// Write playlists to `{name}.m3u` in the daemon's data directory —
+    /// `Some(id)` for one, `None` for all of them.
+    PlaylistExport {
+        id: Option<u64>,
     },
 
     /// The artist list — the library panel's first question.
@@ -274,6 +304,33 @@ pub enum Event {
     /// A scan ended. The index has already been written and pruned — the
     /// report describes work that is done, not work that is about to start.
     ScanFinished(ScanReport),
+    /// The whole playlist store, whenever it changes — and once to every new
+    /// client, like the queue. `playlists.json` has one writer, so this is
+    /// what a client renders instead of reading the file.
+    Playlists {
+        playlists: Vec<PlaylistData>,
+    },
+    /// A playlist was created. Carries the id so the client that made it can
+    /// open it — the store's numbering is the store's to choose.
+    PlaylistAdded {
+        id: u64,
+        name: String,
+    },
+    /// An M3U import landed. Separate from [`Event::PlaylistAdded`] because
+    /// the two are answers to different questions: a client that just created
+    /// a playlist opens it, and one that just imported a file says how much
+    /// came in.
+    PlaylistImported {
+        id: u64,
+        name: String,
+        songs: usize,
+    },
+    /// Where an export landed: one path per playlist written, and how many
+    /// could not be written at all.
+    PlaylistsExported {
+        paths: Vec<PathBuf>,
+        failed: usize,
+    },
     /// A one-line message for the client's notification toast.
     Notice {
         level: NoticeLevel,
@@ -314,6 +371,10 @@ pub struct StateSnapshot {
     pub playing_index: Option<usize>,
     pub queue_rev: u64,
     pub lyrics_offset_ms: i64,
+    /// The playlist `Next` walks, by id. The client sets it when the user
+    /// picks one, and this is that choice coming back — the same round trip
+    /// `repeat` makes, so two clients showing the same sidebar agree.
+    pub active_playlist: Option<u64>,
 }
 
 impl Default for StateSnapshot {
@@ -334,6 +395,7 @@ impl Default for StateSnapshot {
             playing_index: None,
             queue_rev: 0,
             lyrics_offset_ms: 0,
+            active_playlist: None,
         }
     }
 }
@@ -384,12 +446,20 @@ mod tests {
             Request::QueueRemove {
                 path: PathBuf::from("/music/b.flac"),
             },
-            Request::SetActiveList {
-                songs: vec![
-                    PathBuf::from("/music/a.flac"),
-                    PathBuf::from("/music/b.flac"),
-                ],
+            Request::SetActivePlaylist { id: Some(3) },
+            Request::SetActivePlaylist { id: None },
+            Request::PlaylistCreate { name: "Mix".into() },
+            Request::PlaylistAddSong {
+                id: 3,
+                path: PathBuf::from("/music/a.flac"),
             },
+            Request::PlaylistRemoveSong { id: 3, index: 1 },
+            Request::PlaylistDelete { id: 3 },
+            Request::PlaylistImport {
+                path: PathBuf::from("/music/list.m3u"),
+            },
+            Request::PlaylistExport { id: Some(3) },
+            Request::PlaylistExport { id: None },
             Request::LibraryArtists,
             Request::LibraryAlbums {
                 artist: "一首歌的歌手".into(),
@@ -447,6 +517,7 @@ mod tests {
                 playing_index: Some(3),
                 queue_rev: 7,
                 lyrics_offset_ms: -500,
+                active_playlist: Some(3),
             })),
             Event::Queue {
                 rev: 7,
@@ -501,6 +572,26 @@ mod tests {
                 complete: true,
                 active: 0,
             }),
+            Event::Playlists {
+                playlists: vec![PlaylistData {
+                    id: 3,
+                    name: "Mix".into(),
+                    songs: vec![PathBuf::from("/music/一首歌.flac")],
+                }],
+            },
+            Event::PlaylistAdded {
+                id: 3,
+                name: "Mix".into(),
+            },
+            Event::PlaylistImported {
+                id: 4,
+                name: "From Disk".into(),
+                songs: 12,
+            },
+            Event::PlaylistsExported {
+                paths: vec![PathBuf::from("/data/Mix.m3u")],
+                failed: 1,
+            },
             Event::Notice {
                 level: NoticeLevel::Warn,
                 message: "daemon busy".into(),

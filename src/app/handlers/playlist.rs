@@ -1,9 +1,85 @@
 use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::app::App;
+use crate::ipc::proto::Request;
+use crate::playlist::PlaylistData;
 use crate::ui::views::playlist_view::{InsertMode, LineTarget, PlaylistFlatModel, PlaylistPanel};
 
 impl App {
+    /// Mirror the daemon's playlist store.
+    ///
+    /// The store is pushed whole on every edit, so this is a replace, not a
+    /// patch — the client never holds a playlist the daemon does not. The
+    /// cursors are clamped here rather than at the keypress that asked for the
+    /// edit: the store can also shrink because *another* client deleted or
+    /// emptied something, and those edits arrive with no keypress at all.
+    pub(crate) fn apply_playlists(&mut self, playlists: Vec<PlaylistData>) {
+        let ui = &mut self.ui_state;
+        ui.playlist_state.playlists = playlists;
+        {
+            let state = &mut ui.playlist_state;
+            if state
+                .expanded_playlist
+                .is_some_and(|index| index >= state.playlists.len())
+            {
+                state.expanded_playlist = None;
+            }
+            let total =
+                PlaylistFlatModel::new(&state.playlists, state.expanded_playlist).total_lines();
+            state.selected_playlist = state.selected_playlist.min(total.saturating_sub(1));
+        }
+        // An open playlist that is gone — deleted here or by another client —
+        // takes the highlight with it.
+        if ui
+            .active_playlist
+            .is_some_and(|id| !ui.playlist_state.playlists.iter().any(|pl| pl.id == id))
+        {
+            ui.active_playlist = None;
+        }
+    }
+
+    /// Tell the player which playlist `Next` should walk. `None` means the
+    /// queue, which is also what an empty playlist means.
+    pub(super) fn set_active_playlist(&mut self, id: Option<u64>) {
+        self.ui_state.active_playlist = id;
+        self.dispatch(Request::SetActivePlaylist { id });
+    }
+
+    /// A playlist the user just made: open it and put the cursor on it, so the
+    /// next thing they do — adding songs from the library panel — lands in the
+    /// playlist they just named.
+    pub(crate) fn apply_playlist_added(&mut self, id: u64) {
+        let state = &mut self.ui_state.playlist_state;
+        let Some(index) = state.playlists.iter().position(|pl| pl.id == id) else {
+            return;
+        };
+        state.expanded_playlist = Some(index);
+        if let Some(line) =
+            PlaylistFlatModel::new(&state.playlists, Some(index)).line_of_playlist(index)
+        {
+            state.selected_playlist = line;
+        }
+        Self::clamp_playlist_scroll(state, self.ui_state.visible_rows.get());
+    }
+
+    /// Where an export landed. One file is the answer to `e` and `:export`;
+    /// several are the answer to "export everything", which reports a count.
+    pub(crate) fn apply_playlists_exported(
+        &mut self,
+        paths: Vec<std::path::PathBuf>,
+        failed: usize,
+    ) {
+        let message = match (paths.len(), failed) {
+            // Only reachable for a single export naming a playlist the store
+            // no longer has: "export everything" over an empty store is
+            // refused before it is sent.
+            (0, _) => "Export failed: no such playlist".to_string(),
+            (1, 0) => format!("Exported to {}", paths[0].display()),
+            (written, failed) => format!("已导出 {written}/{} 个歌单到 data/", written + failed),
+        };
+        self.ui_state.notification = Some((message, std::time::Instant::now()));
+    }
+
     /// Clamp scroll offset and cursor after a playlist structural change.
     pub(super) fn clamp_playlist_scroll(
         state: &mut crate::ui::views::playlist_view::PlaylistManagerState,
@@ -30,20 +106,13 @@ impl App {
             match key.code {
                 KeyCode::Enter => {
                     let name = s.clone();
-                    if !name.is_empty() {
-                        let new_idx = state.playlists.len();
-                        state
-                            .playlists
-                            .push(crate::ui::views::playlist_view::PlaylistData {
-                                name,
-                                songs: Vec::new(),
-                            });
-                        state.expanded_playlist = Some(new_idx);
-                        state.selected_playlist = 0;
-                        state.scroll_playlists = 0;
-                    }
                     state.insert_mode = InsertMode::Off;
-                    self.save_playlists();
+                    if !name.is_empty() {
+                        // The store is the daemon's, so the new playlist comes
+                        // back as an event rather than appearing here — which
+                        // is also where its id comes from.
+                        self.dispatch(Request::PlaylistCreate { name });
+                    }
                 }
                 KeyCode::Esc => {
                     state.insert_mode = InsertMode::Off;
@@ -65,31 +134,21 @@ impl App {
 
         state.notification = None;
 
-        // Export expanded playlist to M3U
+        // Export expanded playlist to M3U. The file is written by the daemon —
+        // the store's owner — so the path to report arrives with the answer.
         if key.code == KeyCode::Char('e') && key.modifiers.is_empty() {
-            if let Some(ep) = state.expanded_playlist {
-                if ep < state.playlists.len() {
-                    let pl_data = &state.playlists[ep];
-                    let export_path =
-                        crate::paths::data_dir().join(format!("{}.m3u", pl_data.name));
-                    match crate::library::playlist_manager::export_m3u(pl_data, &export_path) {
-                        Ok(()) => {
-                            state.notification = Some((
-                                format!("Exported to {}", export_path.display()),
-                                std::time::Instant::now(),
-                            ));
-                        }
-                        Err(e) => {
-                            state.notification =
-                                Some((format!("Export failed: {e}"), std::time::Instant::now()));
-                        }
-                    }
+            match state
+                .expanded_playlist
+                .and_then(|ep| state.playlists.get(ep))
+                .map(|playlist| playlist.id)
+            {
+                Some(id) => self.dispatch(Request::PlaylistExport { id: Some(id) }),
+                None => {
+                    state.notification = Some((
+                        "Expand a playlist first, then press 'e' to export".to_string(),
+                        std::time::Instant::now(),
+                    ));
                 }
-            } else {
-                state.notification = Some((
-                    "Expand a playlist first, then press 'e' to export".to_string(),
-                    std::time::Instant::now(),
-                ));
             }
             return;
         }
@@ -149,11 +208,14 @@ impl App {
                 PlaylistPanel::Library => {
                     if let Some(ep) = state.expanded_playlist {
                         let lib_idx = state.selected_library_song;
+                        // The duplicate check is a courtesy — it saves a round
+                        // trip on a keystroke that would change nothing. The
+                        // store refuses the duplicate either way.
                         if lib_idx < state.library_paths.len() {
                             let path = state.library_paths[lib_idx].clone();
                             if !state.playlists[ep].songs.contains(&path) {
-                                state.playlists[ep].songs.push(path);
-                                self.save_playlists();
+                                let id = state.playlists[ep].id;
+                                self.dispatch(Request::PlaylistAddSong { id, path });
                             }
                         }
                     } else {
@@ -187,18 +249,14 @@ impl App {
                             if playlist < state.playlists.len()
                                 && song_index < state.playlists[playlist].songs.len()
                             {
-                                state.playlists[playlist].songs.remove(song_index);
-                                let new_model = PlaylistFlatModel::new(
-                                    &state.playlists,
-                                    state.expanded_playlist,
-                                );
-                                let total = new_model.total_lines();
-                                state.selected_playlist =
-                                    state.selected_playlist.min(total.saturating_sub(1));
-                                Self::clamp_playlist_scroll(
-                                    state,
-                                    self.ui_state.visible_rows.get(),
-                                );
+                                let id = state.playlists[playlist].id;
+                                self.dispatch(Request::PlaylistRemoveSong {
+                                    id,
+                                    index: song_index,
+                                });
+                                // The cursor is clamped when the new store
+                                // arrives, which is also the only moment the
+                                // row count is known to have changed.
                             }
                         }
                         LineTarget::Empty(_) => { /* "(empty)" — no-op */ }
@@ -207,8 +265,6 @@ impl App {
             },
             _ => {}
         }
-
-        self.save_playlists();
     }
 
     pub(super) fn enter_playlist_view(&mut self) {
@@ -225,7 +281,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::handlers::test_support::{pl, test_app};
+    use crate::app::handlers::test_support::{pl, seed_playlists, test_app};
     use crate::ui::views::playlist_view::{
         InsertMode, PlaylistFlatModel, PlaylistManagerState, PlaylistPanel,
     };
@@ -366,7 +422,11 @@ mod tests {
         assert_eq!(s.playlists.len(), 1);
         assert_eq!(s.playlists[0].name, "My");
         assert_eq!(s.expanded_playlist, Some(0));
-        assert_eq!(s.selected_playlist, 0);
+        // Line 0 is the "…" row the name was typed into, line 1 is the
+        // playlist that came back — and the cursor follows it there, so the
+        // next Enter fills the playlist the user just named rather than
+        // opening a second one.
+        assert_eq!(s.selected_playlist, 1);
     }
 
     #[test]
@@ -401,10 +461,10 @@ mod tests {
     #[test]
     fn test_enter_library_adds_song_to_expanded() {
         let mut app = test_app();
+        seed_playlists(&mut app, vec![pl("P", &[])]);
         {
             let s = &mut app.ui_state.playlist_state;
             s.focused = PlaylistPanel::Library;
-            s.playlists = vec![pl("P", &[])];
             s.expanded_playlist = Some(0);
             s.library_paths = vec![
                 PathBuf::from("/music/a.flac"),
@@ -457,10 +517,13 @@ mod tests {
     #[test]
     fn test_enter_song_removes_it() {
         let mut app = test_app();
+        seed_playlists(
+            &mut app,
+            vec![pl("Alpha", &["/a1", "/a2"]), pl("Beta", &["/b1"])],
+        );
         {
             let s = &mut app.ui_state.playlist_state;
             s.focused = PlaylistPanel::Playlists;
-            s.playlists = vec![pl("Alpha", &["/a1", "/a2"]), pl("Beta", &["/b1"])];
             s.expanded_playlist = Some(0);
             s.selected_playlist = 2; // first song of Alpha
         }
@@ -478,21 +541,24 @@ mod tests {
     fn test_export_writes_m3u() {
         let mut app = test_app();
         std::fs::create_dir_all(crate::paths::data_dir()).unwrap();
+        seed_playlists(&mut app, vec![pl("Alpha", &["/music/a.flac"])]);
         {
             let s = &mut app.ui_state.playlist_state;
             s.focused = PlaylistPanel::Playlists;
-            s.playlists = vec![pl("Alpha", &["/music/a.flac"])];
             s.expanded_playlist = Some(0);
         }
         press_char(&mut app, 'e');
 
-        let s = &app.ui_state.playlist_state;
+        // The notice is the *global* one: the panel's own is keypress feedback
+        // ("expand a playlist first"), and this sentence is the daemon's
+        // answer — which the client may be showing in any view by the time it
+        // lands.
+        let notice = app.ui_state.notification.clone();
         assert!(
-            s.notification
+            notice
                 .as_ref()
                 .is_some_and(|(msg, _)| msg.starts_with("Exported to")),
-            "expected export notification, got {:?}",
-            s.notification
+            "expected export notification, got {notice:?}"
         );
         let export_path = crate::paths::data_dir().join("Alpha.m3u");
         let content = std::fs::read_to_string(&export_path).expect("m3u file written");

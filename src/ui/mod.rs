@@ -175,13 +175,18 @@ pub struct UiState {
     pub file_browser_state: crate::ui::views::file_browser_view::FileBrowserState,
     pub library_state: crate::ui::views::library_view::LibraryState,
     pub settings_state: crate::ui::views::settings_view::SettingsState,
-    /// Which playlist is open. The *song* cursor that used to sit beside it is
-    /// gone: it was a second copy of "where playback is", written in one view
-    /// and read in another, and it went stale every time a playlist was
-    /// edited. The player derives its position from the current track and the
-    /// list it was given, so there is nothing here to go stale.
-    pub active_playlist: Option<usize>,
-    pub playlist_name: String,
+    /// Which playlist is open, by id.
+    ///
+    /// The *song* cursor that used to sit beside it is gone: it was a second
+    /// copy of "where playback is", written in one view and read in another,
+    /// and it went stale every time a playlist was edited. The player derives
+    /// its position from the current track and the list it is walking, so
+    /// there is nothing here to go stale.
+    ///
+    /// An id rather than a position, because the store is the daemon's and can
+    /// change underneath this: the sidebar highlight has to land on the same
+    /// playlist, not on whatever has since moved into that row.
+    pub active_playlist: Option<u64>,
     pub command_mode: bool,
     pub command_buffer: String,
     /// Global `/` search mode (player-view track filter). Unlike the
@@ -220,7 +225,6 @@ impl Default for UiState {
             library_state: crate::ui::views::library_view::LibraryState::default(),
             settings_state: crate::ui::views::settings_view::SettingsState::default(),
             active_playlist: None,
-            playlist_name: "Default".into(),
             command_mode: false,
             command_buffer: String::new(),
             search_mode: false,

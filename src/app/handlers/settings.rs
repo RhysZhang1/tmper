@@ -1,6 +1,7 @@
 use crossterm::event::KeyEvent;
 
 use crate::app::App;
+use crate::ipc::proto::Request;
 use crate::ui::theme::Theme;
 use crate::ui::views::settings_view::SettingsState;
 use crate::ui::ViewMode;
@@ -75,24 +76,16 @@ impl App {
     }
 
     /// Export all playlists to M3U files in the data directory.
+    ///
+    /// The daemon writes them and reports how many landed; the sentence the
+    /// user reads is composed here, from the count and the failures.
     fn export_all_playlists_m3u(&mut self) {
-        let playlists = self.ui_state.playlist_state.playlists.clone();
-        if playlists.is_empty() {
+        if self.ui_state.playlist_state.playlists.is_empty() {
             self.ui_state.notification =
                 Some(("没有歌单可以导出".into(), std::time::Instant::now()));
             return;
         }
-        let mut count = 0usize;
-        for pl_data in &playlists {
-            let export_path = crate::paths::data_dir().join(format!("{}.m3u", pl_data.name));
-            if crate::library::playlist_manager::export_m3u(pl_data, &export_path).is_ok() {
-                count += 1;
-            }
-        }
-        self.ui_state.notification = Some((
-            format!("已导出 {count}/{} 个歌单到 data/", playlists.len()),
-            std::time::Instant::now(),
-        ));
+        self.dispatch(Request::PlaylistExport { id: None });
     }
 
     fn cycle_setting(
@@ -252,7 +245,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::handlers::test_support::{pl, seed_settings, test_app};
+    use crate::app::handlers::test_support::{pl, seed_playlists, seed_settings, test_app};
     use crate::ui::views::settings_view::SettingItem;
     use crate::ui::ViewMode;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -474,8 +467,10 @@ mod tests {
         let mut app = test_app();
         seed_settings(&mut app);
         std::fs::create_dir_all(crate::paths::data_dir()).unwrap();
-        app.ui_state.playlist_state.playlists =
-            vec![pl("P1", &["/a.flac"]), pl("P2", &["/b.flac"])];
+        seed_playlists(
+            &mut app,
+            vec![pl("P1", &["/a.flac"]), pl("P2", &["/b.flac"])],
+        );
         app.ui_state.settings_state.cursor = 17;
         press(&mut app, KeyCode::Enter);
         let msg = app

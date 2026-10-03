@@ -10,6 +10,7 @@
 pub mod fft;
 pub mod library;
 pub mod persistence;
+pub mod playlists;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -21,6 +22,7 @@ use crate::ipc::proto::{Event, NoticeLevel, QueueTrack, RepeatMode, Request, Sta
 use crate::metadata::reader::read_metadata;
 
 use self::library::{Library, ScanNotice};
+use self::playlists::Playlists;
 
 /// Display metadata of the track that is loaded, whether or not it is still
 /// sounding: stopping does not clear the title off the screen.
@@ -65,10 +67,15 @@ pub struct Player {
     /// The global queue. Insertion-ordered, unique by path.
     queue: Vec<QueueTrack>,
     playing_index: Option<usize>,
-    /// The songs of the playlist the user last opened, if any. `Next`/`Prev`
-    /// and auto-advance prefer this over the queue, exactly as the UI did
-    /// when it owned the policy.
-    active_list: Vec<PathBuf>,
+    /// The stored playlists. Like the index, this is here because
+    /// `playlists.json` has one writer and a playlist outlives the window
+    /// that opened it.
+    playlists: Playlists,
+    /// Which playlist `Next`/`Prev` and auto-advance walk, if any. The songs
+    /// are read out of the store when they are needed rather than copied
+    /// here: an edit to the open playlist *is* an edit to the list being
+    /// walked, with nothing to keep in step.
+    active_playlist: Option<u64>,
     now_playing: Option<NowPlaying>,
     /// The track the last run ended on, from `state.json`.
     ///
@@ -107,6 +114,7 @@ impl Player {
             config,
             AudioEngine::new()?,
             Library::open(),
+            Playlists::open(),
         ))
     }
 
@@ -116,16 +124,27 @@ impl Player {
     /// leave rows for the next test to find.
     #[cfg(test)]
     pub fn new_headless(config: &Config) -> Self {
-        Self::with_engine(config, AudioEngine::new_headless(), Library::in_memory())
+        Self::with_engine(
+            config,
+            AudioEngine::new_headless(),
+            Library::in_memory(),
+            Playlists::in_memory(),
+        )
     }
 
-    fn with_engine(config: &Config, engine: AudioEngine, library: Library) -> Self {
+    fn with_engine(
+        config: &Config,
+        engine: AudioEngine,
+        library: Library,
+        playlists: Playlists,
+    ) -> Self {
         Self {
             engine,
             library,
+            playlists,
             queue: Vec::new(),
             playing_index: None,
-            active_list: Vec::new(),
+            active_playlist: None,
             now_playing: None,
             last_track: None,
             resume_at: None,
@@ -237,9 +256,53 @@ impl Player {
             }
             Request::QueuePush { path } => self.push_to_queue(&path),
             Request::QueueRemove { path } => self.remove_from_queue(&path),
-            Request::SetActiveList { songs } => {
-                self.active_list = songs;
+            Request::SetActivePlaylist { id } => {
+                self.active_playlist = id;
                 Vec::new()
+            }
+            Request::PlaylistCreate { name } => {
+                let id = self.playlists.create(name.clone());
+                // The list before the announcement, always: `PlaylistAdded`
+                // names an id the client can only resolve against a store that
+                // already contains it. The other order hands the client an id
+                // it has never seen, and the row it is supposed to open does
+                // not exist yet.
+                vec![self.playlists_event(), Event::PlaylistAdded { id, name }]
+            }
+            Request::PlaylistAddSong { id, path } => {
+                self.playlists.add_song(id, &path);
+                vec![self.playlists_event()]
+            }
+            Request::PlaylistRemoveSong { id, index } => {
+                self.playlists.remove_song(id, index);
+                vec![self.playlists_event()]
+            }
+            Request::PlaylistDelete { id } => {
+                // The open playlist is allowed to be the one deleted: `None`
+                // is exactly the state that means "walk the queue again".
+                if self.active_playlist == Some(id) {
+                    self.active_playlist = None;
+                }
+                self.playlists.delete(id);
+                vec![self.playlists_event()]
+            }
+            Request::PlaylistImport { path } => match self.playlists.import(&path) {
+                Ok(imported) => vec![
+                    self.playlists_event(),
+                    Event::PlaylistImported {
+                        id: imported.id,
+                        name: imported.name,
+                        songs: imported.songs.len(),
+                    },
+                ],
+                Err(error) => vec![Event::Notice {
+                    level: NoticeLevel::Warn,
+                    message: format!("Import failed: {error}"),
+                }],
+            },
+            Request::PlaylistExport { id } => {
+                let (paths, failed) = self.playlists.export(id);
+                vec![Event::PlaylistsExported { paths, failed }]
             }
             Request::LibraryArtists => vec![Event::LibraryArtists {
                 artists: self.library.artists(),
@@ -353,6 +416,7 @@ impl Player {
             playing_index: self.playing_index,
             queue_rev: self.queue_rev,
             lyrics_offset_ms: self.lyrics_offset_ms,
+            active_playlist: self.active_playlist,
         }
     }
 
@@ -421,6 +485,16 @@ impl Player {
         }
     }
 
+    // ── The playlists ──
+
+    /// The store, whole. Pushed on every edit: it is a handful of names and
+    /// paths, and a client that renders it can never be holding a stale one.
+    fn playlists_event(&self) -> Event {
+        Event::Playlists {
+            playlists: self.playlists.entries().to_vec(),
+        }
+    }
+
     /// Hand the scanner a runtime to walk on. Called once, by the daemon: the
     /// client has no business spawning work in the player's process, and a
     /// scan requested without one is refused rather than attempted.
@@ -454,10 +528,45 @@ impl Player {
         crate::audio::engine::lock(&self.bars).clone()
     }
 
-    /// The songs `Next`/`Prev` walk when a list is open, else empty.
-    #[cfg(test)]
+    /// The songs `Next`/`Prev` walk when a playlist is open, else empty.
+    ///
+    /// Read out of the store on every call rather than kept in a field: the
+    /// list the user is walking and the list the user is editing are then the
+    /// same object, and adding a song to the open playlist needs no round trip
+    /// to take effect.
     pub fn active_list(&self) -> &[PathBuf] {
-        &self.active_list
+        self.active_playlist
+            .and_then(|id| self.playlists.songs_of(id))
+            .unwrap_or(&[])
+    }
+
+    /// The playlists, whole — for the greeting a new client gets.
+    pub fn playlists(&self) -> &[crate::playlist::PlaylistData] {
+        self.playlists.entries()
+    }
+
+    /// Put playlists in the store, ids and all.
+    ///
+    /// Tests need this because a keypress resolves a row to an id: a client
+    /// test can only check that an edit landed on the *right* playlist if it
+    /// knows which id it named, and the ids a store hands out are its own.
+    #[cfg(test)]
+    pub fn set_playlists(&mut self, playlists: Vec<crate::playlist::PlaylistData>) {
+        self.playlists = crate::player::playlists::Playlists::with_entries(playlists);
+    }
+
+    /// Store a playlist and open it, without a client in the loop.
+    ///
+    /// Tests need a list to walk, and the paths in it need not exist: what is
+    /// being exercised is the policy, not the decoder. Returns the id.
+    #[cfg(test)]
+    pub fn open_playlist(&mut self, name: &str, songs: &[&str]) -> u64 {
+        let id = self.playlists.create(name);
+        for song in songs {
+            self.playlists.add_song(id, Path::new(song));
+        }
+        self.active_playlist = Some(id);
+        id
     }
 
     /// Install a queue without reading a single tag.
@@ -700,7 +809,7 @@ impl Player {
     /// and the current track cannot point past the end of a list that shrank.
     fn active_cursor(&self) -> Option<usize> {
         let path = self.now_playing.as_ref()?.path.clone();
-        self.active_list.iter().position(|song| *song == path)
+        self.active_list().iter().position(|song| *song == path)
     }
 
     fn next(&mut self) -> Vec<Event> {
@@ -718,24 +827,26 @@ impl Player {
     }
 
     fn next_path(&self) -> Option<PathBuf> {
-        if !self.active_list.is_empty() {
-            let len = self.active_list.len();
+        let active = self.active_list();
+        if !active.is_empty() {
+            let len = active.len();
             // A track that is not in the active list counts as "before the
             // first", so `Next` starts at the top rather than at whatever
             // index a stale cursor happened to hold.
             let cursor = self.active_cursor().unwrap_or(len - 1);
-            return Some(self.active_list[(cursor + 1) % len].clone());
+            return Some(active[(cursor + 1) % len].clone());
         }
         let index = self.playing_index?;
         self.queue.get(index + 1).map(|t| t.path.clone())
     }
 
     fn prev_path(&self) -> Option<PathBuf> {
-        if !self.active_list.is_empty() {
-            let len = self.active_list.len();
+        let active = self.active_list();
+        if !active.is_empty() {
+            let len = active.len();
             let cursor = self.active_cursor().unwrap_or(0);
             let prev = if cursor == 0 { len - 1 } else { cursor - 1 };
-            return Some(self.active_list[prev].clone());
+            return Some(active[prev].clone());
         }
         let index = self.playing_index?;
         index
@@ -776,9 +887,10 @@ impl Player {
     fn random_path(&self) -> Option<PathBuf> {
         use rand::Rng;
         let mut rng = rand::thread_rng();
-        if !self.active_list.is_empty() {
-            let index = rng.gen_range(0..self.active_list.len());
-            return Some(self.active_list[index].clone());
+        let active = self.active_list();
+        if !active.is_empty() {
+            let index = rng.gen_range(0..active.len());
+            return Some(active[index].clone());
         }
         if self.queue.is_empty() {
             return None;
@@ -1127,7 +1239,7 @@ mod tests {
     fn the_active_list_takes_priority_over_the_queue() {
         let mut player = player();
         seed_queue(&mut player, &["/a.flac", "/b.flac", "/c.flac", "/d.flac"]);
-        player.active_list = vec![PathBuf::from("/x.flac"), PathBuf::from("/y.flac")];
+        player.open_playlist("Mix", &["/x.flac", "/y.flac"]);
         player.now_playing = Some(NowPlaying {
             path: PathBuf::from("/x.flac"),
             ..now_playing_dummy()
@@ -1140,7 +1252,7 @@ mod tests {
     #[test]
     fn the_active_list_wraps_in_both_directions() {
         let mut player = player();
-        player.active_list = vec![PathBuf::from("/x.flac"), PathBuf::from("/y.flac")];
+        player.open_playlist("Mix", &["/x.flac", "/y.flac"]);
         player.now_playing = Some(NowPlaying {
             path: PathBuf::from("/y.flac"),
             ..now_playing_dummy()
@@ -1156,7 +1268,7 @@ mod tests {
     #[test]
     fn next_from_outside_the_active_list_starts_at_the_top() {
         let mut player = player();
-        player.active_list = vec![PathBuf::from("/x.flac"), PathBuf::from("/y.flac")];
+        player.open_playlist("Mix", &["/x.flac", "/y.flac"]);
         player.now_playing = Some(NowPlaying {
             path: PathBuf::from("/somewhere_else.flac"),
             ..now_playing_dummy()
@@ -1166,12 +1278,15 @@ mod tests {
         assert_eq!(player.prev_path(), Some(PathBuf::from("/y.flac")));
     }
 
+    /// An open playlist with nothing in it is not the same as no playlist:
+    /// both fall back to the queue, but only one of them is a state the user
+    /// can be in, and the store has to return `Some(&[])` for it.
     #[test]
     fn an_empty_active_list_falls_back_to_the_queue() {
         let mut player = player();
         seed_queue(&mut player, &["/a.flac", "/b.flac"]);
         player.playing_index = Some(0);
-        player.active_list = Vec::new();
+        player.open_playlist("Empty", &[]);
 
         assert_eq!(player.next_path(), Some(PathBuf::from("/b.flac")));
     }
@@ -1210,10 +1325,10 @@ mod tests {
     #[test]
     fn shuffle_picks_a_track_inside_the_active_list() {
         let mut player = player();
-        player.active_list = vec![PathBuf::from("/x.flac"), PathBuf::from("/y.flac")];
+        player.open_playlist("Mix", &["/x.flac", "/y.flac"]);
         for _ in 0..20 {
             let pick = player.random_path().expect("a pick");
-            assert!(player.active_list.contains(&pick));
+            assert!(player.active_list().contains(&pick));
         }
     }
 

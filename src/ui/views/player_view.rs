@@ -44,7 +44,7 @@ pub struct PlayerViewParams<'a> {
     pub playlist_state: &'a PlaylistManagerState,
     pub playing_index: Option<usize>,
     pub tracks: &'a [TrackDisplay],
-    pub active_playlist: Option<usize>,
+    pub active_playlist: Option<u64>,
     /// `/` search is active — left-top panel shows filtered results.
     pub search_active: bool,
     pub search_query: &'a str,
@@ -598,11 +598,15 @@ fn render_spectrum_section(f: &mut Frame, area: Rect, params: &PlayerViewParams)
 fn render_song_info(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
     let mut parts: Vec<Span> = Vec::new();
     // Show active playlist name first
-    if let Some(pl_idx) = params.active_playlist {
-        if pl_idx < params.playlist_state.playlists.len() {
-            let pl_name = &params.playlist_state.playlists[pl_idx].name;
+    if let Some(id) = params.active_playlist {
+        if let Some(playlist) = params
+            .playlist_state
+            .playlists
+            .iter()
+            .find(|playlist| playlist.id == id)
+        {
             parts.push(Span::styled(
-                format!(" {} {} ", '🎵', pl_name),
+                format!(" {} {} ", '🎵', playlist.name),
                 Style::default()
                     .fg(params.theme.accent)
                     .add_modifier(Modifier::BOLD),
@@ -1033,7 +1037,11 @@ mod tests {
         PlaylistManagerState {
             playlists: names
                 .iter()
-                .map(|name| PlaylistData {
+                .enumerate()
+                .map(|(index, name)| PlaylistData {
+                    // 1-based, so "the active one" is never the zero the store
+                    // uses to mean "not stored yet".
+                    id: index as u64 + 1,
                     name: (*name).to_string(),
                     songs: Vec::new(),
                 })
@@ -1049,7 +1057,7 @@ mod tests {
         let cache = RefCell::new(None);
         let playlists = state_with_playlists(&["Chill", "Focus"]);
         let mut params = base_params(&theme, &cover_rect, &cache, &playlists, &[]);
-        params.active_playlist = Some(1);
+        params.active_playlist = Some(2); // the id of "Focus"
 
         let out = render_to_string(&params, 100, 30);
 

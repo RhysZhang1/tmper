@@ -187,6 +187,12 @@ impl Daemon {
                 paths: self.player.library_paths(),
             },
         );
+        self.send_to(
+            id,
+            Event::Playlists {
+                playlists: self.player.playlists().to_vec(),
+            },
+        );
     }
 
     pub fn client_left(&mut self, id: u64) {
@@ -513,6 +519,7 @@ mod tests {
         assert!(matches!(rx.try_recv(), Ok(Event::Snapshot(_))));
         assert!(matches!(rx.try_recv(), Ok(Event::Queue { .. })));
         assert!(matches!(rx.try_recv(), Ok(Event::LibraryPaths { .. })));
+        assert!(matches!(rx.try_recv(), Ok(Event::Playlists { .. })));
         (id, rx)
     }
 
@@ -537,7 +544,7 @@ mod tests {
     /// The whole reason a client needs no catch-up protocol: connecting is
     /// itself the catch-up.
     #[test]
-    fn a_new_client_is_told_the_state_the_queue_and_the_paths() {
+    fn a_new_client_is_told_the_state_the_queue_the_paths_and_the_playlists() {
         let mut daemon = daemon();
         let (tx, mut rx) = mailbox();
 
@@ -548,7 +555,8 @@ mod tests {
         assert!(matches!(events.first(), Some(Event::Snapshot(_))));
         assert!(matches!(events.get(1), Some(Event::Queue { .. })));
         assert!(matches!(events.get(2), Some(Event::LibraryPaths { .. })));
-        assert_eq!(events.len(), 3, "and nothing else: {events:?}");
+        assert!(matches!(events.get(3), Some(Event::Playlists { .. })));
+        assert_eq!(events.len(), 4, "and nothing else: {events:?}");
     }
 
     /// Ids are handed out before the handshake finishes and never reused, so a
@@ -951,8 +959,12 @@ mod tests {
         apply(&mut daemon, joined);
         let first: Option<Event> = read_message_async(&mut reader).await.expect("read");
         let second: Option<Event> = read_message_async(&mut reader).await.expect("read");
+        let third: Option<Event> = read_message_async(&mut reader).await.expect("read");
+        let fourth: Option<Event> = read_message_async(&mut reader).await.expect("read");
         assert!(matches!(first, Some(Event::Snapshot(_))));
         assert!(matches!(second, Some(Event::Queue { .. })));
+        assert!(matches!(third, Some(Event::LibraryPaths { .. })));
+        assert!(matches!(fourth, Some(Event::Playlists { .. })));
     }
 
     /// A command written to the socket arrives as a `Request`, and the answer
@@ -966,6 +978,7 @@ mod tests {
         let joined = next(&mut from_client).await;
         apply(&mut daemon, joined);
         // The greeting, so what follows is only the answer.
+        let _: Option<Event> = read_message_async(&mut reader).await.expect("read");
         let _: Option<Event> = read_message_async(&mut reader).await.expect("read");
         let _: Option<Event> = read_message_async(&mut reader).await.expect("read");
         let _: Option<Event> = read_message_async(&mut reader).await.expect("read");

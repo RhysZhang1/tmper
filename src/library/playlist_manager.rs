@@ -7,6 +7,9 @@ use crate::playlist::PlaylistData;
 /// Parse an M3U/M3U8 file into `PlaylistData`. `#EXTINF` titles are parsed
 /// and then dropped — only file paths are kept, matching the app's single
 /// path-based playlist model.
+///
+/// The result carries no id: numbering a playlist is the store's job, and a
+/// parser that invented one could collide with one already in use.
 pub fn import_m3u(path: &Path) -> AppResult<PlaylistData> {
     let content = fs::read_to_string(path)
         .map_err(|e| AppError::Config(format!("Failed to read M3U file: {e}")))?;
@@ -36,7 +39,7 @@ pub fn import_m3u(path: &Path) -> AppResult<PlaylistData> {
         songs.push(abs_path);
     }
 
-    Ok(PlaylistData { name, songs })
+    Ok(PlaylistData { id: 0, name, songs })
 }
 
 pub fn export_m3u(playlist: &PlaylistData, path: &Path) -> AppResult<()> {

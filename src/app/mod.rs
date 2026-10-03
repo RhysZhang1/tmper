@@ -73,7 +73,6 @@ impl Drop for TerminalGuard {
 
 pub(crate) mod handle;
 pub(crate) mod handlers;
-pub(crate) mod persistence;
 pub(crate) mod playback;
 
 pub struct App {
@@ -238,6 +237,17 @@ impl App {
             Event::LibraryPaths { paths } => self.apply_library_paths(paths),
             Event::ScanProgress { scanned, changed } => self.apply_scan_progress(scanned, changed),
             Event::ScanFinished(report) => self.apply_scan_finished(report),
+            Event::Playlists { playlists } => self.apply_playlists(playlists),
+            Event::PlaylistAdded { id, .. } => self.apply_playlist_added(id),
+            Event::PlaylistImported { songs, .. } => {
+                self.ui_state.notification = Some((
+                    format!("Imported: {songs} tracks"),
+                    std::time::Instant::now(),
+                ));
+            }
+            Event::PlaylistsExported { paths, failed } => {
+                self.apply_playlists_exported(paths, failed)
+            }
             Event::Notice { level, message } => {
                 if matches!(level, NoticeLevel::Error) {
                     tracing::warn!("Player notice: {message}");
@@ -265,6 +275,7 @@ impl App {
         player.playing_index = snapshot.playing_index;
         self.ui_state.volume = snapshot.volume;
         self.ui_state.repeat_mode = snapshot.repeat;
+        self.ui_state.active_playlist = snapshot.active_playlist;
         self.ui_state.lyrics.lyrics_offset_ms = snapshot.lyrics_offset_ms;
 
         let path = snapshot.path;
@@ -350,7 +361,8 @@ impl App {
         if let Err(e) = self.player.attach() {
             tracing::warn!("Failed to attach to the player: {e}");
         }
-        self.load_playlists();
+        // The playlists arrive with the greeting, so there is nothing to load
+        // here either.
         if let Some(Command::Play { file: Some(file) }) = cli.command {
             self.dispatch(Request::Play { path: file });
         }
