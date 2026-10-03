@@ -423,7 +423,8 @@ busctl --user list | grep tmper              # 看它有没有占到 org.mpris.M
 | alacritty 0.17.0 | 否 | 否 | 半块字符 |
 
 封面区域会按图片宽高比自动调整，并读取终端上报的单元格像素尺寸来对齐原生图像。单元格
-尺寸在启动时探测一次，结果写在日志里：`grep "cell size" ~/.local/state/tmper/tmper.log`。
+尺寸在启动时探测一次，结果写在日志里：`grep "cell size" ~/.local/state/tmper/tmper.log | tail -1`
+（日志是追加的，保留历次运行，最后一次启动在最下面；超过 1 MiB 时旧内容轮转到 `.log.1`）。
 两个来源都不上报的终端（`tmux` 的部分配置、少数模拟器）会退回 10×20 的假设值，封面比例
 仍然正确但可能小一圈，此时在 `config.toml` 里指定 `cell_px = [宽, 高]` 即可。
 
@@ -432,8 +433,8 @@ busctl --user list | grep tmper              # 看它有没有占到 org.mpris.M
 ——这是 VTE 系终端（GNOME Terminal、xfce4-terminal）和 Alacritty 上的正常路径。
 
 `tmux` / `screen` / `zellij` 下图形协议默认被复用器吞掉，而查询回答可能仍来自底下的真终端，
-所以识别到复用器后**连问都不问**，直接使用字符画（`grep "graphics" …/tmper.log` 可以看到
-这次判断的结果）。
+所以识别到复用器后**连问都不问**，直接使用字符画（`grep "graphics" …/tmper.log | tail -1`
+可以看到这次判断的结果）。
 
 顺带一提，这也是 Konsole 26.08 上能出原生像素封面的原因：它实现了 Kitty 图形协议，但一个
 相关环境变量都不设，靠环境变量判断是认不出来的。

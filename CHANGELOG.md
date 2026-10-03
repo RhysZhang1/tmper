@@ -6,6 +6,16 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### 修复
+
+- **一次性控制命令不再清空界面日志。** `tmper status`、`tmper pause` 这类短命进程此前和 TUI
+  一样用 `File::create` 打开 `tmper.log`，于是正在运行的 TUI 的日志被整个截断——而 README
+  恰恰教用户去那个文件里 `grep` 图形探测结论，一条 `tmper status` 就把它抹掉了。日志改为
+  **追加**；超过 1 MiB 时改名为 `.log.1` 轮转。轮转用改名而不是截断，因为正在运行的客户端
+  仍握着旧文件的 inode 继续写，改名不会让它丢内容。
+
 ## [1.0.0] — 2026-10-03
 
 第一个正式版本。相比之前，最大的变化是**进程边界**：播放器不再住在 TUI 里。

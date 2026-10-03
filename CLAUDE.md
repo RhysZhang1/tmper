@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Terminal music player (codename: **tmper**) — a terminal-native music player for Arch Linux/KDE Plasma. Written in Rust with ratatui TUI framework. Supports multi-format audio decoding, metadata display, cover art, LRC lyrics syncing, spectrum visualizer, playlist management, a SQLite library index, and Vim-style keyboard navigation.
 
-The project is **implemented and working** (~24,800 lines of Rust, 524 tests + 7 device-gated) and is **two processes in one binary**: a long-lived `tmper daemon` that owns the sound, the queue and the library, and a TUI client that attaches to it over a unix socket. Closing the TUI does not stop the music. The daemon also publishes the player on the session bus as an MPRIS2 player, so Plasma media controls, media keys and `playerctl` drive the same state the TUI shows.
+The project is **implemented and working** (~25,200 lines of Rust, 527 tests + 7 device-gated) and is **two processes in one binary**: a long-lived `tmper daemon` that owns the sound, the queue and the library, and a TUI client that attaches to it over a unix socket. Closing the TUI does not stop the music. The daemon also publishes the player on the session bus as an MPRIS2 player, so Plasma media controls, media keys and `playerctl` drive the same state the TUI shows.
 
 The source of truth for the architecture is `DESIGN.md`; `STATUS.md` holds current capabilities/limits/plan; per-session change logs live in `progress/`. All docs (CLAUDE.md / README.md / DESIGN.md / STATUS.md) were reconciled with the code on 2026-10-03.
 
@@ -168,14 +168,15 @@ cargo llvm-cov --all-features --workspace # prints per-module line coverage + a 
 - `cfg(test)` redirects every XDG directory into a per-process `test_root()`, including the runtime dir; nothing in the suite touches the real `~/.local/state/tmper`
 - Logical modules have `#[cfg(test)] mod tests { ... }` inline
 - Tests follow Arrange-Act-Assert pattern; cover normal paths + boundary conditions
-- **Line coverage 89.96%** (measured 2026-10-03 via `cargo llvm-cov`; a few timing-sensitive tests
+- **Line coverage 89.44%** (measured 2026-10-04 via `cargo llvm-cov`; a few timing-sensitive tests
   make this wobble by ~0.3% between runs). What remains is structural, not neglected:
-  `audio/engine.rs` (77% — the six `#[ignore]`d device tests count as uncovered, plus `new` and
-  `play_file` need a real sound card), `audio/output.rs` (65% — `new` opens a device; the headless
-  path is covered), `app/mod.rs` (70% — `TerminalGuard` and the `run` event loop
-  need a real tty; the terminal probe is called from there), `paths.rs` (53% — the non-test XDG
-  branches are not compiled under `cfg(test)`), `player/mpris.rs` (82% — zbus's interface layer
+  `audio/engine.rs` (78% — the six `#[ignore]`d device tests count as uncovered, plus `new` and
+  `play_file` need a real sound card), `audio/output.rs` (66% — `new` opens a device; the headless
+  path is covered), `app/mod.rs` (72% — `TerminalGuard` and the `run` event loop
+  need a real tty; the terminal probe is called from there), `paths.rs` (59% — the non-test XDG
+  branches are not compiled under `cfg(test)`), `player/mpris.rs` (86% — zbus's interface layer
   needs a real session bus; the mapping, the property diff and the setter mirror are all tested),
-  `main.rs` (0% — the binary entry point). The probe's
+  `main.rs` (58% — the entry point and the subscriber setup need a real run; `open_log` is tested
+  directly, which is why it was extracted from `init_logging`). The probe's
   read loop is covered anyway: `query_terminal_on` takes its fd, so the tests drive it over a pipe.
   Do not claim "covered" from test counts alone — run `cargo llvm-cov --all-features --workspace`.

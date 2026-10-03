@@ -410,7 +410,9 @@ Measured on 2026-10-04 across five terminals (method in
 | alacritty 0.17.0 | no | no | half-blocks |
 
 The box is aspect-fitted and aligned using the cell size the terminal reports. That size is
-probed once at startup and logged: `grep "cell size" ~/.local/state/tmper/tmper.log`. Terminals
+probed once at startup and logged: `grep "cell size" ~/.local/state/tmper/tmper.log | tail -1`
+(the log is appended to, so it keeps past runs and the newest one is last; past 1 MiB the old
+contents rotate to `.log.1`). Terminals
 that report neither source fall back to a 10×20 assumption — the aspect stays right but the art
 may be smaller; set `cell_px = [w, h]` in `config.toml` to override.
 

@@ -716,7 +716,11 @@ pub async fn run(&mut self, cli: Cli) -> AppResult<()> {
 | `$XDG_STATE_HOME/tmper/tmper.log` | **客户端** | 界面日志（含图形探测结论） |
 | `$XDG_STATE_HOME/tmper/tmper-daemon.log` | **daemon** | 播放器日志 |
 
-**为什么日志要分两个文件**：`init_logging` 用 `File::create`，每次启动都会**截断**。两个进程共写一个文件，daemon 的历史——包括它临死前解释原因的那几行——会被下一次 `tmper` 抹掉。daemon 因此写自己的 `tmper-daemon.log`。README 让用户 `grep "graphics"` 的图形探测结论在客户端那一个里，位置不变。
+**为什么日志要分两个文件，以及为什么都是追加写**：分文件先是因为历史上用 `File::create`，每次启动都截断——两个进程共写一个文件时，daemon 的历史（包括它临死前解释原因的那几行）会被下一次 `tmper` 抹掉。现在 `open_log` 一律**追加**，不再截断，于是这条理由本身不再成立，但分开仍然值得：两个文件各归各的进程，读的时候不必在一堆「tmper starting...」里分辨谁是谁。README 让用户 `grep "graphics"` 的图形探测结论在客户端那一个里，位置不变。
+
+追加也顺手修掉了同一类问题的下一层：**客户端之间**曾经也互相截断。TUI 正跑着的时候执行 `tmper status`，那个一次性进程会把 TUI 的日志清空——而 README 恰恰教用户去那个文件里 grep 探测结论，一条 `tmper status` 就把它抹了（2026-10-04 实测发现，见 `progress/2026-10-04-terminal-compat-matrix.md`）。追加让短命进程不再毁掉长命进程的记录。
+
+追加去掉了唯一约束文件大小的东西，所以用 `LOG_MAX_BYTES`（1 MiB）补回来，且**用改名而不是截断**：超过上限时旧文件被改名为 `<name>.log.1`，新文件从零开始。正在运行的客户端仍然握着旧 inode 继续写，所以轮转同样不会毁掉活着的日志——如果这里用截断，就等于把刚修掉的 bug 又请回来。
 
 ### 7.2 配置结构
 

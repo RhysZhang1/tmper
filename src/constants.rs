@@ -31,6 +31,19 @@ pub mod runtime {
     /// (Ctrl+d / Ctrl+u move by half of this).
     pub const VISIBLE_ROWS: u16 = 10;
 
+    // ── Logging ──
+
+    /// How large a log file may grow before the next process to open it
+    /// rotates it aside as `<name>.log.1`.
+    ///
+    /// Logs are appended to rather than rewritten, which is what stops a
+    /// one-shot verb from erasing a running client's history — and which also
+    /// removes the only thing that used to bound them. This puts the bound
+    /// back, generously: `info` is the default level and a start-up run writes
+    /// a handful of lines, so a megabyte is many hundreds of runs. The daemon
+    /// keeps its own log to itself and reaches this only after days.
+    pub const LOG_MAX_BYTES: u64 = 1024 * 1024;
+
     // ── Notifications ──
 
     /// How long a mode-change / action notification stays visible (seconds).
