@@ -18,13 +18,15 @@ mod visualizer;
 use clap::Parser;
 use cli::Cli;
 use config::Config;
-use paths::data_dir;
+use paths::state_dir;
 
 #[tokio::main]
 async fn main() -> error::AppResult<()> {
-    let data = data_dir();
-    let _ = std::fs::create_dir_all(&data);
-    let log_file = std::fs::File::create(data.join("tmper.log"))
+    let state = state_dir();
+    let _ = std::fs::create_dir_all(&state);
+    let _ = std::fs::create_dir_all(paths::data_dir());
+    let _ = std::fs::create_dir_all(paths::config_dir());
+    let log_file = std::fs::File::create(state.join("tmper.log"))
         .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
 
     let env_filter = std::env::var("RUST_LOG").unwrap_or_default();
@@ -50,6 +52,7 @@ async fn main() -> error::AppResult<()> {
     tracing::info!("tmper starting...");
 
     let cli = Cli::parse();
+    paths::migrate_legacy_layout();
     Config::ensure_config_file();
     let config = Config::load_or_default();
 

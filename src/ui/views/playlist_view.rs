@@ -260,7 +260,7 @@ pub fn render_playlist_view(
 
     // Notification overlay
     if let Some((ref msg, _)) = state.notification {
-        let popup_w = UnicodeWidthStr::width(msg.as_str()) as u16 + 4;
+        let popup_w = (UnicodeWidthStr::width(msg.as_str()) as u16 + 4).min(area.width);
         let popup_h = 3u16;
         let x = (area.width.saturating_sub(popup_w)) / 2;
         let y = (area.height.saturating_sub(popup_h)) / 2;

@@ -16,6 +16,9 @@ use crate::constants::runtime;
 use crate::lyrics::types::LyricTrack;
 use crate::ui::theme::Theme;
 
+const MIN_TERMINAL_WIDTH: u16 = 30;
+const MIN_TERMINAL_HEIGHT: u16 = 8;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepeatMode {
     Sequential,
@@ -217,6 +220,12 @@ pub fn render(f: &mut Frame, state: &UiState) {
         .visible_rows
         .set(f.area().height.saturating_sub(2) as usize);
 
+    if terminal_is_too_small(f.area()) {
+        state.cover_rect.set((0, 0, 0, 0));
+        render_too_small(f, &state.theme);
+        return;
+    }
+
     // Help overlay — highest priority, always on top
     if state.view.show_help {
         crate::ui::widgets::help_popup::render_help(f, &state.theme, state.view.help_scroll);
@@ -232,7 +241,7 @@ pub fn render(f: &mut Frame, state: &UiState) {
     if should_notify {
         if let Some((ref msg, _)) = &state.notification {
             let area = f.area();
-            let popup_w = (msg.len() as u16 + 4).min(area.width - 4);
+            let popup_w = (msg.len() as u16 + 4).min(area.width.saturating_sub(4));
             let popup_h = 3u16;
             let x = (area.width.saturating_sub(popup_w)) / 2;
             let y = (area.height.saturating_sub(popup_h)) / 2;
@@ -252,8 +261,8 @@ pub fn render(f: &mut Frame, state: &UiState) {
     // Command mode: centered popup overlay
     if state.command_mode {
         let area = f.area();
-        let popup_w = 56u16.min(area.width - 4);
-        let popup_h = 14u16.min(area.height - 4);
+        let popup_w = 56u16.min(area.width.saturating_sub(4));
+        let popup_h = 14u16.min(area.height.saturating_sub(4));
         let x = (area.width.saturating_sub(popup_w)) / 2;
         let y = (area.height.saturating_sub(popup_h)) / 2;
         let popup = Rect::new(x, y, popup_w, popup_h);
@@ -407,6 +416,22 @@ pub fn render(f: &mut Frame, state: &UiState) {
     }
 }
 
+fn terminal_is_too_small(area: Rect) -> bool {
+    area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT
+}
+
+fn render_too_small(f: &mut Frame, theme: &Theme) {
+    let area = f.area();
+    let message = format!(
+        "Terminal too small\n{}×{}  need at least {}×{}",
+        area.width, area.height, MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT
+    );
+    let paragraph = Paragraph::new(message)
+        .style(Style::default().fg(theme.warning))
+        .alignment(ratatui::layout::Alignment::Center);
+    f.render_widget(paragraph, area);
+}
+
 pub fn format_duration(secs: f64) -> String {
     let total_secs = secs as u64;
     let mins = total_secs / 60;
@@ -431,4 +456,44 @@ pub(crate) fn search_matches(tracks: &[TrackDisplay], query: &str) -> Vec<usize>
         })
         .map(|(i, _)| i)
         .collect()
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    #[test]
+    fn tiny_terminal_sizes_render_without_panicking() {
+        for (width, height) in [(1, 1), (3, 3), (20, 5), (29, 7)] {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            let state = UiState::default();
+            terminal
+                .draw(|frame| render(frame, &state))
+                .expect("tiny terminal should render safely");
+        }
+    }
+
+    #[test]
+    fn minimum_supported_size_renders_main_view() {
+        for view in [
+            ViewMode::Player,
+            ViewMode::Library,
+            ViewMode::Lyrics,
+            ViewMode::Visualizer,
+            ViewMode::Playlists,
+            ViewMode::Browser,
+            ViewMode::Settings,
+        ] {
+            let backend = TestBackend::new(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            let mut state = UiState::default();
+            state.view.active_view = view;
+            terminal
+                .draw(|frame| render(frame, &state))
+                .expect("minimum supported terminal should render every view");
+        }
+    }
 }

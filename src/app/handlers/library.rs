@@ -1,9 +1,115 @@
 use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::app::App;
+use crate::library::scanner::{ScanUpdate, ScannedTrack};
 use crate::ui::views::library_view::LibraryPanel;
 
 impl App {
+    pub(crate) fn start_library_scan(&mut self, root: std::path::PathBuf) {
+        let Some(tx) = self.library_scan_tx.clone() else {
+            return;
+        };
+        let known = self
+            .library_db
+            .file_fingerprints_under(&root)
+            .unwrap_or_default();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.library_scan_cancels.push(cancel.clone());
+        self.library_scans_active += 1;
+        self.ui_state.file_browser_state.scan_status = Some("scanning… c: cancel".into());
+        tokio::task::spawn_blocking(move || {
+            crate::library::scanner::scan_incremental(root, known, tx, cancel);
+        });
+    }
+
+    pub(super) fn cancel_library_scan(&mut self) {
+        for cancel in &self.library_scan_cancels {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn handle_scan_update(&mut self, update: ScanUpdate) {
+        match update {
+            ScanUpdate::Track(track) => self.index_scanned_track(*track),
+            ScanUpdate::Progress { scanned, changed } => {
+                self.ui_state.file_browser_state.scan_status =
+                    Some(format!("scanned {scanned}, updated {changed} — c: cancel"));
+            }
+            ScanUpdate::Finished {
+                root,
+                seen,
+                scanned,
+                changed,
+                failed,
+                complete,
+                cancelled,
+            } => {
+                // Prune only when the listing is trustworthy. A partial walk
+                // (unreadable subtree) reports a `seen` that is missing files
+                // which still exist, and deleting those would silently drop
+                // them from the library.
+                let removed = if cancelled || !complete {
+                    0
+                } else {
+                    self.library_db
+                        .delete_missing_under(&root, &seen)
+                        .unwrap_or(0)
+                };
+                self.library_scans_active = self.library_scans_active.saturating_sub(1);
+                if self.library_scans_active == 0 {
+                    self.library_scan_cancels.clear();
+                }
+                let status = if cancelled {
+                    format!("scan cancelled after {scanned} files")
+                } else if !complete {
+                    format!(
+                        "done: {scanned} scanned, {changed} updated, {failed} failed; \
+                         some paths unreadable — nothing removed"
+                    )
+                } else {
+                    format!(
+                        "done: {scanned} scanned, {changed} updated, {removed} removed, {failed} failed"
+                    )
+                };
+                self.ui_state.file_browser_state.scan_status =
+                    Some(if self.library_scans_active > 0 {
+                        format!(
+                            "{status}; {} scan(s) still running — c: cancel",
+                            self.library_scans_active
+                        )
+                    } else {
+                        status
+                    });
+                self.refresh_library_artists();
+            }
+        }
+    }
+
+    fn index_scanned_track(&mut self, track: ScannedTrack) {
+        let info = track.info;
+        let path = info.path.to_string_lossy().to_string();
+        if let Err(error) = self.library_db.upsert(
+            &path,
+            &info.title,
+            info.artist.as_deref(),
+            info.album.as_deref(),
+            info.album_artist.as_deref(),
+            info.track_number,
+            info.disc_number,
+            info.genre.as_deref(),
+            info.year,
+            info.duration.as_secs_f64(),
+            info.bitrate,
+            info.sample_rate,
+            info.channels as u32,
+            &info.codec,
+            track.file_size,
+            track.file_mtime,
+        ) {
+            tracing::warn!("Failed to index {path}: {error}");
+        }
+    }
+
     /// Handle keyboard events in View 2 (Library Browser).
     pub(super) fn handle_library_key(&mut self, key: &KeyEvent) {
         let s = &mut self.ui_state.library_state;
@@ -343,6 +449,75 @@ mod tests {
 
     fn seed_memory_library(app: &mut App) {
         app.library_db = LibraryDb::open_memory().expect("open memory db");
+    }
+
+    /// A partial walk must not prune. `seen` only lists what the walk could
+    /// actually read, so an unreadable subtree would otherwise look like
+    /// "these files disappeared" and every track under it would be deleted
+    /// from the index — while still sitting on disk.
+    #[test]
+    fn test_incomplete_scan_does_not_prune_library() {
+        let mut app = test_app();
+        seed_memory_library(&mut app);
+        insert_track(&app.library_db, "/music/a.flac", "A", "Artist", "Album");
+        insert_track(&app.library_db, "/music/sub/b.flac", "B", "Artist", "Album");
+
+        app.handle_scan_update(ScanUpdate::Finished {
+            root: PathBuf::from("/music"),
+            seen: vec![PathBuf::from("/music/a.flac")],
+            scanned: 1,
+            changed: 0,
+            failed: 0,
+            complete: false,
+            cancelled: false,
+        });
+
+        assert!(
+            app.library_db
+                .get_by_path("/music/sub/b.flac")
+                .unwrap()
+                .is_some(),
+            "an incomplete scan must not delete tracks it could not enumerate"
+        );
+    }
+
+    /// Companion guard: a trustworthy listing still prunes, so the fix above
+    /// cannot silently degrade into "never remove anything".
+    #[test]
+    fn test_complete_scan_prunes_missing_tracks() {
+        let mut app = test_app();
+        seed_memory_library(&mut app);
+        insert_track(&app.library_db, "/music/a.flac", "A", "Artist", "Album");
+        insert_track(
+            &app.library_db,
+            "/music/gone.flac",
+            "Gone",
+            "Artist",
+            "Album",
+        );
+
+        app.handle_scan_update(ScanUpdate::Finished {
+            root: PathBuf::from("/music"),
+            seen: vec![PathBuf::from("/music/a.flac")],
+            scanned: 1,
+            changed: 0,
+            failed: 0,
+            complete: true,
+            cancelled: false,
+        });
+
+        assert!(app
+            .library_db
+            .get_by_path("/music/a.flac")
+            .unwrap()
+            .is_some());
+        assert!(
+            app.library_db
+                .get_by_path("/music/gone.flac")
+                .unwrap()
+                .is_none(),
+            "a complete listing must still prune deleted files"
+        );
     }
 
     // ── Focus navigation ──

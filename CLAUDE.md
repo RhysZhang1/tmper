@@ -6,13 +6,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Terminal music player (codename: **tmper**) — a terminal-native music player for Arch Linux/KDE Plasma. Written in Rust with ratatui TUI framework. Supports multi-format audio decoding, metadata display, cover art, LRC lyrics syncing, spectrum visualizer, playlist management, a SQLite library index, and Vim-style keyboard navigation.
 
-The project is **implemented and working** (~8,200 lines of Rust, 174 tests). The source of truth for the architecture is `DESIGN.md`; per-session change logs live in `progress/`. All docs (CLAUDE.md / README.md / DESIGN.md) were reconciled with the code on 2026-08-03.
+The project is **implemented and working** (~10,900 lines of Rust, 181 tests + 6 device-gated). The source of truth for the architecture is `DESIGN.md`; `STATUS.md` holds current capabilities/limits/plan; per-session change logs live in `progress/`. All docs (CLAUDE.md / README.md / DESIGN.md / STATUS.md) were reconciled with the code on 2026-10-03.
 
 ## Layout
 
-- **Config lives in `<project>/config/`** (NOT XDG). On first run the app copies `config/default.toml` → `config/config.toml`; edit `config/config.toml` thereafter. `keybindings.toml` is optional (hardcoded defaults exist).
-- **Runtime data lives in `<project>/data/`** — `tmper.log`, `state.json` (saved volume/repeat/lyrics-offset, restored at startup), `playlists.json`, `library.db` (SQLite). This dir is gitignored.
-- **Themes live in `themes/<name>.toml`** — 5 real palettes (tokyo-night, dracula, nord, solarized-dark, catppuccin-mocha) loaded by `src/ui/theme.rs`. UI colors come from `UiState.theme`, never hardcoded.
+Everything is XDG-based (`src/paths.rs`); the old project-local `config/` + `data/` layout is migrated automatically on first run (files are copied, originals kept).
+
+- **Config**: `$XDG_CONFIG_HOME/tmper/` (usually `~/.config/tmper/`) — `config.toml`, optional `keybindings.toml` (hardcoded defaults exist), optional `themes/<name>.toml` overrides. The default config and the 5 palettes are compiled into the binary, so an installed binary needs no data files.
+- **Data**: `$XDG_DATA_HOME/tmper/` (usually `~/.local/share/tmper/`) — `library.db` (SQLite + FTS5).
+- **State**: `$XDG_STATE_HOME/tmper/` (usually `~/.local/state/tmper/`) — `state.json` (volume/repeat/lyrics-offset, restored at startup), `playlists.json`, `library.json`, `tmper.log`.
+- Portable/override hook: `TMPER_CONFIG_DIR`, `TMPER_DATA_DIR`, `TMPER_STATE_DIR` env vars.
+- **Themes**: 5 palettes (tokyo-night, dracula, nord, solarized-dark, catppuccin-mocha) embedded via `include_str!` and loaded by `src/ui/theme.rs`; a user copy in `$XDG_CONFIG_HOME/tmper/themes/` wins. UI colors come from `UiState.theme`, never hardcoded.
 
 ## Key Architecture Decisions
 
@@ -24,14 +28,14 @@ The project is **implemented and working** (~8,200 lines of Rust, 174 tests). Th
 ### Concurrency Model
 - **tokio** async runtime in `App::run()`; main loop uses `tokio::select!` over an event channel and a tick interval
 - **Burst-mode input thread**: a background thread `poll()`s crossterm and batch-`read()`s events into an `mpsc::unbounded_channel` of `Vec<CrosstermEvent>`; the loop processes the batch and draws ONCE (handles key auto-repeat without scroll-after-release)
-- Audio decode and seek run on background threads (`tokio::task::spawn_blocking`) feeding a shared `Arc<Sink>` — track switches and seeks don't freeze the UI
+- Audio decode and seek run on background threads (`tokio::task::spawn_blocking`), feeding a **bounded streaming session**: each play/seek opens a new session (fresh `Sink`, incremented generation) and decoding is throttled by backpressure to a ~2s high-water mark, so a long file never decodes fully into memory. Stale sessions are cancelled via flag + generation comparison.
 - FFT analysis runs on its own thread writing into a shared `Arc<Mutex<VecDeque<f32>>>` ring buffer; the UI reads a `Vec<f32>` snapshot each tick
 - UI rendering is read-only over `&UiState`; all mutation happens in `App::handle_event`
 
 ### Audio Pipeline
 ```
 Audio file → Symphonia (format probe + decoder) → PCM f32 samples
-  ├─ Rodio Sink (shared Arc, fed from background thread) → sound card
+  ├─ Rodio Sink (fresh per session, fed from background thread, ~2s prebuffer) → sound card
   └─ Ring buffer → FFT thread → SpectrumProcessor → UiState.visualizer_data
 ```
 
@@ -49,14 +53,14 @@ src/
 ├── metadata/           # lofty tag reader (title/artist/album/cover art)
 ├── lyrics/             # LRC parser + sync engine + types
 ├── visualizer/         # fft.rs, processor.rs, render.rs (block-bar rendering)
-├── library/            # database.rs (SQLite), scanner.rs (test-only), playlist_manager.rs (M3U)
+├── library/            # database.rs (SQLite + FTS5), scanner.rs (incremental directory scan), playlist_manager.rs (M3U)
 ├── ui/                 # theme.rs, mod.rs (UiState + render), cover/, views/ (7), widgets/
 ├── input/              # keymap.rs (bindings), handler.rs (double-key gg/dd), command.rs (:cmd)
 ├── config.rs           # Config structs + load/ensure + clamps (only ~7 live keys)
 ├── event.rs            # AppEvent enum (Key, Tick, Quit, JumpTop, RemoveSelected)
 ├── cli.rs              # clap: `tmper play <file>`
 ├── playlist.rs         # PlaylistData { name, songs: Vec<PathBuf> } — single playlist model
-├── paths.rs            # project_root (CARGO_MANIFEST_DIR in debug, exe-relative in release)
+├── paths.rs            # XDG config/data/state dirs + legacy-layout migration
 ├── constants.rs        # runtime tuning constants (timeouts, buffer sizes, FPS)
 └── error.rs            # AppError (thiserror)
 ```
@@ -67,13 +71,14 @@ src/
 - **Background decode/seek**: heavy work is `spawn_blocking`, results land via shared `Arc` handles; the main thread stays responsive.
 - **Immutable-ish updates**: state structs use `Default` + `..Default::default()`; version counters use `Cell` (`cover_gen`, `visible_rows`).
 - **Error handling**: `AppResult<T>` / `AppError` (thiserror) for public APIs; background-thread errors go to `tracing` logs (never panics).
-- **Config priority**: CLI args > `config/config.toml` > hardcoded defaults. Unknown keys are ignored (no `deny_unknown_fields`).
+- **Config priority**: CLI args > `$XDG_CONFIG_HOME/tmper/config.toml` > compiled-in defaults. Unknown keys are ignored (no `deny_unknown_fields`).
 - **Config reality check**: only `default_volume`, `seek_step_small_secs`, `num_bars`, `frame_rate`, `smoothing`, `theme`, `show_cover_art` are live. Do not re-add speculative keys without a consuming implementation.
 
 ## Known Architectural Debt (do NOT re-litigate without a dedicated plan)
 
 - **Cover art rendering** (`src/ui/cover/mod.rs`): writes Kitty/SIXEL escape sequences directly to stdout outside ratatui's buffer — inherent to native terminal graphics. Now stable: payloads are sent once per change and the protocols are mutually exclusive (see `progress/2026-08-03-cover-refactor.md`). The chafa subprocess runs with `--probe off` — its default OSC 10/11 terminal probe was the root cause of the phantom keys (responses landed on stdin; commit `3a03ac0`). Residual: the half-block fallback still renders underneath a native overlay (cached, acceptable).
-- `tmper play <directory>` (directory playback) is NOT implemented — CLI accepts a single file only.
+- `tmper play <directory>` is NOT implemented — the CLI accepts a single file. Directories enter the library through the file browser instead (`a` scans the highlighted directory incrementally; `c` cancels).
+- **Library ingestion is index-based**: `scan_incremental` prunes the index on a completed walk, so it is gated on a `complete` flag — a partial walk (unreadable subtree) must never prune, and prefix queries must not use `LIKE` (wildcards + ASCII case-insensitivity over-match, and every over-match deletes a real track).
 - MPRIS2, EQ, online lyrics, notifications are not implemented.
 
 ## Dependencies (core)
@@ -91,9 +96,10 @@ cargo build --release
 cargo run -- play <path/to/audio>
 
 # Test
-cargo test                        # all tests (audio tests need an ALSA/Pulse device;
-                                  # CI provides a null device via ~/.asoundrc)
+cargo test                        # default: everything that needs no audio device
 cargo test <test_name>            # single test
+cargo test audio_output_ -- --ignored --test-threads=1   # needs a real/virtual device
+                                  # (CI provides a null ALSA device via ~/.asoundrc)
 
 # Lint & Format
 cargo clippy -- -D warnings
@@ -111,10 +117,11 @@ cargo llvm-cov --all-features --workspace # prints per-module line coverage + a 
 ## Testing Conventions
 
 - Test audio files live in `tests/fixtures/` (`test.wav`, `test.flac`, `test_notags.wav`; regenerate with ffmpeg: `ffmpeg -f lavfi -i "sine=frequency=440:duration=2" -ar 44100 -ac 2 tests/fixtures/test.wav`)
-- Decoder/metadata tests are headless-safe (pure file I/O). App/engine tests construct a real `AudioEngine` and need an audio device — on a headless machine they fail at construction unless a null ALSA device is configured
+- The default suite is **device-free**: App/engine tests build a headless engine (`App::new_headless` → `AudioEngine::new_headless` → `Sink::new_idle()`), so `cargo test` passes with no sound card. Exactly 6 tests touch real output; they are named `audio_output_*` and marked `#[ignore]`
 - Logical modules have `#[cfg(test)] mod tests { ... }` inline
 - Tests follow Arrange-Act-Assert pattern; cover normal paths + boundary conditions
-- **Line coverage 77.81%** (measured 2026-08-13 via `cargo llvm-cov`). `ui/views/*` and
-  `app/handlers/*` now carry unit tests (handlers 87 / views 28 of 174 total); `app/handlers/playlist.rs`
-  at 97%, `ui/views/library_view.rs` at 100%, `ui/views/player_view.rs` at 72%. Do not claim "covered"
-  from test counts alone — run `cargo llvm-cov --all-features --workspace` to measure.
+- **Line coverage 75.55%** (measured 2026-10-03 via `cargo llvm-cov`, after the XDG/streaming merge;
+  a few timing-sensitive tests make this wobble by ~0.3% between runs).
+  The merge added ~880 lines of production code (engine rewrite, scanner, FTS5) against only 7 new
+  tests, so the total dipped from 77.81%. Do not claim "covered" from test counts alone — run
+  `cargo llvm-cov --all-features --workspace` to measure.

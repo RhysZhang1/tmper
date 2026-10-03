@@ -185,6 +185,7 @@ impl App {
         self.fft_cancel_tx = Some(cancel_tx);
 
         let pcm_buf = self.engine.pcm_buffer.clone();
+        let sample_rate = self.engine.sample_rate_handle();
         let fft_data = self.fft_data.clone();
         let num_bars = self.config.visualizer.num_bars as usize;
         let smoothing = self.config.visualizer.smoothing;
@@ -216,7 +217,10 @@ impl App {
                 }
 
                 let magnitudes = analyzer.process(&samples);
-                let bars = processor.process(&magnitudes, runtime::DEFAULT_SAMPLE_RATE);
+                let bars = processor.process(
+                    &magnitudes,
+                    sample_rate.load(std::sync::atomic::Ordering::Relaxed),
+                );
 
                 if let Ok(mut data) = fft_data.lock() {
                     *data = bars;

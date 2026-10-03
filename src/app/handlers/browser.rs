@@ -5,6 +5,27 @@ use crate::ui::views::file_browser_view::{BrowserPanel, FsItem};
 
 impl App {
     pub(super) fn handle_file_browser_key(&mut self, key: &KeyEvent) {
+        if key.code == KeyCode::Char('a') {
+            let root = self.ui_state.file_browser_state.current_dir.clone();
+            if !self
+                .ui_state
+                .file_browser_state
+                .library_paths
+                .contains(&root)
+            {
+                self.ui_state
+                    .file_browser_state
+                    .library_paths
+                    .push(root.clone());
+                self.save_library_paths();
+            }
+            self.start_library_scan(root);
+            return;
+        }
+        if key.code == KeyCode::Char('c') {
+            self.cancel_library_scan();
+            return;
+        }
         let state = &mut self.ui_state.file_browser_state;
         match key.code {
             KeyCode::Tab | KeyCode::Char('l') | KeyCode::Right => {
@@ -74,6 +95,9 @@ impl App {
                     if idx < lib_len {
                         let path = state.library_paths.remove(idx);
                         self.ui_state.player.tracks.retain(|t| t.path != path);
+                        if path.is_dir() {
+                            let _ = self.library_db.delete_missing_under(&path, &[]);
+                        }
                         let new_len = state.library_paths.len();
                         state.selected_library_index = idx.min(new_len.saturating_sub(1));
                         self.save_library_paths();
@@ -115,13 +139,15 @@ impl App {
         let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
         self.ui_state.file_browser_state.current_dir = home;
         self.refresh_file_browser();
-        self.ui_state.file_browser_state.library_paths = self
-            .ui_state
-            .player
-            .tracks
-            .iter()
-            .map(|t| t.path.clone())
-            .collect();
+        if self.ui_state.file_browser_state.library_paths.is_empty() {
+            self.ui_state.file_browser_state.library_paths = self
+                .ui_state
+                .player
+                .tracks
+                .iter()
+                .map(|track| track.path.clone())
+                .collect();
+        }
     }
 
     pub(super) fn refresh_file_browser(&mut self) {
@@ -145,12 +171,7 @@ impl App {
                     items.push(FsItem::Dir(name));
                 } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                     let ext_lower = ext.to_lowercase();
-                    if [
-                        "mp3", "flac", "ogg", "opus", "wav", "aac", "m4a", "ape", "wv", "aiff",
-                        "wma",
-                    ]
-                    .contains(&ext_lower.as_str())
-                    {
+                    if crate::library::scanner::AUDIO_EXTENSIONS.contains(&ext_lower.as_str()) {
                         let name = path
                             .file_name()
                             .and_then(|n| n.to_str())
