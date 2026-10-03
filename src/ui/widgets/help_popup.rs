@@ -154,7 +154,11 @@ fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         sec(theme, "▎视图 6 — 文件管理器"),
         key(theme, "h / l / Tab", "切换曲库路径与文件系统焦点"),
         key(theme, "Enter(文件夹)", "进入文件夹"),
-        key(theme, "Enter(音频)", "添加单个文件并立即播放"),
+        key(
+            theme,
+            "Enter(音频)",
+            "添加单个文件并播放（已在库中则无动作）",
+        ),
         key(theme, "Enter(曲库路径)", "移除该曲库路径及其索引"),
         key(theme, "a", "添加当前目录并启动增量扫描"),
         key(theme, "c", "取消后台目录扫描"),
@@ -257,6 +261,54 @@ fn grey(theme: &Theme, text: &str) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// Draw the overlay and flatten the buffer. CJK is rendered as a character
+    /// plus a continuation cell, so assertions on Chinese text have to be
+    /// per-character — `contains("帮助")` never matches.
+    fn render_to_string(width: u16, height: u16, scroll: usize) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|f| render_help(f, &Theme::default(), scroll))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn render_help_draws_the_title_and_the_close_hint() {
+        let out = render_to_string(80, 24, 0);
+
+        assert!(out.contains('帮'), "title rendered");
+        assert!(out.contains("Esc"), "close hint rendered");
+    }
+
+    #[test]
+    fn render_help_scrolls_and_clamps_past_the_end() {
+        let top = render_to_string(80, 24, 0);
+        let scrolled = render_to_string(80, 24, 5);
+        assert_ne!(top, scrolled, "a scroll offset changes what is shown");
+
+        // Far past the end the offset is clamped: no panic, footer still there.
+        let clamped = render_to_string(80, 24, 10_000);
+        assert!(
+            clamped.contains("Esc"),
+            "the frame survives an absurd scroll"
+        );
+    }
+
+    #[test]
+    fn render_help_survives_a_terminal_smaller_than_its_margins() {
+        for (width, height) in [(1u16, 1u16), (2, 2), (3, 3), (10, 4)] {
+            let _ = render_to_string(width, height, 0);
+        }
+    }
 
     #[test]
     fn help_matches_current_navigation_and_xdg_paths() {

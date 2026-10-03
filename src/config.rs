@@ -148,3 +148,197 @@ impl Default for UiConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The template is what a first run writes to `config.toml`, so it has to
+    /// agree with the compiled-in defaults — otherwise a fresh install and a
+    /// reset one would behave differently. Nothing enforced that before.
+    #[test]
+    fn shipped_template_matches_the_code_defaults() {
+        let template: Config =
+            toml::from_str(include_str!("../config/default.toml")).expect("template parses");
+        let defaults = Config::default();
+
+        assert_eq!(
+            template.playback.default_volume,
+            defaults.playback.default_volume
+        );
+        assert_eq!(
+            template.playback.seek_step_small_secs,
+            defaults.playback.seek_step_small_secs
+        );
+        assert_eq!(template.visualizer.num_bars, defaults.visualizer.num_bars);
+        assert_eq!(
+            template.visualizer.frame_rate,
+            defaults.visualizer.frame_rate
+        );
+        assert_eq!(template.visualizer.smoothing, defaults.visualizer.smoothing);
+        assert_eq!(template.ui.theme, defaults.ui.theme);
+        assert_eq!(template.ui.show_cover_art, defaults.ui.show_cover_art);
+    }
+
+    // ── clamp ──
+
+    /// A zero here divides at runtime, so the floor is the load-bearing part.
+    #[test]
+    fn clamp_raises_hostile_values_to_the_floor() {
+        let mut config = Config {
+            playback: PlaybackConfig {
+                default_volume: -1.0,
+                ..Default::default()
+            },
+            visualizer: VisualizerConfig {
+                num_bars: 0,
+                frame_rate: 0,
+                smoothing: -2.0,
+            },
+            ui: UiConfig::default(),
+        };
+
+        config.clamp();
+
+        assert_eq!(config.playback.default_volume, 0.0);
+        assert_eq!(config.visualizer.num_bars, 1, "0 bars would divide by zero");
+        assert_eq!(
+            config.visualizer.frame_rate, 1,
+            "0 frame rate would divide by zero"
+        );
+        assert_eq!(config.visualizer.smoothing, 0.0);
+    }
+
+    #[test]
+    fn clamp_lowers_values_above_the_ceiling() {
+        let mut config = Config {
+            playback: PlaybackConfig {
+                default_volume: 3.0,
+                ..Default::default()
+            },
+            visualizer: VisualizerConfig {
+                num_bars: 10_000,
+                frame_rate: 10_000,
+                smoothing: 2.0,
+            },
+            ui: UiConfig::default(),
+        };
+
+        config.clamp();
+
+        assert_eq!(config.playback.default_volume, 1.0);
+        assert_eq!(config.visualizer.num_bars, 256);
+        assert_eq!(config.visualizer.frame_rate, 120);
+        assert_eq!(config.visualizer.smoothing, 1.0);
+    }
+
+    #[test]
+    fn clamp_leaves_usable_values_alone() {
+        let mut config = Config::default();
+        let before = config.clone();
+        config.clamp();
+
+        assert_eq!(
+            config.playback.default_volume,
+            before.playback.default_volume
+        );
+        assert_eq!(config.visualizer.num_bars, before.visualizer.num_bars);
+        assert_eq!(config.visualizer.frame_rate, before.visualizer.frame_rate);
+        assert_eq!(config.visualizer.smoothing, before.visualizer.smoothing);
+    }
+
+    // ── Serialization ──
+
+    /// `f32` widens to `f64` when serialized, which exposes its exact binary
+    /// value: this used to write `0.10000000149011612` for a volume of 0.1.
+    /// The file is meant to be hand-edited, so it has to read like one.
+    #[test]
+    fn floats_are_written_at_two_decimals() {
+        let mut config = Config::default();
+        config.playback.default_volume = 0.1;
+        config.visualizer.smoothing = 0.55;
+
+        let text = toml::to_string_pretty(&config).expect("serializes");
+
+        assert!(text.contains("default_volume = 0.1\n"), "got:\n{text}");
+        assert!(text.contains("smoothing = 0.55\n"), "got:\n{text}");
+        assert!(
+            !text.contains("0.10000000149011612"),
+            "the f32 artifact leaked into the file:\n{text}"
+        );
+    }
+
+    /// Rounding must not change the value: the file is read back into `f32`.
+    #[test]
+    fn rounded_floats_round_trip_to_the_same_f32() {
+        for value in [0.0f32, 0.1, 0.35, 0.55, 0.8, 1.0] {
+            let mut config = Config::default();
+            config.playback.default_volume = value;
+            let text = toml::to_string_pretty(&config).expect("serializes");
+            let parsed: Config = toml::from_str(&text).expect("parses");
+            assert_eq!(
+                parsed.playback.default_volume, value,
+                "volume {value} did not survive the round trip"
+            );
+        }
+    }
+
+    #[test]
+    fn every_field_survives_a_round_trip() {
+        let mut config = Config::default();
+        config.playback.default_volume = 0.37;
+        config.playback.seek_step_small_secs = 12;
+        config.visualizer.num_bars = 48;
+        config.visualizer.frame_rate = 60;
+        config.visualizer.smoothing = 0.42;
+        config.ui.theme = "dracula".into();
+        config.ui.show_cover_art = false;
+
+        let text = toml::to_string_pretty(&config).expect("serializes");
+        let parsed: Config = toml::from_str(&text).expect("parses");
+
+        assert_eq!(parsed.playback.default_volume, 0.37);
+        assert_eq!(parsed.playback.seek_step_small_secs, 12);
+        assert_eq!(parsed.visualizer.num_bars, 48);
+        assert_eq!(parsed.visualizer.frame_rate, 60);
+        assert_eq!(parsed.visualizer.smoothing, 0.42);
+        assert_eq!(parsed.ui.theme, "dracula");
+        assert!(!parsed.ui.show_cover_art);
+    }
+
+    // ── Deserialization ──
+
+    /// Every field carries `#[serde(default)]`, so a document that mentions
+    /// only one knob keeps the compiled-in value for the rest. This is the
+    /// same parsing `load_or_default` performs, exercised without the file.
+    #[test]
+    fn a_partial_document_fills_in_the_defaults() {
+        let parsed: Config = toml::from_str("[visualizer]\nnum_bars = 64\n").expect("parses");
+
+        assert_eq!(parsed.visualizer.num_bars, 64);
+        assert_eq!(
+            parsed.visualizer.frame_rate,
+            Config::default().visualizer.frame_rate
+        );
+        assert_eq!(
+            parsed.playback.default_volume,
+            Config::default().playback.default_volume
+        );
+        assert_eq!(parsed.ui.theme, Config::default().ui.theme);
+    }
+
+    #[test]
+    fn an_empty_document_is_all_defaults() {
+        let parsed: Config = toml::from_str("").expect("parses");
+        assert_eq!(parsed.ui.theme, Config::default().ui.theme);
+    }
+
+    /// Unknown keys are ignored rather than rejected, so a config written by
+    /// a newer build still loads.
+    #[test]
+    fn unknown_keys_are_ignored() {
+        let parsed: Config =
+            toml::from_str("[ui]\ntheme = \"nord\"\nsomething_new = 1\n").expect("parses");
+        assert_eq!(parsed.ui.theme, "nord");
+    }
+}

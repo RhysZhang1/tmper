@@ -607,7 +607,10 @@ mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
     use std::path::PathBuf;
+    use std::time::Duration;
 
+    use crate::lyrics::types::{LyricLine, LyricMetadata, LyricTrack};
+    use crate::playlist::PlaylistData;
     use crate::ui::views::playlist_view::PlaylistManagerState;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -770,5 +773,177 @@ mod tests {
         let buf = terminal.backend().buffer();
         let out: String = buf.content().iter().map(|c| c.symbol()).collect();
         assert!(out.contains("(no matches)"), "empty-state message rendered");
+    }
+
+    // ── Panel sections ──
+
+    /// Render the whole view at a fixed size and flatten the buffer to text.
+    fn render_to_string(params: &PlayerViewParams, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|f| render_player_view(f, f.area(), params))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    fn lyric_track(texts: &[&str]) -> LyricTrack {
+        LyricTrack {
+            metadata: LyricMetadata::default(),
+            lines: texts
+                .iter()
+                .enumerate()
+                .map(|(i, text)| LyricLine {
+                    timestamp: Duration::from_secs(i as u64),
+                    text: (*text).to_string(),
+                    word_timestamps: Vec::new(),
+                })
+                .collect(),
+        }
+    }
+
+    fn state_with_playlists(names: &[&str]) -> PlaylistManagerState {
+        PlaylistManagerState {
+            playlists: names
+                .iter()
+                .map(|name| PlaylistData {
+                    name: (*name).to_string(),
+                    songs: Vec::new(),
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_mini_playlist_lists_names_and_flags_the_active_one() {
+        let theme = Theme::default();
+        let cover_rect = Cell::new((0u16, 0u16, 0u16, 0u16));
+        let cache = RefCell::new(None);
+        let playlists = state_with_playlists(&["Chill", "Focus"]);
+        let mut params = base_params(&theme, &cover_rect, &cache, &playlists, &[]);
+        params.active_playlist = Some(1);
+
+        let out = render_to_string(&params, 100, 30);
+
+        assert!(out.contains("Chill"), "first playlist rendered");
+        assert!(out.contains("Focus"), "second playlist rendered");
+    }
+
+    #[test]
+    fn test_lyrics_section_reports_a_track_with_no_lines() {
+        let theme = Theme::default();
+        let cover_rect = Cell::new((0u16, 0u16, 0u16, 0u16));
+        let cache = RefCell::new(None);
+        let playlists = PlaylistManagerState::default();
+        let empty = lyric_track(&[]);
+        let mut params = base_params(&theme, &cover_rect, &cache, &playlists, &[]);
+        params.lyric_track = Some(&empty);
+
+        assert!(render_to_string(&params, 100, 30).contains("No lyrics found"));
+    }
+
+    #[test]
+    fn test_lyrics_section_shows_the_current_line() {
+        let theme = Theme::default();
+        let cover_rect = Cell::new((0u16, 0u16, 0u16, 0u16));
+        let cache = RefCell::new(None);
+        let playlists = PlaylistManagerState::default();
+        let track = lyric_track(&["first", "second", "third"]);
+        let mut params = base_params(&theme, &cover_rect, &cache, &playlists, &[]);
+        params.lyric_track = Some(&track);
+        params.current_lyric_index = 1;
+
+        let out = render_to_string(&params, 100, 30);
+
+        assert!(out.contains("first"), "past line still visible");
+        assert!(out.contains("second"), "current line visible");
+        assert!(out.contains("third"), "upcoming line visible");
+    }
+
+    /// With more lines than fit, the window follows the cursor instead of
+    /// always showing the top of the song.
+    #[test]
+    fn test_lyrics_section_scrolls_to_keep_the_current_line_visible() {
+        let theme = Theme::default();
+        let cover_rect = Cell::new((0u16, 0u16, 0u16, 0u16));
+        let cache = RefCell::new(None);
+        let playlists = PlaylistManagerState::default();
+        let lines: Vec<String> = (0..60).map(|i| format!("line{i:02}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let track = lyric_track(&refs);
+        let mut params = base_params(&theme, &cover_rect, &cache, &playlists, &[]);
+        params.lyric_track = Some(&track);
+        params.current_lyric_index = 50;
+
+        let out = render_to_string(&params, 100, 30);
+
+        assert!(out.contains("line50"), "the current line is on screen");
+        assert!(
+            !out.contains("line00"),
+            "the window has scrolled away from the start"
+        );
+    }
+
+    #[test]
+    fn test_song_info_renders_each_metadata_slot() {
+        let theme = Theme::default();
+        let cover_rect = Cell::new((0u16, 0u16, 0u16, 0u16));
+        let cache = RefCell::new(None);
+        let playlists = PlaylistManagerState::default();
+        let mut params = base_params(&theme, &cover_rect, &cache, &playlists, &[]);
+        params.album = "Blues";
+        params.genre = "Jazz";
+        params.year = "1999";
+        params.codec = "flac";
+
+        let out = render_to_string(&params, 100, 30);
+
+        assert!(out.contains("Blues"));
+        assert!(out.contains("Jazz"));
+        assert!(out.contains("1999"));
+        assert!(out.contains("FLAC"), "codec is upper-cased");
+    }
+
+    #[test]
+    fn test_control_bar_shows_progress_and_volume() {
+        let theme = Theme::default();
+        let cover_rect = Cell::new((0u16, 0u16, 0u16, 0u16));
+        let cache = RefCell::new(None);
+        let playlists = PlaylistManagerState::default();
+        let mut params = base_params(&theme, &cover_rect, &cache, &playlists, &[]);
+        params.is_playing = true;
+        params.position = 50.0;
+        params.duration = 100.0;
+        params.volume = 0.4;
+
+        let out = render_to_string(&params, 100, 30);
+
+        assert!(out.contains("00:50"), "position rendered");
+        assert!(out.contains("01:40"), "duration rendered");
+        assert!(out.contains("Vol:40%"));
+        assert!(out.contains('▶'), "playing icon");
+        assert!(out.contains('█'), "filled part of the bar");
+        assert!(out.contains('░'), "empty part of the bar");
+    }
+
+    #[test]
+    fn test_control_bar_without_a_duration_is_empty_not_a_division_by_zero() {
+        let theme = Theme::default();
+        let cover_rect = Cell::new((0u16, 0u16, 0u16, 0u16));
+        let cache = RefCell::new(None);
+        let playlists = PlaylistManagerState::default();
+        let mut params = base_params(&theme, &cover_rect, &cache, &playlists, &[]);
+        params.duration = 0.0;
+
+        let out = render_to_string(&params, 100, 30);
+
+        assert!(out.contains('░'), "bar renders, entirely unfilled");
+        assert!(!out.contains('█'), "nothing filled without a duration");
     }
 }
