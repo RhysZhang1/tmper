@@ -1218,4 +1218,121 @@ mod tests {
         app.ui_state.playlist_state.expanded_playlist = None;
         assert_eq!(app.sidebar_line_count(), 2);
     }
+
+    // ── AppEvent dispatch ──
+
+    /// `gg` arrives as an event rather than a key, so this arm is only
+    /// reachable through the double-key handler.
+    #[test]
+    fn jump_top_resets_the_selection_and_the_scroll() {
+        let mut app = test_app();
+        seed_tracks(&mut app, 10);
+        app.ui_state.player.selected_index = 7;
+        app.ui_state.player.scroll_offset = 5;
+
+        app.handle_event(AppEvent::JumpTop);
+
+        assert_eq!(app.ui_state.player.selected_index, 0);
+        assert_eq!(app.ui_state.player.scroll_offset, 0);
+    }
+
+    // ── Help overlay keys ──
+
+    #[test]
+    fn help_overlay_scrolls_with_j_and_k() {
+        let mut app = test_app();
+        app.ui_state.view.show_help = true;
+
+        press_char(&mut app, 'j');
+        press_char(&mut app, 'j');
+        assert_eq!(app.ui_state.view.help_scroll, 2);
+
+        press_char(&mut app, 'k');
+        assert_eq!(app.ui_state.view.help_scroll, 1);
+    }
+
+    /// Scrolling above the top saturates — the overlay must not wrap around.
+    #[test]
+    fn help_overlay_scroll_saturates_at_the_top() {
+        let mut app = test_app();
+        app.ui_state.view.show_help = true;
+
+        for _ in 0..5 {
+            press_char(&mut app, 'k');
+        }
+
+        assert_eq!(app.ui_state.view.help_scroll, 0);
+    }
+
+    #[test]
+    fn closing_the_help_overlay_resets_its_scroll() {
+        let mut app = test_app();
+        press_char(&mut app, '8'); // open
+        assert!(app.ui_state.view.show_help);
+        press_char(&mut app, 'j');
+        press_char(&mut app, 'j');
+        assert_eq!(app.ui_state.view.help_scroll, 2);
+
+        press_char(&mut app, '8'); // close
+
+        assert!(!app.ui_state.view.show_help);
+        assert_eq!(
+            app.ui_state.view.help_scroll, 0,
+            "reopening starts at the top"
+        );
+    }
+
+    #[test]
+    fn escape_closes_the_help_overlay_too() {
+        let mut app = test_app();
+        app.ui_state.view.show_help = true;
+
+        press(&mut app, KeyCode::Esc);
+
+        assert!(!app.ui_state.view.show_help);
+    }
+
+    // ── Tick ──
+
+    /// The spectrum collapses once playback stops instead of freezing on the
+    /// last frame.
+    #[test]
+    fn the_spectrum_decays_when_nothing_is_playing() {
+        let mut app = test_app();
+        app.ui_state.player.is_playing = false;
+        app.ui_state.visualizer_data = vec![1.0, 0.5, 0.2];
+
+        app.handle_event(AppEvent::Tick);
+
+        let bars = &app.ui_state.visualizer_data;
+        assert!(
+            bars[0] < 1.0 && bars[1] < 0.5 && bars[2] < 0.2,
+            "got {bars:?}"
+        );
+    }
+
+    /// Decay snaps to zero below a threshold rather than trailing a hairline
+    /// forever.
+    #[test]
+    fn tiny_bars_snap_to_zero() {
+        let mut app = test_app();
+        app.ui_state.player.is_playing = false;
+        app.ui_state.visualizer_data = vec![0.01];
+
+        app.handle_event(AppEvent::Tick);
+
+        assert_eq!(app.ui_state.visualizer_data, vec![0.0]);
+    }
+
+    /// The settings view edits `config`; the player reads it back on tick.
+    #[test]
+    fn tick_syncs_the_cover_art_flag_from_the_config() {
+        let mut app = test_app();
+        app.ui_state.player.show_cover_art = true;
+        app.config.ui.show_cover_art = false;
+
+        app.handle_event(AppEvent::Tick);
+
+        assert!(!app.ui_state.player.show_cover_art);
+    }
 }
