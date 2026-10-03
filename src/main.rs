@@ -6,6 +6,7 @@ mod error;
 mod event;
 mod ipc;
 mod paths;
+mod player;
 mod playlist;
 
 mod audio;

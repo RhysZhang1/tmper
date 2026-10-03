@@ -1,4 +1,5 @@
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::Event as CrosstermEvent;
@@ -9,19 +10,20 @@ use crossterm::{execute, ExecutableCommand};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use crate::audio::engine::AudioEngine;
 use crate::cli::{Cli, Command};
 use crate::config::Config;
 use crate::constants::runtime;
 use crate::event::AppEvent;
 use crate::input::handler::KeyHandler;
 use crate::input::keymap::{self, KeyBindings};
+use crate::ipc::proto::{Event, NoticeLevel, Request};
 use crate::library::database::LibraryDb;
 use crate::library::scanner::ScanUpdate;
 use crate::ui::cover::{CoverParams, CoverRenderer};
 use crate::ui::theme::Theme;
-use crate::ui::{self, PlayerCore, UiState};
-use serde::{Deserialize, Serialize};
+use crate::ui::{self, PlayerCore, TrackDisplay, UiState};
+
+use self::handle::PlayerHandle;
 
 /// Owns the terminal while the TUI is active and restores it on every exit
 /// path, including early returns and unwinding panics.
@@ -71,6 +73,7 @@ impl Drop for TerminalGuard {
     }
 }
 
+pub(crate) mod handle;
 pub(crate) mod handlers;
 pub(crate) mod persistence;
 pub(crate) mod playback;
@@ -78,49 +81,46 @@ pub(crate) mod playback;
 pub struct App {
     config: Config,
     ui_state: UiState,
-    engine: AudioEngine,
+    /// The player, wherever it lives: in this process, or behind a socket in
+    /// the daemon. `App` never touches an `AudioEngine` directly — every
+    /// command goes out as a [`Request`] and every fact comes back as an
+    /// [`Event`], which is what makes the two deployments the same code.
+    player: Box<dyn PlayerHandle>,
     should_quit: bool,
     key_handler: KeyHandler,
     key_bindings: KeyBindings,
-    fft_cancel_tx: Option<tokio::sync::watch::Sender<()>>,
     library_db: LibraryDb,
-    fft_data: Arc<Mutex<Vec<f32>>>,
+    /// The newest spectrum frame pushed by the player.
+    player_bars: Vec<f32>,
     cover_renderer: CoverRenderer,
     last_seek_time: Option<std::time::Instant>,
     library_scan_tx: Option<tokio::sync::mpsc::UnboundedSender<ScanUpdate>>,
     library_scan_cancels: Vec<Arc<std::sync::atomic::AtomicBool>>,
     library_scans_active: usize,
-}
-
-/// Persisted on exit, restored at startup.
-///
-/// Every setting is optional: a `state.json` written by an older build (or
-/// truncated mid-write) used to fail to deserialize as a whole, and the app
-/// silently dropped *all* of it — volume, repeat mode and lyric offset
-/// together. Missing fields now fall back to whatever the config already
-/// provided, and a present field is still restored.
-#[derive(Serialize, Deserialize)]
-struct SavedState {
-    volume: Option<f32>,
-    repeat_mode: Option<crate::ui::RepeatMode>,
-    lyrics_offset_ms: Option<i64>,
-    /// Recorded for reference only — startup deliberately does not resume
-    /// playback (see `load_state`).
-    last_track_path: Option<String>,
+    /// The track the client has already done its per-path work for. Cover art
+    /// and lyrics are read from the file by the client, not shipped over the
+    /// socket; this is what notices that the path changed and the work is due.
+    loaded_track: Option<PathBuf>,
 }
 
 impl App {
     pub fn new(config: &Config) -> crate::error::AppResult<Self> {
-        let engine = AudioEngine::new()?;
-        Self::with_engine(config, engine)
+        let player = crate::player::Player::new(config)?;
+        Self::with_player(config, Box::new(handle::LocalHandle::new(player)))
     }
 
+    /// Device-free app for tests: the player is in-process but silent.
     #[cfg(test)]
     pub(crate) fn new_headless(config: &Config) -> crate::error::AppResult<Self> {
-        Self::with_engine(config, AudioEngine::new_headless())
+        let player = crate::player::Player::new_headless(config);
+        Self::with_player(config, Box::new(handle::LocalHandle::new(player)))
     }
 
-    fn with_engine(config: &Config, engine: AudioEngine) -> crate::error::AppResult<Self> {
+    /// Build an app around any handle — the seam the socket client plugs into.
+    pub fn with_player(
+        config: &Config,
+        player: Box<dyn PlayerHandle>,
+    ) -> crate::error::AppResult<Self> {
         let library_db = LibraryDb::open(&crate::paths::data_dir().join("library.db"))
             .unwrap_or_else(|_| LibraryDb::open_memory().expect("in-memory db"));
         let key_bindings = KeyBindings::load();
@@ -136,24 +136,165 @@ impl App {
                 },
                 ..Default::default()
             },
-            engine,
+            player,
             should_quit: false,
             key_handler: KeyHandler::new(runtime::KEY_TIMEOUT_MS, quit_key),
             key_bindings,
             library_db,
-            fft_cancel_tx: None,
-            fft_data: Arc::new(Mutex::new(Vec::new())),
+            player_bars: Vec::new(),
             cover_renderer: CoverRenderer::new(),
             last_seek_time: None,
             library_scan_tx: None,
             library_scan_cancels: Vec::new(),
             library_scans_active: 0,
+            loaded_track: None,
         };
         // Persisted state is restored by `run`, not here: constructing an App
         // must stay free of side effects that depend on files on disk. Tests
         // build Apps constantly, and reading `state.json` at construction made
         // one test's saved state leak into every App built afterwards.
         Ok(app)
+    }
+
+    /// The in-process player, for tests that assert on what the wire
+    /// deliberately does not carry. Panics for a socket handle, which no test
+    /// builds.
+    #[cfg(test)]
+    pub(crate) fn player(&self) -> &crate::player::Player {
+        self.player.local().expect("tests run with a LocalHandle")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn player_mut(&mut self) -> &mut crate::player::Player {
+        self.player
+            .local_mut()
+            .expect("tests run with a LocalHandle")
+    }
+
+    /// Give the player a queue of paths that need not exist, then mirror it
+    /// into the UI the way the player's own `Event::Queue` would.
+    #[cfg(test)]
+    pub(crate) fn seed_queue(&mut self, paths: &[&str]) {
+        let tracks: Vec<crate::ipc::proto::QueueTrack> = paths
+            .iter()
+            .map(|p| crate::ipc::proto::QueueTrack {
+                path: PathBuf::from(p),
+                title: p.to_string(),
+                artist: "Artist".into(),
+                duration_secs: 3.0,
+            })
+            .collect();
+        let (rev, tracks) = {
+            let player = self.player_mut();
+            player.set_queue(tracks.clone());
+            (player.state().queue_rev, tracks)
+        };
+        self.pump(vec![Event::Queue { rev, tracks }]);
+    }
+
+    /// Silence the in-process player and let its decode task drain. Tests
+    /// only: stopping the music is not something a detached TUI gets to do.
+    #[cfg(test)]
+    pub(crate) fn stop_player(&mut self) {
+        self.dispatch(Request::Stop);
+    }
+
+    /// Send a command to the player and fold whatever comes straight back into
+    /// the UI. A socket handle answers on a later tick; the call is the same.
+    pub(crate) fn dispatch(&mut self, request: Request) {
+        let events = self.player.dispatch(request);
+        self.pump(events);
+    }
+
+    /// Apply a batch of events, in order.
+    pub(crate) fn pump(&mut self, events: Vec<Event>) {
+        for event in events {
+            self.apply_event(event);
+        }
+    }
+
+    /// The one place an [`Event`] becomes UI state.
+    ///
+    /// Both handles converge here, so there is no "the tests take the
+    /// synchronous path and production takes the socket one" divergence to
+    /// hide behind: a bug in this function is a bug in both.
+    pub(crate) fn apply_event(&mut self, event: Event) {
+        match event {
+            Event::Snapshot(snapshot) => self.apply_snapshot(*snapshot),
+            Event::Queue { tracks, .. } => {
+                self.ui_state.player.tracks = tracks
+                    .into_iter()
+                    .map(|t| TrackDisplay {
+                        path: t.path,
+                        title: t.title,
+                        artist: t.artist,
+                        duration_secs: t.duration_secs,
+                    })
+                    .collect();
+            }
+            Event::Visualizer { bars } => self.player_bars = bars,
+            Event::Notice { level, message } => {
+                if matches!(level, NoticeLevel::Error) {
+                    tracing::warn!("Player notice: {message}");
+                }
+                self.ui_state.notification = Some((message, std::time::Instant::now()));
+            }
+            Event::Bye => self.should_quit = true,
+            Event::Welcome { .. } => {}
+        }
+    }
+
+    /// Mirror the player's state into the UI, and do the per-track work the
+    /// client kept for itself (cover art, lyrics) when the track changed.
+    fn apply_snapshot(&mut self, snapshot: crate::ipc::proto::StateSnapshot) {
+        let player = &mut self.ui_state.player;
+        player.is_playing = snapshot.status.is_active();
+        player.title = snapshot.title;
+        player.artist = snapshot.artist;
+        player.album = snapshot.album;
+        player.genre = snapshot.genre;
+        player.year = snapshot.year;
+        player.codec = snapshot.codec;
+        player.duration = snapshot.duration_secs;
+        player.position = snapshot.position_secs;
+        player.playing_index = snapshot.playing_index;
+        self.ui_state.volume = snapshot.volume;
+        self.ui_state.repeat_mode = snapshot.repeat;
+        self.ui_state.lyrics.lyrics_offset_ms = snapshot.lyrics_offset_ms;
+
+        let path = snapshot.path;
+        if path != self.loaded_track {
+            self.loaded_track = path.clone();
+            // A new track dismisses the overlays and resets the transient
+            // playback fields; there is nothing to carry over from the last
+            // one. (Auto-advance used to do this; a manual jump wants it just
+            // as much.)
+            self.ui_state.player.reset_on_track_change();
+            self.ui_state.view.reset_on_track_change();
+            if let Some(path) = path {
+                // A new track: the client reads the file's cover art (and its
+                // lyrics) itself. The bytes never cross the socket — and the
+                // generation bump is what tells the cover renderer to send a
+                // fresh payload, exactly as it did when playback was local.
+                self.ui_state.player.cover_art = crate::metadata::reader::read_metadata(&path)
+                    .ok()
+                    .and_then(|info| info.cover_art)
+                    .map(Arc::new);
+                self.ui_state
+                    .player
+                    .cover_gen
+                    .set(self.ui_state.player.cover_gen.get() + 1);
+                if let Some(index) = self.ui_state.player.playing_index {
+                    if index < self.ui_state.player.tracks.len() {
+                        self.ui_state.player.selected_index = index;
+                    }
+                }
+                self.load_lyrics_for_path(&path);
+            } else {
+                self.ui_state.player.cover_art = None;
+            }
+            self.last_seek_time = None;
+        }
     }
 
     /// True while some part of the UI is capturing raw text.
@@ -201,15 +342,22 @@ impl App {
                 .set(rows.saturating_sub(2) as usize);
         }
 
-        // Restore the persisted settings before anything observes them: the
-        // CLI playback below and the first render both read volume/repeat mode.
-        self.load_state();
+        // The persisted settings (volume, repeat, lyric offset) live in the
+        // player's `state.json` now, so there is nothing to restore here: the
+        // player restores its own on attach, and the views render from the
+        // snapshot that follows.
+        if let Err(e) = self.player.attach() {
+            tracing::warn!("Failed to attach to the player: {e}");
+        }
         self.load_library_paths();
         self.load_playlists();
         if let Some(Command::Play { file }) = cli.command {
-            self.load_and_play(&file);
-            self.start_fft();
+            self.dispatch(Request::Play { path: file });
         }
+        // The visualizer stream is subscription-based: nothing computes a
+        // spectrum until a client asks for one, and this client always does.
+        self.dispatch(Request::SubscribeVisualizer { on: true });
+        self.dispatch(Request::GetState);
 
         // ── Burst-mode input ──
         // Instead of EventStream (one event → one draw), use a background
@@ -317,7 +465,11 @@ impl App {
             }
 
             if self.should_quit {
-                self.engine.stop();
+                // Leaving the TUI is not stopping the music. The player
+                // outlives this loop — behind the daemon's socket it is a
+                // different process entirely, and `Event::Bye` (the daemon
+                // saying it is exiting) is the only thing that ends playback
+                // here.
                 break;
             }
 
@@ -371,9 +523,13 @@ impl App {
             }
         }
 
-        // Stop FFT
-        self.fft_cancel_tx = None;
+        // Stop the scanner channel, then tell the player we are leaving — an
+        // in-process player saves its state and lets the device go, a socket
+        // one does nothing at all and keeps playing.
         self.library_scan_tx = None;
+        if let Err(e) = self.player.detach() {
+            tracing::warn!("Failed to detach from the player cleanly: {e}");
+        }
 
         Ok(())
     }
@@ -382,6 +538,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::engine::PlaybackState;
     use crate::config::Config;
     use crate::event::AppEvent;
     use crate::ui::RepeatMode;
@@ -397,7 +554,7 @@ mod tests {
         fn drop(&mut self) {
             // Cancel any background decode task so the tokio runtime
             // can shut down cleanly.
-            self.app.engine.stop();
+            self.app.stop_player();
         }
     }
 
@@ -437,8 +594,11 @@ mod tests {
             self.app.ui_state.repeat_mode
         }
 
+        /// Start a track, exactly as the Enter key does.
         fn load_and_play(&mut self, path: &std::path::Path) {
-            self.app.load_and_play(&path.to_path_buf());
+            self.app.dispatch(Request::Play {
+                path: path.to_path_buf(),
+            });
         }
     }
 
@@ -623,10 +783,12 @@ mod tests {
         ta.load_and_play(&fixture("test.wav"));
         ta.tick();
         assert!(ta.app.ui_state.player.is_playing);
-        ta.app.engine.stop();
-        // Engine-level stop clears engine state; UI state updates in handle_tick
-        assert!(!ta.app.engine.is_playing());
-        assert!(ta.app.engine.duration_secs().is_none());
+        ta.app.stop_player();
+        ta.tick();
+        // The player stops; the UI learns about it from the snapshot the stop
+        // produced, which is the only channel it has.
+        assert!(!ta.app.ui_state.player.is_playing);
+        assert_eq!(ta.app.player().state().status, PlaybackState::Stopped);
     }
 
     // ── P2: Command mode ──

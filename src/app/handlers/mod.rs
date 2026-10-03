@@ -8,6 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::app::App;
 use crate::constants::runtime;
 use crate::event::AppEvent;
+use crate::ipc::proto::Request;
 use crate::ui::theme::Theme;
 use crate::ui::views::playlist_view::{InsertMode, LineTarget, PlaylistFlatModel};
 use crate::ui::{RepeatMode, ViewMode};
@@ -16,7 +17,8 @@ impl App {
     pub(super) fn handle_event(&mut self, event: AppEvent) {
         match event {
             AppEvent::Quit => {
-                self.save_state();
+                // `q` closes the TUI; the music carries on in the player's
+                // own process.
                 self.should_quit = true;
             }
             AppEvent::JumpTop => {
@@ -200,11 +202,14 @@ impl App {
                         {
                             let path = ps.playlists[pl_idx].songs[song_index].clone();
                             self.ui_state.active_playlist = Some(pl_idx);
-                            self.ui_state.active_playlist_song = Some(song_index);
                             self.ui_state.playlist_name = ps.playlists[pl_idx].name.clone();
                             let _ = ps;
                             let _ = model;
-                            self.load_and_play(&path);
+                            // The list first, then the track: the player has
+                            // to know what it is walking before it starts
+                            // walking, or the very first `Next` uses the queue.
+                            self.sync_active_list();
+                            self.dispatch(Request::Play { path });
                             return true;
                         }
                     }
@@ -222,6 +227,7 @@ impl App {
                             }
                             ps.sidebar_selected = new_sel;
                         }
+                        self.sync_active_list();
                         let sidebar_total = self.sidebar_line_count();
                         self.clamp_sidebar_scroll(sidebar_total);
                     }
@@ -300,25 +306,25 @@ impl App {
         let is_up = key.code == KeyCode::Up || self.key_matches(&key, &self.key_bindings.up);
 
         if is_play_pause {
-            if self.engine.is_playing() {
-                self.engine.pause();
-                self.ui_state.player.is_playing = false;
-            } else {
-                self.engine.resume();
-                self.ui_state.player.is_playing = self.engine.is_playing();
-            }
+            // Toggle, not "if I think it is playing then pause": the client's
+            // mirror is one tick old, and two quick presses would both read the
+            // same stale value and do the same thing twice. The player decides.
+            self.dispatch(Request::Toggle);
         } else if is_vol_down {
-            let new_vol = (self.ui_state.volume - runtime::VOLUME_STEP).max(0.0);
-            self.ui_state.volume = new_vol;
-            self.engine.set_volume(new_vol);
+            // Relative on purpose — the keys auto-repeat, and a client that
+            // computed an absolute value from its own mirror would lose steps
+            // under fast repeat.
+            self.dispatch(Request::VolumeStep {
+                delta: -runtime::VOLUME_STEP,
+            });
         } else if is_vol_up {
-            let new_vol = (self.ui_state.volume + runtime::VOLUME_STEP).min(1.0);
-            self.ui_state.volume = new_vol;
-            self.engine.set_volume(new_vol);
+            self.dispatch(Request::VolumeStep {
+                delta: runtime::VOLUME_STEP,
+            });
         } else if is_next {
-            self.next_track();
+            self.dispatch(Request::Next);
         } else if is_prev {
-            self.prev_track();
+            self.dispatch(Request::Prev);
         } else if is_down {
             self.move_selection(1, visible_h);
         } else if is_up {
@@ -340,9 +346,7 @@ impl App {
                         } else {
                             self.config.playback.seek_step_small_secs as f64
                         };
-                        if let Err(e) = self.engine.seek_relative(delta) {
-                            tracing::error!("Seek error: {e}");
-                        }
+                        self.dispatch(Request::SeekRelative { secs: delta });
                         self.last_seek_time = Some(now);
                     }
                 }
@@ -365,23 +369,27 @@ impl App {
                 }
                 // Modes
                 KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.ui_state.lyrics.lyrics_offset_ms = 0;
+                    self.set_lyrics_offset(0);
                 }
                 KeyCode::Char('r') => {
-                    self.ui_state.repeat_mode = match self.ui_state.repeat_mode {
+                    let next = match self.ui_state.repeat_mode {
                         RepeatMode::Sequential => RepeatMode::Shuffle,
                         RepeatMode::Shuffle => RepeatMode::SingleTrack,
                         RepeatMode::SingleTrack => RepeatMode::Sequential,
                     };
-                    let label = self.ui_state.repeat_mode.label().to_string();
+                    // The offset is the client's to choose and the player's to
+                    // persist, so the notification is shown here while the
+                    // value is stored there.
+                    let label = next.label().to_string();
+                    self.set_repeat_mode(next);
                     self.ui_state.notification = Some((label, std::time::Instant::now()));
                 }
                 KeyCode::Enter => self.play_selected(),
                 // Lyrics offset
-                KeyCode::Char('[') => self.ui_state.lyrics.lyrics_offset_ms -= 500,
-                KeyCode::Char(']') => self.ui_state.lyrics.lyrics_offset_ms += 500,
-                KeyCode::Char('{') => self.ui_state.lyrics.lyrics_offset_ms -= 2000,
-                KeyCode::Char('}') => self.ui_state.lyrics.lyrics_offset_ms += 2000,
+                KeyCode::Char('[') => self.nudge_lyrics_offset(-500),
+                KeyCode::Char(']') => self.nudge_lyrics_offset(500),
+                KeyCode::Char('{') => self.nudge_lyrics_offset(-2000),
+                KeyCode::Char('}') => self.nudge_lyrics_offset(2000),
                 // Search
                 // `/` filters the player queue — only meaningful in the
                 // player view.
@@ -464,7 +472,9 @@ impl App {
     fn dispatch_command(&mut self, cmd: crate::input::command::Command) {
         match cmd {
             crate::input::command::Command::Quit => {
-                self.save_state();
+                // Leaving the TUI is not stopping the music: the player is a
+                // separate process, and it stays. `:quit!` is the one that
+                // takes the daemon down with it.
                 self.should_quit = true;
             }
             crate::input::command::Command::Help => {
@@ -481,27 +491,28 @@ impl App {
             }
             crate::input::command::Command::Seek(arg) => {
                 if let Ok(secs) = arg.parse::<f64>() {
-                    let _ = self.engine.seek_relative(secs);
+                    self.dispatch(Request::SeekRelative { secs });
                 }
             }
             crate::input::command::Command::Volume(v) => {
-                let vol = (v as f32) / 100.0;
-                self.ui_state.volume = vol;
-                self.engine.set_volume(vol);
+                self.dispatch(Request::SetVolume {
+                    volume: (v as f32) / 100.0,
+                });
             }
             crate::input::command::Command::Repeat(arg) => {
                 let new_mode = match arg.to_lowercase().as_str() {
-                    "shuffle" | "random" => crate::ui::RepeatMode::Shuffle,
-                    "single" | "one" => crate::ui::RepeatMode::SingleTrack,
-                    _ => crate::ui::RepeatMode::Sequential,
+                    "shuffle" | "random" => RepeatMode::Shuffle,
+                    "single" | "one" => RepeatMode::SingleTrack,
+                    _ => RepeatMode::Sequential,
                 };
-                self.ui_state.repeat_mode = new_mode;
+                self.set_repeat_mode(new_mode);
             }
             crate::input::command::Command::Shuffle(arg) => {
-                self.ui_state.repeat_mode = match arg.to_lowercase().as_str() {
-                    "on" | "true" | "yes" => crate::ui::RepeatMode::Shuffle,
-                    _ => crate::ui::RepeatMode::Sequential,
+                let new_mode = match arg.to_lowercase().as_str() {
+                    "on" | "true" | "yes" => RepeatMode::Shuffle,
+                    _ => RepeatMode::Sequential,
                 };
+                self.set_repeat_mode(new_mode);
             }
             crate::input::command::Command::View(name) => {
                 let view = match name.to_lowercase().as_str() {
@@ -592,23 +603,22 @@ impl App {
             return;
         }
         let idx = self.ui_state.player.selected_index;
-        if idx < self.ui_state.player.tracks.len() {
-            if self.ui_state.player.playing_index == Some(idx) {
-                self.ui_state.player.is_playing = false;
-                self.engine.stop();
-                self.ui_state.player.playing_index = None;
-                self.ui_state.lyrics.lyric_track = None;
-            }
-            self.ui_state.player.tracks.remove(idx);
-            if self.ui_state.player.selected_index >= self.ui_state.player.tracks.len() {
-                self.ui_state.player.selected_index =
-                    self.ui_state.player.tracks.len().saturating_sub(1);
-            }
-            if let Some(pi) = self.ui_state.player.playing_index {
-                if pi > idx {
-                    self.ui_state.player.playing_index = Some(pi - 1);
-                }
-            }
+        if idx >= self.ui_state.player.tracks.len() {
+            return;
+        }
+        // Remove by *path*: the index is a cursor into this client's mirror of
+        // the queue and can be one push stale, while the queue itself holds
+        // unique paths. The player then says what the queue looks like now,
+        // and that answer — not a locally patched list — is what the view
+        // shows.
+        let path = self.ui_state.player.tracks[idx].path.clone();
+        self.dispatch(Request::QueueRemove { path });
+        if self.ui_state.player.playing_index.is_none() {
+            self.ui_state.lyrics.lyric_track = None;
+        }
+        if self.ui_state.player.selected_index >= self.ui_state.player.tracks.len() {
+            self.ui_state.player.selected_index =
+                self.ui_state.player.tracks.len().saturating_sub(1);
         }
     }
 
@@ -626,52 +636,32 @@ impl App {
             }
         }
 
-        let mut track_finished = false;
-        for event in self.engine.drain_events() {
-            match event {
-                crate::audio::engine::PlaybackEvent::Ready { duration_secs, .. } => {
-                    self.ui_state.player.duration = duration_secs;
-                    self.ui_state.player.is_playing = self.engine.is_playing();
-                }
-                crate::audio::engine::PlaybackEvent::Finished => {
-                    track_finished = true;
-                }
-                crate::audio::engine::PlaybackEvent::Failed(message) => {
-                    self.ui_state.player.is_playing = false;
-                    self.ui_state.notification = Some((
-                        format!("Playback failed: {message}"),
-                        std::time::Instant::now(),
-                    ));
-                    tracing::error!("Playback failed: {message}");
+        // Everything the player has to say arrives here — a track that ended
+        // (and the one it moved on to), the position, the spectrum. A socket
+        // handle delivers it on this tick; an in-process one has already
+        // delivered it. Same events either way.
+        // `poll` first, then `tick`: whatever the player has already said, then
+        // this tick's news. A socket handle delivers everything through
+        // `poll`; an in-process one through `tick`. Neither ever needs to know
+        // which it is.
+        let mut events = self.player.poll();
+        events.extend(self.player.tick());
+        self.pump(events);
+
+        let pos = self.ui_state.player.position;
+        if !self.player_bars.is_empty() {
+            self.ui_state.visualizer_data = self.player_bars.clone();
+        } else if !self.ui_state.player.is_playing {
+            // No spectrum and nothing playing: let the bars fall rather than
+            // freezing mid-song, which read as "still playing".
+            let mut bars = self.ui_state.visualizer_data.clone();
+            for v in bars.iter_mut() {
+                *v *= 0.9;
+                if *v < 0.01 {
+                    *v = 0.0;
                 }
             }
-        }
-
-        if track_finished {
-            self.on_track_ended();
-        }
-
-        let pos = self.engine.position_secs();
-        self.ui_state.player.position = pos;
-
-        if let Some(dur) = self.engine.duration_secs() {
-            self.ui_state.player.duration = dur;
-        }
-
-        // Read FFT data
-        if let Ok(data) = self.fft_data.lock() {
-            if !data.is_empty() {
-                self.ui_state.visualizer_data = data.clone();
-            } else if !self.ui_state.player.is_playing {
-                let mut bars = self.ui_state.visualizer_data.clone();
-                for v in bars.iter_mut() {
-                    *v *= 0.9;
-                    if *v < 0.01 {
-                        *v = 0.0;
-                    }
-                }
-                self.ui_state.visualizer_data = bars;
-            }
+            self.ui_state.visualizer_data = bars;
         }
 
         self.sync_lyrics(pos);
@@ -713,9 +703,24 @@ impl App {
 
     // ── Helpers ──
 
-    // ── Helpers moved to app/playback.rs: move_selection, move_scroll,
-    //    play_selected, next_track, prev_track, on_track_ended,
-    //    start_fft, load_lyrics_for_current, sync_lyrics ──
+    /// Set the repeat mode on the player, and mirror it locally so the next
+    /// frame draws the right label without waiting for a snapshot.
+    pub(super) fn set_repeat_mode(&mut self, mode: RepeatMode) {
+        self.ui_state.repeat_mode = mode;
+        self.dispatch(Request::SetRepeat { mode });
+    }
+
+    pub(super) fn set_lyrics_offset(&mut self, ms: i64) {
+        self.ui_state.lyrics.lyrics_offset_ms = ms;
+        self.dispatch(Request::SetLyricsOffset { ms });
+    }
+
+    fn nudge_lyrics_offset(&mut self, delta: i64) {
+        self.set_lyrics_offset(self.ui_state.lyrics.lyrics_offset_ms + delta);
+    }
+
+    // ── Helpers live in app/playback.rs (selection, lyrics) and in
+    //    player/ (next/prev, auto-advance, the FFT thread) ──
 }
 
 #[cfg(test)]
@@ -784,6 +789,12 @@ mod tests {
 
     fn press_ctrl(app: &mut App, code: KeyCode) {
         app.handle_event(AppEvent::Key(ctrl(code)));
+    }
+
+    /// A real file from the fixture set, for the tests that need the player to
+    /// actually open something.
+    fn fixture(name: &str) -> PathBuf {
+        std::fs::canonicalize(format!("tests/fixtures/{name}")).expect("fixture file")
     }
 
     fn seed_tracks(app: &mut App, n: usize) {
@@ -857,26 +868,45 @@ mod tests {
 
     // ── Remove selected ──
 
+    /// Removal goes to the player by path and comes back as a fresh queue —
+    /// the client does not patch its own copy. (The index arithmetic that goes
+    /// with it is the player's, and is tested there.)
     #[test]
-    fn test_remove_selected_adjusts_playing_index() {
+    fn test_remove_selected_drops_the_row() {
         let mut app = test_app();
-        seed_tracks(&mut app, 3);
+        app.seed_queue(&["/music/a.flac", "/music/b.flac", "/music/c.flac"]);
         app.ui_state.player.selected_index = 1;
-        app.ui_state.player.playing_index = Some(2);
+
         app.handle_event(AppEvent::RemoveSelected);
+
         assert_eq!(app.ui_state.player.tracks.len(), 2);
-        assert_eq!(app.ui_state.player.playing_index, Some(1));
-        assert_eq!(app.ui_state.player.selected_index, 1);
+        assert!(
+            !app.ui_state
+                .player
+                .tracks
+                .iter()
+                .any(|t| t.path == std::path::Path::new("/music/b.flac")),
+            "the highlighted row is the one that goes"
+        );
     }
 
-    #[test]
-    fn test_remove_selected_playing_track_stops() {
+    /// Deleting the track that is sounding stops the sound — end to end, with
+    /// a real file, because that is the case that can actually go wrong.
+    #[tokio::test]
+    async fn test_remove_selected_playing_track_stops() {
         let mut app = test_app();
-        seed_tracks(&mut app, 2);
+        app.dispatch(Request::Play {
+            path: fixture("test.wav"),
+        });
+        app.dispatch(Request::QueuePush {
+            path: fixture("test.flac"),
+        });
+        assert!(app.ui_state.player.is_playing);
+        assert_eq!(app.ui_state.player.tracks.len(), 2);
+
         app.ui_state.player.selected_index = 0;
-        app.ui_state.player.playing_index = Some(0);
-        app.ui_state.player.is_playing = true;
         app.handle_event(AppEvent::RemoveSelected);
+
         assert_eq!(app.ui_state.player.tracks.len(), 1);
         assert_eq!(app.ui_state.player.playing_index, None);
         assert!(!app.ui_state.player.is_playing);

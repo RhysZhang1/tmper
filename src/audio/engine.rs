@@ -38,6 +38,15 @@ pub enum PlaybackState {
     Failed(String),
 }
 
+impl PlaybackState {
+    /// The audio clock is running: a track is loading, playing, or being
+    /// seeked to. `Paused` is deliberately *not* active — it is a state the
+    /// user chose, and it is what the transport toggle keys off.
+    pub fn is_active(&self) -> bool {
+        matches!(self, Self::Loading | Self::Playing | Self::Seeking)
+    }
+}
+
 /// Events produced by the active decoder and consumed by the app tick.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlaybackEvent {
@@ -531,13 +540,9 @@ impl AudioEngine {
     }
 
     pub fn is_playing(&self) -> bool {
-        matches!(
-            self.state,
-            PlaybackState::Loading | PlaybackState::Playing | PlaybackState::Seeking
-        )
+        self.state.is_active()
     }
 
-    #[cfg(test)]
     pub fn state(&self) -> &PlaybackState {
         &self.state
     }

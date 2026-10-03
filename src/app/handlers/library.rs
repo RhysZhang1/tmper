@@ -270,7 +270,7 @@ impl App {
                 if s.focused == LibraryPanel::Tracks && s.track_index < s.track_paths.len() {
                     let path = std::path::PathBuf::from(&s.track_paths[s.track_index]);
                     let _ = s;
-                    self.load_and_play(&path);
+                    self.dispatch(crate::ipc::proto::Request::Play { path });
                 }
             }
             _ => {}
@@ -801,7 +801,7 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         assert_eq!(app.ui_state.player.playing_index, Some(0));
         assert_eq!(app.ui_state.player.selected_index, 0);
-        // Stop the engine so the async decode task drains.
-        app.engine.stop();
+        // Stop the player so the async decode task drains.
+        app.stop_player();
     }
 }

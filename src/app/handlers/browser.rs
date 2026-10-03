@@ -119,7 +119,7 @@ impl App {
                             self.refresh_file_browser();
                         } else if !state.library_paths.contains(&path) {
                             state.library_paths.push(path.clone());
-                            self.load_and_play_collect(&path);
+                            self.collect_track(&path);
                             self.save_library_paths();
                         }
                     }

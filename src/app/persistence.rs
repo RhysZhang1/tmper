@@ -1,67 +1,17 @@
-use std::path::PathBuf;
-use std::sync::Arc;
+//! What the *client* persists.
+//!
+//! `state.json` is gone from here — the player owns it now, because volume,
+//! repeat mode and the lyric offset outlive any one TUI. What remains is the
+//! playlist store and the library path list, which the client still owns until
+//! phase 2 hands them to the daemon.
 
 use serde::{Deserialize, Serialize};
 
 use crate::app::App;
-use crate::metadata::reader::read_metadata;
-use crate::ui::TrackDisplay;
+use crate::ipc::proto::Request;
 
 impl App {
-    pub(super) fn save_state(&self) {
-        let state_path = crate::paths::state_dir().join("state.json");
-
-        if let Some(parent) = state_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-
-        let saved = super::SavedState {
-            volume: Some(self.ui_state.volume),
-            repeat_mode: Some(self.ui_state.repeat_mode),
-            lyrics_offset_ms: Some(self.ui_state.lyrics.lyrics_offset_ms),
-            last_track_path: self
-                .ui_state
-                .player
-                .playing_index
-                .and_then(|i| self.ui_state.player.tracks.get(i))
-                .map(|t| t.path.to_string_lossy().to_string()),
-        };
-
-        if let Ok(json) = serde_json::to_string_pretty(&saved) {
-            if let Err(e) = std::fs::write(&state_path, json) {
-                tracing::warn!("Failed to save state: {e}");
-            }
-        }
-    }
-
-    /// Restore persisted playback settings (volume, repeat mode, lyrics
-    /// offset) from `state.json` in the state directory on startup. Silently
-    /// ignores missing or corrupt state — a fresh install must not error out.
-    pub(super) fn load_state(&mut self) {
-        let state_path = crate::paths::state_dir().join("state.json");
-        let Ok(content) = std::fs::read_to_string(&state_path) else {
-            return;
-        };
-        let Ok(saved) = serde_json::from_str::<super::SavedState>(&content) else {
-            tracing::warn!("Ignoring unreadable state.json");
-            return;
-        };
-        // Apply each setting independently so a partial file still restores
-        // what it has; anything absent keeps the config-derived value.
-        if let Some(volume) = saved.volume {
-            self.ui_state.volume = volume;
-            self.engine.set_volume(volume);
-        }
-        if let Some(mode) = saved.repeat_mode {
-            self.ui_state.repeat_mode = mode;
-        }
-        if let Some(offset) = saved.lyrics_offset_ms {
-            self.ui_state.lyrics.lyrics_offset_ms = offset;
-        }
-        tracing::info!("Restored saved state (volume={:.2})", self.ui_state.volume);
-    }
-
-    pub(super) fn save_playlists(&self) {
+    pub(super) fn save_playlists(&mut self) {
         #[derive(Serialize)]
         struct SavePlaylist {
             name: String,
@@ -90,6 +40,11 @@ impl App {
         if let Ok(json) = serde_json::to_string_pretty(&save) {
             let _ = std::fs::write(&path, json);
         }
+        // Every playlist edit lands here, which makes this the one place that
+        // has to tell the player what `Next` should walk. Anything that
+        // reshapes the store and forgets to call this would leave the player
+        // advancing through a list the user has already edited.
+        self.sync_active_list();
     }
 
     pub(super) fn load_playlists(&mut self) {
@@ -117,6 +72,26 @@ impl App {
                 }
             }
         }
+        self.sync_active_list();
+    }
+
+    /// Push the songs of the open playlist to the player.
+    ///
+    /// An index, not the songs, would be the smaller message — and the wrong
+    /// one: the player and the client would then share a cursor into a list
+    /// only one of them can edit. Sending the songs means the player's idea of
+    /// "the list" is a copy taken at a moment the client chose.
+    ///
+    /// An empty list is meaningful: it means no playlist is open, and the
+    /// player falls back to the queue.
+    pub(super) fn sync_active_list(&mut self) {
+        let songs = self
+            .ui_state
+            .active_playlist
+            .and_then(|index| self.ui_state.playlist_state.playlists.get(index))
+            .map(|playlist| playlist.songs.clone())
+            .unwrap_or_default();
+        self.dispatch(Request::SetActiveList { songs });
     }
 
     pub(super) fn save_library_paths(&self) {
@@ -151,7 +126,7 @@ impl App {
                         if pb.is_dir() {
                             self.start_library_scan(pb);
                         } else {
-                            self.load_and_play_collect(&pb);
+                            self.collect_track(&pb);
                         }
                     }
                 }
@@ -159,101 +134,11 @@ impl App {
         }
     }
 
-    pub(super) fn load_and_play_collect(&mut self, path: &std::path::Path) {
-        if let Ok(info) = read_metadata(path) {
-            let title = info.title.clone();
-            let artist = info
-                .artist
-                .clone()
-                .unwrap_or_else(|| "Unknown Artist".into());
-            let duration = info.duration.as_secs_f64();
-            if !self
-                .ui_state
-                .player
-                .tracks
-                .iter()
-                .any(|t| t.path == info.path)
-            {
-                self.ui_state.player.tracks.push(TrackDisplay {
-                    path: info.path.clone(),
-                    title,
-                    artist,
-                    duration_secs: duration,
-                });
-            }
-        }
-    }
-
-    pub(super) fn load_and_play(&mut self, path: &PathBuf) {
-        match read_metadata(path) {
-            Ok(info) => {
-                let title = info.title.clone();
-                let artist = info
-                    .artist
-                    .clone()
-                    .unwrap_or_else(|| "Unknown Artist".into());
-                let duration = info.duration.as_secs_f64();
-
-                if !self
-                    .ui_state
-                    .player
-                    .tracks
-                    .iter()
-                    .any(|t| t.path == info.path)
-                {
-                    self.ui_state.player.tracks.push(TrackDisplay {
-                        path: info.path.clone(),
-                        title: title.clone(),
-                        artist: artist.clone(),
-                        duration_secs: duration,
-                    });
-                }
-
-                if let Some(idx) = self
-                    .ui_state
-                    .player
-                    .tracks
-                    .iter()
-                    .position(|t| t.path == info.path)
-                {
-                    self.ui_state.player.playing_index = Some(idx);
-                    self.ui_state.player.selected_index = idx;
-                }
-
-                let result = self.engine.play_file_async(path);
-                match result {
-                    Ok(()) => {
-                        self.ui_state.player.title = title;
-                        self.ui_state.player.artist = artist;
-                        self.ui_state.player.album = info.album.unwrap_or_default();
-                        self.ui_state.player.genre = info.genre.unwrap_or_default();
-                        self.ui_state.player.year =
-                            info.year.map(|y| y.to_string()).unwrap_or_default();
-                        self.ui_state.player.codec = info.codec.clone();
-                        self.ui_state.player.position = 0.0;
-                        self.ui_state.player.duration = duration;
-                        self.ui_state.player.is_playing = true;
-                        self.ui_state.player.cover_art = info.cover_art.map(Arc::new);
-                        self.ui_state
-                            .player
-                            .cover_gen
-                            .set(self.ui_state.player.cover_gen.get() + 1);
-                        self.engine.set_volume(self.ui_state.volume);
-                        self.load_lyrics_for_current();
-                        self.start_fft();
-                        tracing::info!("Now playing: {:?}", path);
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to play file: {e}");
-                        self.ui_state.player.title = format!("Error: {e}");
-                        self.ui_state.player.is_playing = false;
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::error!("Failed to read metadata: {e}");
-            }
-        }
+    /// Put a file in the player's queue without starting it.
+    pub(super) fn collect_track(&mut self, path: &std::path::Path) {
+        self.dispatch(Request::QueuePush {
+            path: path.to_path_buf(),
+        });
     }
 }
 
@@ -288,85 +173,6 @@ mod tests {
     /// A path that really exists, since both loaders drop entries that do not.
     fn fixture(name: &str) -> PathBuf {
         std::fs::canonicalize(format!("tests/fixtures/{name}")).expect("fixture file")
-    }
-
-    // ── state.json ──
-
-    #[test]
-    fn partial_state_file_restores_what_it_contains() {
-        let _guard = lock();
-        let mut app = test_app();
-        // Values that must survive an absent field.
-        app.ui_state.volume = 0.5;
-        app.ui_state.lyrics.lyrics_offset_ms = 0;
-        app.ui_state.repeat_mode = crate::ui::RepeatMode::Sequential;
-
-        write_state_file("state.json", r#"{"volume": 0.25, "lyrics_offset_ms": 700}"#);
-        app.load_state();
-
-        assert!(
-            (app.ui_state.volume - 0.25).abs() < 1e-6,
-            "present field must be restored, got {}",
-            app.ui_state.volume
-        );
-        assert_eq!(app.ui_state.lyrics.lyrics_offset_ms, 700);
-        assert_eq!(
-            app.ui_state.repeat_mode,
-            crate::ui::RepeatMode::Sequential,
-            "absent field keeps the value the app already had"
-        );
-    }
-
-    #[test]
-    fn state_round_trips_through_the_file() {
-        let _guard = lock();
-        let mut app = test_app();
-        app.ui_state.volume = 0.42;
-        app.ui_state.repeat_mode = crate::ui::RepeatMode::Shuffle;
-        app.ui_state.lyrics.lyrics_offset_ms = -1500;
-        app.save_state();
-
-        // A fresh app starts from config defaults; loading must overwrite them.
-        let mut reloaded = test_app();
-        reloaded.ui_state.volume = 1.0;
-        reloaded.ui_state.repeat_mode = crate::ui::RepeatMode::Sequential;
-        reloaded.ui_state.lyrics.lyrics_offset_ms = 0;
-        reloaded.load_state();
-
-        assert!((reloaded.ui_state.volume - 0.42).abs() < 1e-6);
-        assert_eq!(
-            reloaded.ui_state.repeat_mode,
-            crate::ui::RepeatMode::Shuffle
-        );
-        assert_eq!(reloaded.ui_state.lyrics.lyrics_offset_ms, -1500);
-    }
-
-    /// Reading a state file that is not there is the normal first-run case.
-    #[test]
-    fn a_missing_state_file_leaves_the_app_untouched() {
-        let _guard = lock();
-        let mut app = test_app();
-        app.ui_state.volume = 0.33;
-        let _ = std::fs::remove_file(paths::state_dir().join("state.json"));
-
-        app.load_state();
-
-        assert!((app.ui_state.volume - 0.33).abs() < 1e-6);
-    }
-
-    #[test]
-    fn a_corrupt_state_file_is_ignored_rather_than_fatal() {
-        let _guard = lock();
-        let mut app = test_app();
-        app.ui_state.volume = 0.33;
-        write_state_file("state.json", "{ not json at all");
-
-        app.load_state();
-
-        assert!(
-            (app.ui_state.volume - 0.33).abs() < 1e-6,
-            "unreadable state must not clobber the live value"
-        );
     }
 
     // ── playlists.json ──
@@ -504,5 +310,44 @@ mod tests {
 
         let written = read_state_file("library.json");
         assert!(written.contains(song.to_string_lossy().as_ref()));
+    }
+
+    // ── the active list ──
+
+    /// The player is told which songs to walk, not which playlist index is
+    /// open: an index means nothing on the other side of the socket.
+    #[test]
+    fn the_open_playlist_is_pushed_to_the_player() {
+        let _guard = lock();
+        let song = fixture("test.flac");
+        let mut app = test_app();
+        app.ui_state.playlist_state.playlists = vec![PlaylistData {
+            name: "Mix".into(),
+            songs: vec![song.clone()],
+        }];
+        app.ui_state.active_playlist = Some(0);
+        app.save_playlists();
+
+        assert_eq!(app.player().active_list(), vec![song]);
+    }
+
+    /// Closing the playlist must *clear* the list on the player, or `Next`
+    /// would keep walking a list the user has left.
+    #[test]
+    fn closing_the_playlist_clears_it_on_the_player() {
+        let _guard = lock();
+        let song = fixture("test.flac");
+        let mut app = test_app();
+        app.ui_state.playlist_state.playlists = vec![PlaylistData {
+            name: "Mix".into(),
+            songs: vec![song],
+        }];
+        app.ui_state.active_playlist = Some(0);
+        app.save_playlists();
+        assert_eq!(app.player().active_list().len(), 1);
+
+        app.ui_state.active_playlist = None;
+        app.save_playlists();
+        assert!(app.player().active_list().is_empty());
     }
 }

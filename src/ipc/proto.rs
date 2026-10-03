@@ -104,6 +104,14 @@ pub enum Request {
     QueueRemove {
         path: PathBuf,
     },
+    /// The list that `Next`/`Prev`/auto-advance walk, when the user has one
+    /// open. The client owns the playlist store for now and pushes a copy
+    /// here whenever the active one changes or is edited; an empty list means
+    /// "no active list, use the queue". Phase 2 moves the store itself into
+    /// the daemon and deletes this.
+    SetActiveList {
+        songs: Vec<PathBuf>,
+    },
 
     /// Start or stop the spectrum stream. The daemon runs the FFT thread only
     /// while at least one client is subscribed.
@@ -186,10 +194,6 @@ pub struct StateSnapshot {
     pub playing_index: Option<usize>,
     pub queue_rev: u64,
     pub lyrics_offset_ms: i64,
-    /// Background scans in flight; the client draws a spinner for these. Lives
-    /// here (rather than in its own event) because it is one small integer and
-    /// the tick already carries it.
-    pub scans_active: usize,
 }
 
 impl Default for StateSnapshot {
@@ -210,7 +214,6 @@ impl Default for StateSnapshot {
             playing_index: None,
             queue_rev: 0,
             lyrics_offset_ms: 0,
-            scans_active: 0,
         }
     }
 }
@@ -261,6 +264,12 @@ mod tests {
             Request::QueueRemove {
                 path: PathBuf::from("/music/b.flac"),
             },
+            Request::SetActiveList {
+                songs: vec![
+                    PathBuf::from("/music/a.flac"),
+                    PathBuf::from("/music/b.flac"),
+                ],
+            },
             Request::SubscribeVisualizer { on: true },
             Request::SetFftParams {
                 num_bars: 32,
@@ -299,7 +308,6 @@ mod tests {
                 playing_index: Some(3),
                 queue_rev: 7,
                 lyrics_offset_ms: -500,
-                scans_active: 1,
             })),
             Event::Queue {
                 rev: 7,
