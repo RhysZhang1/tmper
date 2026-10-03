@@ -173,22 +173,20 @@ pub enum Request {
     SearchLibrary {
         query: String,
     },
-    /// Read the tags of any of these paths that are not indexed yet. The
-    /// queue's own paths are indexed too — a track that was played belongs in
-    /// the library whether or not a scan ever saw it.
-    IndexPaths {
-        paths: Vec<PathBuf>,
+    /// Add a directory or a file to the collection: remembered in
+    /// `library.json`, indexed now, and — for a directory — walked
+    /// incrementally. Sent by the browser's `a` key and by picking a file,
+    /// which are the same act with a different root.
+    AddLibraryPath {
+        path: PathBuf,
     },
-    /// Walk a directory into the index, incrementally: files whose size and
-    /// mtime are unchanged are not re-read, and a complete walk prunes what is
-    /// gone from disk. Progress arrives as [`Event::ScanProgress`].
-    ScanLibrary {
-        root: PathBuf,
-    },
+    /// Read the tags of anything the daemon already knows about — its library
+    /// paths and its queue — that is not in the index yet. A track that was
+    /// played belongs in the collection whether or not a scan ever saw it.
+    IndexLibrary,
     /// Stop every running scan at its next file boundary.
     CancelScan,
-    /// Drop a directory from the index, along with the queue entries under
-    /// it. Sent when the user removes a library path: the rows describe files
+    /// Drop a path from the collection, rows and all: the rows describe files
     /// the library no longer claims.
     RemoveLibraryPath {
         root: PathBuf,
@@ -261,6 +259,12 @@ pub enum Event {
     SearchResults {
         query: String,
         tracks: Vec<TrackLine>,
+    },
+    /// The collection's paths, whole, whenever they change — and once to every
+    /// new client, like the queue. `library.json` has one writer, so this is
+    /// what a client renders instead of reading the file.
+    LibraryPaths {
+        paths: Vec<PathBuf>,
     },
     /// A scan is still walking.
     ScanProgress {
@@ -397,12 +401,10 @@ mod tests {
             Request::SearchLibrary {
                 query: "night".into(),
             },
-            Request::IndexPaths {
-                paths: vec![PathBuf::from("/music/a.flac")],
+            Request::AddLibraryPath {
+                path: PathBuf::from("/music"),
             },
-            Request::ScanLibrary {
-                root: PathBuf::from("/music"),
-            },
+            Request::IndexLibrary,
             Request::CancelScan,
             Request::RemoveLibraryPath {
                 root: PathBuf::from("/music"),
@@ -482,6 +484,9 @@ mod tests {
                     // A row whose tags carry no artist: empty, not a stand-in.
                     artist: String::new(),
                 }],
+            },
+            Event::LibraryPaths {
+                paths: vec![PathBuf::from("/music"), PathBuf::from("/more/一首歌.flac")],
             },
             Event::ScanProgress {
                 scanned: 12,

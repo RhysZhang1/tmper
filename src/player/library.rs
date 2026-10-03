@@ -46,6 +46,14 @@ pub enum ScanNotice {
 
 pub struct Library {
     db: LibraryDb,
+    /// The directories and files the user has added, in the order they added
+    /// them. Persisted to `library.json` — which used to be the client's file,
+    /// and is the daemon's now for the same reason the index is: the list and
+    /// the rows it stands for have to move together.
+    paths: Vec<PathBuf>,
+    /// Where `paths` is written. `None` for an index that never touches disk:
+    /// the in-memory fallback, and every test.
+    paths_file: Option<PathBuf>,
     scan_tx: tokio::sync::mpsc::UnboundedSender<ScanUpdate>,
     scan_rx: tokio::sync::mpsc::UnboundedReceiver<ScanUpdate>,
     /// Flags that stop a running walk at its next file boundary.
@@ -59,35 +67,117 @@ pub struct Library {
 }
 
 impl Library {
-    /// The library of a real run: `library.db` in the data dir.
+    /// The library of a real run: `library.db` in the data dir, the path list
+    /// in `library.json` next to the rest of the daemon's state.
     pub fn open() -> Self {
         let path = crate::paths::data_dir().join("library.db");
-        match LibraryDb::open(&path) {
-            Ok(db) => Self::with_db(db),
+        let paths_file = crate::paths::state_dir().join("library.json");
+        let db = match LibraryDb::open(&path) {
+            Ok(db) => db,
             // An index that will not open is not a reason to refuse to play
             // music: fall back to one that lives as long as the process.
             Err(error) => {
                 tracing::error!("Failed to open {}: {error}", path.display());
-                Self::with_db(LibraryDb::open_memory().expect("in-memory library"))
+                LibraryDb::open_memory().expect("in-memory library")
             }
-        }
+        };
+        let mut library = Self::with_db(db, Some(paths_file));
+        library.load_paths();
+        library
     }
 
     /// An index that never touches disk, so no two tests share one.
     #[cfg(test)]
     pub fn in_memory() -> Self {
-        Self::with_db(LibraryDb::open_memory().expect("in-memory library"))
+        Self::with_db(LibraryDb::open_memory().expect("in-memory library"), None)
     }
 
-    fn with_db(db: LibraryDb) -> Self {
+    fn with_db(db: LibraryDb, paths_file: Option<PathBuf>) -> Self {
         let (scan_tx, scan_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             db,
+            paths: Vec::new(),
+            paths_file,
             scan_tx,
             scan_rx,
             cancels: Vec::new(),
             active: 0,
             runtime: None,
+        }
+    }
+
+    // ── The path list ──
+
+    /// The roots the user added. What a scan should walk, and what the browser
+    /// panel lists.
+    pub fn paths(&self) -> &[PathBuf] {
+        &self.paths
+    }
+
+    /// Add a path to the collection. Returns whether it was new — the caller
+    /// scans either way, because adding a path the library already has is how
+    /// the user asks for a fresh walk of it.
+    pub fn add_path(&mut self, path: &Path) -> bool {
+        if self.paths.iter().any(|known| known == path) {
+            return false;
+        }
+        self.paths.push(path.to_path_buf());
+        self.save_paths();
+        true
+    }
+
+    /// Take a path out of the collection, rows and all.
+    pub fn remove_path(&mut self, path: &Path) {
+        let before = self.paths.len();
+        self.paths.retain(|known| known != path);
+        if self.paths.len() != before {
+            self.save_paths();
+        }
+        self.forget(path);
+    }
+
+    fn load_paths(&mut self) {
+        let Some(file) = self.paths_file.clone() else {
+            return;
+        };
+        let Ok(content) = std::fs::read_to_string(&file) else {
+            return;
+        };
+        match serde_json::from_str::<Vec<String>>(&content) {
+            Ok(paths) => {
+                self.paths = paths
+                    .into_iter()
+                    .map(PathBuf::from)
+                    // A path that has left the disk is dropped here rather
+                    // than scanned forever: the two loaders agreed on this
+                    // when the client owned the file, and a stale root is
+                    // still a stale root.
+                    .filter(|path| path.exists())
+                    .collect();
+            }
+            Err(error) => tracing::warn!("Ignoring {}: {error}", file.display()),
+        }
+    }
+
+    fn save_paths(&self) {
+        let Some(file) = self.paths_file.as_ref() else {
+            return;
+        };
+        if let Some(parent) = file.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let paths: Vec<String> = self
+            .paths
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect();
+        match serde_json::to_string_pretty(&paths) {
+            Ok(json) => {
+                if let Err(error) = std::fs::write(file, json) {
+                    tracing::warn!("Failed to write {}: {error}", file.display());
+                }
+            }
+            Err(error) => tracing::warn!("Failed to encode the library paths: {error}"),
         }
     }
 
@@ -568,6 +658,77 @@ mod tests {
             ),
             "unexpected notice: {finished:?}"
         );
+    }
+
+    // ── The path list ──
+
+    /// A private file for one test: the runtime root is per process, so two
+    /// tests sharing a name would read each other's writes.
+    fn paths_file(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("tmper-library-{}-{name}.json", std::process::id()))
+    }
+
+    fn library_with_file(file: &Path) -> Library {
+        Library::with_db(
+            LibraryDb::open_memory().expect("in-memory library"),
+            Some(file.to_path_buf()),
+        )
+    }
+
+    /// A path that has left the disk is dropped on the way in, or every start
+    /// would scan a directory that is not there and list it forever.
+    #[test]
+    fn the_path_list_round_trips_and_drops_what_is_gone() {
+        let file = paths_file("round-trip");
+        let _ = std::fs::remove_file(&file);
+        let directory = std::env::temp_dir().join(format!("tmper-lib-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("temp dir");
+        let song = PathBuf::from("tests/fixtures/test.flac");
+
+        let mut library = library_with_file(&file);
+        assert!(library.add_path(&directory));
+        assert!(library.add_path(&song));
+        assert!(library.add_path(Path::new("/definitely/missing")));
+
+        let mut reloaded = library_with_file(&file);
+        reloaded.load_paths();
+        assert_eq!(reloaded.paths(), [directory.clone(), song.clone()]);
+
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// Adding the same path twice is one entry: the panel lists each root
+    /// once, and a second `a` on it means "scan again", not "two rows".
+    #[test]
+    fn adding_a_path_twice_keeps_one_entry() {
+        let file = paths_file("dedup");
+        let _ = std::fs::remove_file(&file);
+        let mut library = library_with_file(&file);
+
+        assert!(library.add_path(Path::new("/music")));
+        assert!(!library.add_path(Path::new("/music")));
+        assert_eq!(library.paths(), [PathBuf::from("/music")]);
+
+        let _ = std::fs::remove_file(&file);
+    }
+
+    /// Removing a path is the list and the rows together — the browser's
+    /// `Enter` means "this is not my library any more", not "hide the rows".
+    #[test]
+    fn removing_a_path_drops_it_and_its_rows() {
+        let file = paths_file("remove");
+        let _ = std::fs::remove_file(&file);
+        let mut library = library_with_file(&file);
+        seed(&library, "/music/a.flac", "A", "Artist", "Album");
+        library.add_path(Path::new("/music"));
+        assert_eq!(library.paths(), [PathBuf::from("/music")]);
+
+        library.remove_path(Path::new("/music"));
+
+        assert!(library.paths().is_empty());
+        assert!(library.artists().is_empty());
+        let _ = std::fs::remove_file(&file);
     }
 
     impl Library {

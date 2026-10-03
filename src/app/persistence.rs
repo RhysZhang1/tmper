@@ -1,9 +1,9 @@
 //! What the *client* persists.
 //!
-//! `state.json` is gone from here — the player owns it now, because volume,
-//! repeat mode and the lyric offset outlive any one TUI. What remains is the
-//! playlist store and the library path list, which the client still owns until
-//! phase 2 hands them to the daemon.
+//! `state.json` and `library.json` are gone from here — the player owns them
+//! now, because volume, repeat mode, the lyric offset and the collection's
+//! paths outlive any one TUI. What remains is the playlist store, which the
+//! client still owns until the next slice hands it to the daemon.
 
 use serde::{Deserialize, Serialize};
 
@@ -93,53 +93,6 @@ impl App {
             .unwrap_or_default();
         self.dispatch(Request::SetActiveList { songs });
     }
-
-    pub(super) fn save_library_paths(&self) {
-        let path = crate::paths::state_dir().join("library.json");
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let paths: Vec<String> = self
-            .ui_state
-            .file_browser_state
-            .library_paths
-            .iter()
-            .map(|p| p.to_string_lossy().to_string())
-            .collect();
-        if let Ok(json) = serde_json::to_string_pretty(&paths) {
-            let _ = std::fs::write(&path, json);
-        }
-    }
-
-    pub(super) fn load_library_paths(&mut self) {
-        let path = crate::paths::state_dir().join("library.json");
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(paths) = serde_json::from_str::<Vec<String>>(&content) {
-                for p_str in paths {
-                    let pb = std::path::PathBuf::from(&p_str);
-                    if pb.exists() && !self.ui_state.file_browser_state.library_paths.contains(&pb)
-                    {
-                        self.ui_state
-                            .file_browser_state
-                            .library_paths
-                            .push(pb.clone());
-                        if pb.is_dir() {
-                            self.start_library_scan(pb);
-                        } else {
-                            self.collect_track(&pb);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Put a file in the player's queue without starting it.
-    pub(super) fn collect_track(&mut self, path: &std::path::Path) {
-        self.dispatch(Request::QueuePush {
-            path: path.to_path_buf(),
-        });
-    }
 }
 
 #[cfg(test)]
@@ -164,10 +117,6 @@ mod tests {
         let dir = paths::state_dir();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(name), contents).unwrap();
-    }
-
-    fn read_state_file(name: &str) -> String {
-        std::fs::read_to_string(paths::state_dir().join(name)).unwrap()
     }
 
     /// A path that really exists, since both loaders drop entries that do not.
@@ -221,95 +170,6 @@ mod tests {
         app.load_playlists();
 
         assert!(app.ui_state.playlist_state.playlists.is_empty());
-    }
-
-    // ── library.json ──
-
-    #[test]
-    fn library_paths_round_trip_and_skip_missing_entries() {
-        let _guard = lock();
-        let directory = std::env::temp_dir().join(format!("tmper-persist-{}", std::process::id()));
-        std::fs::create_dir_all(&directory).unwrap();
-        let song = fixture("test.flac");
-
-        let mut app = test_app();
-        app.ui_state.file_browser_state.library_paths = vec![
-            directory.clone(),
-            song.clone(),
-            PathBuf::from("/definitely/missing"),
-        ];
-        app.save_library_paths();
-
-        let mut reloaded = test_app();
-        reloaded.load_library_paths();
-
-        let loaded = &reloaded.ui_state.file_browser_state.library_paths;
-        assert!(loaded.contains(&directory), "existing directory restored");
-        assert!(loaded.contains(&song), "existing file restored");
-        assert!(
-            !loaded.iter().any(|p| p.ends_with("missing")),
-            "a path that no longer exists is not restored"
-        );
-        // A file entry is also collected into the player queue.
-        assert!(
-            reloaded
-                .ui_state
-                .player
-                .tracks
-                .iter()
-                .any(|t| t.path == song),
-            "a restored file becomes a playable track"
-        );
-
-        let _ = std::fs::remove_dir_all(&directory);
-    }
-
-    /// The loader appends, so an entry already present must not be added twice.
-    #[test]
-    fn loading_library_paths_does_not_duplicate_entries() {
-        let _guard = lock();
-        let song = fixture("test.flac");
-
-        let mut app = test_app();
-        app.ui_state.file_browser_state.library_paths = vec![song.clone()];
-        app.save_library_paths();
-        // Present before the load, exactly as a running app would have it.
-        app.load_library_paths();
-
-        let occurrences = app
-            .ui_state
-            .file_browser_state
-            .library_paths
-            .iter()
-            .filter(|p| **p == song)
-            .count();
-        assert_eq!(
-            occurrences, 1,
-            "the path is already known; do not add it again"
-        );
-    }
-
-    #[test]
-    fn a_corrupt_library_file_is_ignored() {
-        let _guard = lock();
-        write_state_file("library.json", "{\"not\": \"a list\"}");
-
-        let mut app = test_app();
-        app.load_library_paths();
-
-        assert!(app.ui_state.file_browser_state.library_paths.is_empty());
-    }
-
-    #[test]
-    fn saving_library_paths_writes_the_current_list() {
-        let _guard = lock();
-        let song = fixture("test.flac");
-        let mut app = test_app();
-        app.ui_state.file_browser_state.library_paths = vec![song.clone()];
-        app.save_library_paths();
-
-        let written = read_state_file("library.json");
-        assert!(written.contains(song.to_string_lossy().as_ref()));
     }
 
     // ── the active list ──

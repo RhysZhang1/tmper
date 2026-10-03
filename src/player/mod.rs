@@ -257,19 +257,13 @@ impl Player {
                 tracks: self.library.search(&query),
                 query,
             }],
-            Request::IndexPaths { paths } => {
-                // The queue's own paths go in too: a track the user played is
-                // part of the collection whether or not a scan has seen it.
-                let mut all = paths;
-                all.extend(self.queue.iter().map(|track| track.path.clone()));
-                self.library.ensure_indexed(&all);
-                Vec::new()
+            Request::AddLibraryPath { path } => {
+                let mut events = self.add_library_path(&path);
+                events.push(self.library_paths_event());
+                events
             }
-            Request::ScanLibrary { root } => {
-                // A refusal (no runtime to walk on) is logged, not announced:
-                // to everything the user can see, a scan of nothing and no
-                // scan at all are the same event.
-                self.library.start_scan(&root);
+            Request::IndexLibrary => {
+                self.index_library();
                 Vec::new()
             }
             Request::CancelScan => {
@@ -281,8 +275,8 @@ impl Player {
                 // now, not what the collection claims. A track that is
                 // sounding keeps sounding, and `QueueRemove` is the verb for
                 // taking a row out of the queue.
-                self.library.forget(&root);
-                Vec::new()
+                self.library.remove_path(&root);
+                vec![self.library_paths_event()]
             }
             Request::SubscribeVisualizer { on } => {
                 self.fft_subscribed = on;
@@ -385,11 +379,63 @@ impl Player {
         self.queue.clone()
     }
 
+    /// The collection's paths, as the browser panel lists them.
+    pub fn library_paths(&self) -> Vec<PathBuf> {
+        self.library.paths().to_vec()
+    }
+
+    // ── The collection ──
+
+    /// Remember a path and make the collection true of it right away: a
+    /// directory is walked, a single file is read and put on the deck.
+    ///
+    /// Called by [`Request::AddLibraryPath`] and by [`Player::attach_scanner`]
+    /// for the paths that were already there — the same work either way, and
+    /// deliberately idempotent, because the second call is what a re-add means.
+    ///
+    /// A single file lands in the queue as well, which is the one part of this
+    /// a client has to hear about; the caller forwards what comes back.
+    fn add_library_path(&mut self, path: &Path) -> Vec<Event> {
+        self.library.add_path(path);
+        if path.is_dir() {
+            self.library.start_scan(path);
+            Vec::new()
+        } else {
+            self.library.ensure_indexed(&[path.to_path_buf()]);
+            self.push_to_queue(path)
+        }
+    }
+
+    /// Read the tags of everything the daemon already knows about: the paths
+    /// the user added, and the queue — a track that was played is part of the
+    /// collection whether or not a scan has seen it.
+    fn index_library(&mut self) {
+        let mut paths = self.library.paths().to_vec();
+        paths.extend(self.queue.iter().map(|track| track.path.clone()));
+        self.library.ensure_indexed(&paths);
+    }
+
+    fn library_paths_event(&self) -> Event {
+        Event::LibraryPaths {
+            paths: self.library.paths().to_vec(),
+        }
+    }
+
     /// Hand the scanner a runtime to walk on. Called once, by the daemon: the
     /// client has no business spawning work in the player's process, and a
     /// scan requested without one is refused rather than attempted.
+    ///
+    /// The paths the collection already had are picked up here too, which is
+    /// where the runtime becomes available and therefore the first moment a
+    /// walk can be started. A daemon that comes up with a library re-reads it;
+    /// a client that comes and goes does not restart anything.
     pub fn attach_scanner(&mut self, handle: tokio::runtime::Handle) {
         self.library.attach_scanner(handle);
+        for path in self.library.paths().to_vec() {
+            // Nobody is attached yet, so the events a restored file produces
+            // have no one to go to; a fresh connection is told the queue.
+            let _ = self.add_library_path(&path);
+        }
     }
 
     /// The index, for tests that seed or assert on it directly.
@@ -1290,7 +1336,7 @@ mod tests {
     /// walked its directory — and the client cannot say so, because it does not
     /// know the queue the daemon is holding.
     #[test]
-    fn indexing_paths_also_indexes_the_queue() {
+    fn indexing_the_library_also_indexes_the_queue() {
         let mut player = player();
         player.set_queue(vec![QueueTrack {
             path: fixture("test.wav"),
@@ -1299,7 +1345,7 @@ mod tests {
             duration_secs: 2.0,
         }]);
 
-        player.execute(Request::IndexPaths { paths: Vec::new() });
+        player.execute(Request::IndexLibrary);
 
         let row = player
             .library()
@@ -1308,6 +1354,61 @@ mod tests {
             .expect("query")
             .expect("the queue's track should be indexed");
         assert_eq!(row.title, "test");
+    }
+
+    /// The paths the user added are the daemon's list now, and adding one is
+    /// what makes the collection true of it: a directory is walked, a file is
+    /// read and put on the deck.
+    #[tokio::test]
+    async fn adding_a_path_remembers_it_and_indexes_it() {
+        let mut player = player();
+        let events = player.execute(Request::AddLibraryPath {
+            path: fixture("test.wav"),
+        });
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::LibraryPaths { paths } if paths.len() == 1)),
+            "the list comes back whole: {events:?}"
+        );
+        assert_eq!(player.library_paths(), vec![fixture("test.wav")]);
+        assert_eq!(player.queue().len(), 1, "a picked file joins the queue");
+        assert!(
+            player
+                .library()
+                .db()
+                .get_by_path(&fixture("test.wav").to_string_lossy())
+                .expect("query")
+                .is_some(),
+            "…and the index"
+        );
+
+        // Adding it again does not duplicate it.
+        player.execute(Request::AddLibraryPath {
+            path: fixture("test.wav"),
+        });
+        assert_eq!(player.library_paths().len(), 1);
+        assert_eq!(player.queue().len(), 1);
+    }
+
+    #[test]
+    fn removing_a_path_drops_it_from_the_list_too() {
+        let mut player = player();
+        player.execute(Request::AddLibraryPath {
+            path: PathBuf::from("/music"),
+        });
+        index_track(&mut player, "/music/a.flac", "A", "Artist", "Album");
+
+        let events = player.execute(Request::RemoveLibraryPath {
+            root: PathBuf::from("/music"),
+        });
+
+        assert!(matches!(
+            events.first(),
+            Some(Event::LibraryPaths { paths }) if paths.is_empty()
+        ));
+        assert!(player.library_paths().is_empty());
+        assert!(player.library().artists().is_empty(), "rows are gone too");
     }
 
     /// Forgetting a path is an edit to the collection, not to what is playing:
@@ -1336,10 +1437,11 @@ mod tests {
     #[test]
     fn a_scan_without_a_runtime_is_refused() {
         let mut player = player();
-        player.execute(Request::ScanLibrary {
-            root: PathBuf::from("tests/fixtures"),
+        player.execute(Request::AddLibraryPath {
+            path: PathBuf::from("tests/fixtures"),
         });
         assert_eq!(player.library().scans_active(), 0);
+        assert_eq!(player.library_paths(), [PathBuf::from("tests/fixtures")]);
 
         player.execute(Request::CancelScan); // and cancelling is a no-op
     }
@@ -1349,8 +1451,8 @@ mod tests {
     async fn a_finished_scan_reaches_the_client_as_an_event() {
         let mut player = player();
         player.attach_scanner(tokio::runtime::Handle::current());
-        player.execute(Request::ScanLibrary {
-            root: PathBuf::from("tests/fixtures"),
+        player.execute(Request::AddLibraryPath {
+            path: PathBuf::from("tests/fixtures"),
         });
 
         let report = tokio::time::timeout(std::time::Duration::from_secs(30), async {

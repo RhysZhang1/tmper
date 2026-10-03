@@ -235,6 +235,7 @@ impl App {
                 tracks,
             } => self.apply_library_tracks(artist, album, tracks),
             Event::SearchResults { query, tracks } => self.apply_search_results(query, tracks),
+            Event::LibraryPaths { paths } => self.apply_library_paths(paths),
             Event::ScanProgress { scanned, changed } => self.apply_scan_progress(scanned, changed),
             Event::ScanFinished(report) => self.apply_scan_finished(report),
             Event::Notice { level, message } => {
@@ -349,7 +350,6 @@ impl App {
         if let Err(e) = self.player.attach() {
             tracing::warn!("Failed to attach to the player: {e}");
         }
-        self.load_library_paths();
         self.load_playlists();
         if let Some(Command::Play { file: Some(file) }) = cli.command {
             self.dispatch(Request::Play { path: file });

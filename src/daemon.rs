@@ -158,9 +158,10 @@ impl Daemon {
     }
 
     /// A handshaken client, which is from here on told everything that
-    /// happens. It also needs to hear what already happened: a snapshot and
-    /// the queue are the whole of what a fresh connection has missed, which is
-    /// why reconnecting needs no catch-up protocol.
+    /// happens. It also needs to hear what already happened: a snapshot, the
+    /// queue and the collection's paths are the whole of what a fresh
+    /// connection has missed, which is why reconnecting needs no catch-up
+    /// protocol.
     pub fn client_joined(&mut self, id: u64, tx: mpsc::Sender<Event>) {
         let snapshot = self.player.state();
         let queue_rev = snapshot.queue_rev;
@@ -178,6 +179,12 @@ impl Daemon {
             Event::Queue {
                 rev: queue_rev,
                 tracks: self.player.queue(),
+            },
+        );
+        self.send_to(
+            id,
+            Event::LibraryPaths {
+                paths: self.player.library_paths(),
             },
         );
     }
@@ -497,14 +504,15 @@ mod tests {
         mpsc::channel(runtime::DAEMON_CLIENT_QUEUE)
     }
 
-    /// Attach a client and throw away the snapshot and queue it is greeted
-    /// with, so a test only sees what happens next.
+    /// Attach a client and throw away the greeting — snapshot, queue and
+    /// library paths — so a test only sees what happens next.
     fn attach(daemon: &mut Daemon) -> (u64, mpsc::Receiver<Event>) {
         let (tx, mut rx) = mailbox();
         let id = daemon.reserve_client_id();
         daemon.client_joined(id, tx);
         assert!(matches!(rx.try_recv(), Ok(Event::Snapshot(_))));
         assert!(matches!(rx.try_recv(), Ok(Event::Queue { .. })));
+        assert!(matches!(rx.try_recv(), Ok(Event::LibraryPaths { .. })));
         (id, rx)
     }
 
@@ -529,7 +537,7 @@ mod tests {
     /// The whole reason a client needs no catch-up protocol: connecting is
     /// itself the catch-up.
     #[test]
-    fn a_new_client_is_told_the_state_and_the_queue() {
+    fn a_new_client_is_told_the_state_the_queue_and_the_paths() {
         let mut daemon = daemon();
         let (tx, mut rx) = mailbox();
 
@@ -539,7 +547,8 @@ mod tests {
         let events = drain(&mut rx);
         assert!(matches!(events.first(), Some(Event::Snapshot(_))));
         assert!(matches!(events.get(1), Some(Event::Queue { .. })));
-        assert_eq!(events.len(), 2, "and nothing else: {events:?}");
+        assert!(matches!(events.get(2), Some(Event::LibraryPaths { .. })));
+        assert_eq!(events.len(), 3, "and nothing else: {events:?}");
     }
 
     /// Ids are handed out before the handshake finishes and never reused, so a
@@ -580,6 +589,7 @@ mod tests {
         let mut daemon = daemon();
         let (id, mut rx) = attach(&mut daemon);
         daemon.client_left(id);
+        // Nothing new: the greeting was drained by `attach`.
 
         daemon.handle(id, Request::SetVolume { volume: 0.1 });
 
@@ -956,6 +966,7 @@ mod tests {
         let joined = next(&mut from_client).await;
         apply(&mut daemon, joined);
         // The greeting, so what follows is only the answer.
+        let _: Option<Event> = read_message_async(&mut reader).await.expect("read");
         let _: Option<Event> = read_message_async(&mut reader).await.expect("read");
         let _: Option<Event> = read_message_async(&mut reader).await.expect("read");
 

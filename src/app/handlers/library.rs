@@ -14,33 +14,26 @@ use crate::ipc::proto::{Request, ScanReport, TrackLine};
 use crate::ui::views::library_view::LibraryPanel;
 
 impl App {
-    /// Scan a directory into the index, in the daemon, where the index lives.
-    pub(crate) fn start_library_scan(&mut self, root: std::path::PathBuf) {
-        self.ui_state.file_browser_state.scan_status = Some("scanning… c: cancel".into());
-        self.dispatch(Request::ScanLibrary { root });
+    /// Add a directory or a file to the collection. The daemon remembers it,
+    /// indexes it, and — for a directory — walks it; a file also lands on the
+    /// deck, which is why picking one in the browser is the same act as adding
+    /// its directory.
+    pub(crate) fn add_library_path(&mut self, path: std::path::PathBuf) {
+        if path.is_dir() {
+            self.ui_state.file_browser_state.scan_status = Some("scanning… c: cancel".into());
+        }
+        self.dispatch(Request::AddLibraryPath { path });
     }
 
     pub(super) fn cancel_library_scan(&mut self) {
         self.dispatch(Request::CancelScan);
     }
 
-    /// Make sure everything the user can already see is in the index: the
-    /// library paths, and (on the daemon's side) the queue. Files that were
-    /// played but never scanned belong in the collection too.
+    /// Make sure everything the user can already see is in the index. The
+    /// paths and the queue are both the daemon's, so this names neither — it
+    /// asks the daemon to index what it already knows.
     pub(super) fn ensure_library_loaded(&mut self) {
-        let mut paths: Vec<std::path::PathBuf> = Vec::new();
-        for path in self
-            .ui_state
-            .playlist_state
-            .library_paths
-            .iter()
-            .chain(self.ui_state.file_browser_state.library_paths.iter())
-        {
-            if !paths.contains(path) {
-                paths.push(path.clone());
-            }
-        }
-        self.dispatch(Request::IndexPaths { paths });
+        self.dispatch(Request::IndexLibrary);
         self.refresh_library_artists();
     }
 
@@ -160,6 +153,23 @@ impl App {
         s.track_index = 0;
         s.scroll_tracks = 0;
         s.focused = LibraryPanel::Tracks;
+    }
+
+    // ── The collection's paths ──
+
+    /// The daemon's list, mirrored. The cursor is clamped here rather than at
+    /// the keypress that asked for the edit: the list can also shrink because
+    /// *another* client removed a path, and a cursor left past the end would
+    /// point at nothing.
+    pub(crate) fn apply_library_paths(&mut self, paths: Vec<std::path::PathBuf>) {
+        let s = &mut self.ui_state.file_browser_state;
+        s.library_paths = paths;
+        s.selected_library_index = s
+            .selected_library_index
+            .min(s.library_paths.len().saturating_sub(1));
+        if s.selected_library_index < s.scroll_library {
+            s.scroll_library = s.selected_library_index;
+        }
     }
 
     // ── Scan progress ──
@@ -641,7 +651,8 @@ mod tests {
     fn test_ensure_library_loaded_upserts_fixture() {
         let mut app = test_app();
         let fixture = PathBuf::from("tests/fixtures/test.flac");
-        app.ui_state.playlist_state.library_paths = vec![fixture.clone()];
+        // Both lists are the daemon's now; the client only asks.
+        app.player_mut().library_mut().add_path(&fixture);
         app.ensure_library_loaded();
         let row = app
             .player()
@@ -656,17 +667,18 @@ mod tests {
         assert_eq!(s.artists, vec!["Test Artist".to_string()]);
     }
 
-    /// The same path reached three ways is one row — the index is keyed by
-    /// path, and the request may list it more than once.
+    /// The same file reached three ways is one row — the index is keyed by
+    /// path, so a path that is both a library path and a queue entry is read
+    /// once.
     #[test]
     fn test_ensure_library_loaded_dedups_paths() {
         let mut app = test_app();
         let fixture = PathBuf::from("tests/fixtures/test.flac");
-        app.ui_state.playlist_state.library_paths = vec![fixture.clone()];
-        app.ui_state.file_browser_state.library_paths = vec![fixture.clone()];
-        app.dispatch(Request::IndexPaths {
-            paths: vec![fixture.clone(), fixture.clone()],
-        });
+        app.player_mut().library_mut().add_path(&fixture);
+        for _ in 0..2 {
+            app.player_mut().library_mut().add_path(&fixture);
+        }
+        app.ensure_library_loaded();
         assert_eq!(app.player().library().db().count().unwrap(), 1);
     }
 
@@ -679,7 +691,7 @@ mod tests {
         app.dispatch(Request::QueuePush {
             path: fixture.clone(),
         });
-        app.dispatch(Request::IndexPaths { paths: Vec::new() });
+        app.dispatch(Request::IndexLibrary);
         assert!(
             app.player()
                 .library()
@@ -689,6 +701,56 @@ mod tests {
                 .is_some(),
             "a queued track belongs in the library"
         );
+        app.stop_player();
+    }
+
+    // ── The collection's paths ──
+
+    /// The panel lists what the daemon says it holds, and a cursor left past
+    /// the end of a list that shrank is pulled back to a row that exists.
+    #[test]
+    fn applying_the_paths_replaces_the_list_and_clamps_the_cursor() {
+        let mut app = test_app();
+        {
+            let s = &mut app.ui_state.file_browser_state;
+            s.library_paths = vec![PathBuf::from("/a"), PathBuf::from("/b")];
+            s.selected_library_index = 1;
+            s.scroll_library = 1;
+        }
+        app.apply_library_paths(vec![PathBuf::from("/a")]);
+        let s = &app.ui_state.file_browser_state;
+        assert_eq!(s.library_paths, vec![PathBuf::from("/a")]);
+        assert_eq!(s.selected_library_index, 0);
+        assert_eq!(s.scroll_library, 0);
+    }
+
+    /// `a` remembers the directory and walks it; the status line says so
+    /// before the first progress event arrives.
+    #[test]
+    fn adding_a_directory_asks_for_a_scan_and_says_so() {
+        let mut app = test_app();
+        app.add_library_path(PathBuf::from("tests/fixtures"));
+        assert_eq!(
+            app.player().library().paths(),
+            [PathBuf::from("tests/fixtures")]
+        );
+        assert_eq!(
+            app.ui_state.file_browser_state.scan_status.as_deref(),
+            Some("scanning… c: cancel")
+        );
+    }
+
+    /// A single file is collected, not scanned — and the panel does not claim
+    /// a walk that is not happening.
+    #[tokio::test]
+    async fn adding_a_file_queues_it_without_claiming_a_scan() {
+        let mut app = test_app();
+        app.add_library_path(PathBuf::from("tests/fixtures/test.flac"));
+        assert!(
+            app.ui_state.file_browser_state.scan_status.is_none(),
+            "a file is not a scan"
+        );
+        assert_eq!(app.ui_state.player.tracks.len(), 1);
         app.stop_player();
     }
 

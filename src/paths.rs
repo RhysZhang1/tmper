@@ -242,8 +242,9 @@ fn migrate_legacy_themes(legacy: &std::path::Path) {
 }
 
 /// Test-only root for runtime data and config. Handler tests exercise
-/// `save_playlists` / `save_library_paths` / `write_config` / M3U export,
-/// which would otherwise clobber the developer's real XDG directories
+/// `save_playlists` / `write_config` / M3U export / the daemon's
+/// `library.json`, which would otherwise clobber the developer's real XDG
+/// directories
 /// (`~/.config/tmper`, `~/.local/share/tmper`, `~/.local/state/tmper`).
 /// Redirecting to a per-process temp dir keeps the suite side-effect-free.
 ///
