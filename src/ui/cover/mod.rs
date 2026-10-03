@@ -29,6 +29,9 @@ pub struct CoverParams {
     pub active_view: ViewMode,
     pub show_help: bool,
     pub command_mode: bool,
+    /// Player queue search is open. The results list replaces the area the
+    /// cover occupies, so the persistent image layer has to stand down.
+    pub search_active: bool,
     pub show_cover_art: bool,
     pub cover_gen: u64,
     pub cover_art: Option<Arc<Vec<u8>>>,
@@ -92,6 +95,9 @@ pub struct CoverRenderer {
     encoder: Box<dyn SixelEncoder>,
     /// Whether the `chafa` binary is usable (checked once at construction).
     chafa_available: bool,
+    /// Whether the terminal speaks the Kitty graphics protocol (resolved once
+    /// at construction; see `is_kitty_graphics_compatible`).
+    kitty_available: bool,
     /// Cached SIXEL payload — re-sent only when the cover or area changes.
     chafa_sixel_cache: Option<Vec<u8>>,
     /// Cover identity the cached SIXEL payload was rendered for.
@@ -111,6 +117,10 @@ pub struct CoverRenderer {
     kitty_active: bool,
     /// Cover identity the last Kitty image was rendered for.
     last_kitty_gen: u64,
+    /// Last area the Kitty image was placed at. The SIXEL path already tracked
+    /// this; without it a terminal resize left the image at its old position
+    /// and size, since the cover itself had not changed.
+    last_kitty_rect: Option<(u16, u16, u16, u16)>,
 }
 
 impl CoverRenderer {
@@ -118,18 +128,22 @@ impl CoverRenderer {
     pub fn new() -> Self {
         let mut renderer = Self::with_writer(Box::new(std::io::stdout()), Box::new(ChafaEncoder));
         renderer.chafa_available = which_chafa();
+        renderer.kitty_available = is_kitty_graphics_compatible();
         renderer
     }
 
     /// Test constructor — inject a writer and an encoder. The injected encoder
     /// is assumed to work, so `chafa_available` is forced on — the real `chafa`
     /// binary is not installed on CI runners, and the tests stub the encoder
-    /// anyway.
+    /// anyway. `kitty_available` starts off and is switched on by the tests
+    /// that exercise that path: terminal detection reads the environment, which
+    /// cannot be varied per-test without racing the other tests.
     fn with_writer(out: Box<dyn Write + Send>, encoder: Box<dyn SixelEncoder>) -> Self {
         Self {
             out,
             encoder,
             chafa_available: true,
+            kitty_available: false,
             chafa_sixel_cache: None,
             last_chafa_gen: 0,
             last_chafa_rect: None,
@@ -137,6 +151,7 @@ impl CoverRenderer {
             clear_pending: false,
             kitty_active: false,
             last_kitty_gen: 0,
+            last_kitty_rect: None,
         }
     }
 
@@ -144,7 +159,7 @@ impl CoverRenderer {
     /// Kitty if available, otherwise chafa SIXEL. Mutually exclusive — the
     /// two graphics layers would otherwise fight over the same area.
     pub fn render(&mut self, params: &CoverParams) {
-        if is_kitty_graphics_compatible() {
+        if self.kitty_available {
             self.render_kitty(params);
         } else {
             self.render_chafa(params);
@@ -165,12 +180,17 @@ impl CoverRenderer {
     // ── Kitty protocol (Kitty / WezTerm / Ghostty) ──
 
     fn render_kitty(&mut self, params: &CoverParams) {
-        if !is_kitty_graphics_compatible() {
-            self.kitty_active = false;
-            return;
-        }
+        // Protocol selection already happened in `render`; re-checking the
+        // environment here was redundant and put this whole path out of reach
+        // of the tests.
         // Not on the player view, or an overlay is on top → clear the image.
-        if params.active_view != ViewMode::Player || params.show_help || params.command_mode {
+        // Search counts: the results panel replaces the area the cover sits in,
+        // and a persisted image would cover the text.
+        if params.active_view != ViewMode::Player
+            || params.show_help
+            || params.command_mode
+            || params.search_active
+        {
             self.clear_kitty();
             return;
         }
@@ -181,10 +201,17 @@ impl CoverRenderer {
         }
 
         let gen = params.cover_gen;
-        if self.kitty_active && gen == self.last_kitty_gen {
+        // Re-place the image when the cover changes *or* the area moves: a
+        // resize keeps the same cover but needs the image re-sent at the new
+        // geometry, which is what the SIXEL path already did.
+        if self.kitty_active
+            && gen == self.last_kitty_gen
+            && self.last_kitty_rect == Some(params.cover_rect)
+        {
             return; // image unchanged — Kitty image persists on screen
         }
         self.last_kitty_gen = gen;
+        self.last_kitty_rect = Some(params.cover_rect);
 
         let cover = match &params.cover_art {
             Some(c) => c.clone(),
@@ -252,6 +279,9 @@ impl CoverRenderer {
 
     /// Send the Kitty clear sequence if an image is currently displayed.
     fn clear_kitty(&mut self) {
+        // Forget the placement too: coming back must re-send, even if the
+        // cover is the same one that was cleared.
+        self.last_kitty_rect = None;
         if self.kitty_active {
             let _ = write!(self.out, "\x1b_Ga=d,d=I\x1b\\");
             let _ = self.out.flush();
@@ -263,7 +293,11 @@ impl CoverRenderer {
 
     fn render_chafa(&mut self, params: &CoverParams) {
         // Only render on the player view; hide under overlays.
-        if params.active_view != ViewMode::Player || params.show_help || params.command_mode {
+        if params.active_view != ViewMode::Player
+            || params.show_help
+            || params.command_mode
+            || params.search_active
+        {
             self.reset_chafa();
             return;
         }
@@ -423,6 +457,7 @@ mod tests {
             active_view: ViewMode::Player,
             show_help: false,
             command_mode: false,
+            search_active: false,
             show_cover_art: true,
             cover_gen: gen,
             cover_art: cover.map(|b| Arc::new(b.to_vec())),
@@ -524,6 +559,103 @@ mod tests {
             written(&buf),
             0,
             "failed encode must not be retried per frame"
+        );
+    }
+
+    // ── Kitty placement and overlays ──
+
+    /// A tiny in-memory 8×8 PNG — the Kitty path decodes real image bytes.
+    fn make_png() -> Vec<u8> {
+        let img = image::RgbaImage::from_fn(8, 8, |x, y| {
+            let v = ((x + y) * 32).min(255) as u8;
+            image::Rgba([v, v, v, 255])
+        });
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        bytes
+    }
+
+    /// The terminal-detection path reads the environment, which a test cannot
+    /// vary without racing every other test in the process, so the resolved
+    /// flag is switched on directly — the same way `chafa_available` is.
+    fn kitty_renderer(buf: &SharedBuf) -> CoverRenderer {
+        let mut r = renderer(buf);
+        r.kitty_available = true;
+        r
+    }
+
+    fn kitty_clear_sent(buf: &SharedBuf) -> bool {
+        String::from_utf8_lossy(&buf.0.lock().unwrap()).contains("\x1b_Ga=d,d=I")
+    }
+
+    /// Resizing keeps the same cover but moves the area it is drawn into. The
+    /// Kitty path compared only the cover identity, so after a resize the image
+    /// stayed at its old position and size.
+    #[test]
+    fn kitty_image_is_replaced_when_the_area_changes() {
+        let buf = SharedBuf::default();
+        let mut r = kitty_renderer(&buf);
+        let png = make_png();
+
+        r.render(&params(1, (0, 0, 10, 10), Some(&png)));
+        let placed = written(&buf);
+        assert!(placed > 0, "first render places the image");
+
+        // Same cover, same area → the image persists, nothing to send.
+        r.render(&params(1, (0, 0, 10, 10), Some(&png)));
+        assert_eq!(
+            written(&buf),
+            placed,
+            "unchanged cover and area: no re-send"
+        );
+
+        // Same cover, new area (terminal resize) → re-place.
+        r.render(&params(1, (0, 0, 20, 12), Some(&png)));
+        assert!(
+            written(&buf) > placed,
+            "a resize must re-place the image at the new geometry"
+        );
+    }
+
+    /// Player search replaces the area the cover occupies. The image is a
+    /// persistent layer, so it has to be removed or it paints over the results.
+    #[test]
+    fn search_overlay_clears_the_kitty_image() {
+        let buf = SharedBuf::default();
+        let mut r = kitty_renderer(&buf);
+        let png = make_png();
+
+        r.render(&params(1, (0, 0, 10, 10), Some(&png)));
+        assert!(r.kitty_active, "image placed to begin with");
+
+        let mut search = params(1, (0, 0, 10, 10), Some(&png));
+        search.search_active = true;
+        r.render(&search);
+
+        assert!(!r.kitty_active, "image must be removed while searching");
+        assert!(kitty_clear_sent(&buf), "clear sequence must be sent");
+    }
+
+    #[test]
+    fn search_overlay_clears_the_sixel_layer() {
+        let buf = SharedBuf::default();
+        let mut r = renderer(&buf); // chafa path
+
+        r.render(&params(1, (0, 0, 10, 10), Some(&[1, 2, 3])));
+        assert!(!r.needs_clear(), "nothing to clear after a fresh send");
+
+        let mut search = params(1, (0, 0, 10, 10), Some(&[1, 2, 3]));
+        search.search_active = true;
+        r.render(&search);
+
+        assert!(
+            r.needs_clear(),
+            "SIXEL residue must be cleared for the search results"
         );
     }
 }

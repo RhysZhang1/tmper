@@ -306,6 +306,7 @@ impl App {
                     active_view: self.ui_state.view.active_view,
                     show_help: self.ui_state.view.show_help,
                     command_mode: self.ui_state.command_mode,
+                    search_active: self.ui_state.search_mode,
                     show_cover_art: self.ui_state.player.show_cover_art
                         && self.ui_state.cover_rect.get().2 > 0
                         && self.ui_state.cover_rect.get().3 > 0,
