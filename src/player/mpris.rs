@@ -217,11 +217,7 @@ impl State {
         // shuffles by picking forever, which is a playlist loop that is not in
         // order. The two properties are therefore two views of one state, and
         // both move together.
-        let loop_status = match snapshot.repeat {
-            RepeatMode::Sequential => LoopStatus::None,
-            RepeatMode::SingleTrack => LoopStatus::Track,
-            RepeatMode::Shuffle => LoopStatus::Playlist,
-        };
+        let loop_status = loop_status_of(snapshot.repeat);
         if loop_status != self.loop_status {
             self.loop_status = loop_status;
             changed.push(Property::LoopStatus(loop_status));
@@ -572,6 +568,14 @@ impl PlayerInterface for Player {
     async fn set_loop_status(&self, loop_status: LoopStatus) -> mpris_server::zbus::Result<()> {
         // tmper has one three-way mode where MPRIS has two flags, so this is
         // the whole mapping in both directions: see `State::apply`.
+        //
+        // Only the flag the client named is recorded. Its twin is left alone
+        // deliberately: when this `Set` really does move it — `Track` on a
+        // shuffled player is also "not shuffled" — the snapshot that follows
+        // announces it, and that announcement is news the desktop needs rather
+        // than a duplicate. What the mirror is for is the *other* case: a flag
+        // zbus would otherwise announce from a stale getter, at the old value,
+        // a millisecond before the real change arrived.
         self.record(|state| state.loop_status = loop_status);
         self.send(Request::SetRepeat {
             mode: repeat_of(loop_status),
@@ -596,11 +600,21 @@ impl PlayerInterface for Player {
     }
 
     async fn set_shuffle(&self, shuffle: bool) -> mpris_server::zbus::Result<()> {
+        // `false` does not mean "and stop looping". The two flags are separate
+        // axes to a client, so clearing a shuffle the player never had — which
+        // is what a widget re-asserting its own state does on every refresh —
+        // must not take a track loop with it. Which of the two unshuffled modes
+        // was meant is only answerable by reading the loop axis back.
         let mode = if shuffle {
             RepeatMode::Shuffle
+        } else if matches!(self.loop_status().await, Ok(LoopStatus::Track)) {
+            RepeatMode::SingleTrack
         } else {
             RepeatMode::Sequential
         };
+        // As in `set_loop_status`: the flag the client named, and nothing else.
+        // `set_shuffle(true)` really does move the loop to `Playlist`, and the
+        // snapshot says so; recording that here would swallow it.
         self.record(|state| state.shuffle = shuffle);
         self.send(Request::SetRepeat { mode });
         Ok(())
@@ -681,6 +695,17 @@ fn repeat_of(loop_status: LoopStatus) -> RepeatMode {
         LoopStatus::None => RepeatMode::Sequential,
         LoopStatus::Track => RepeatMode::SingleTrack,
         LoopStatus::Playlist => RepeatMode::Shuffle,
+    }
+}
+
+/// The other direction: the loop half of a mode's two flags. The shuffle half
+/// is `repeat == RepeatMode::Shuffle`, spelled that way wherever a mode is
+/// turned into flags — here in the `State` mirror, and in the setters below.
+fn loop_status_of(repeat: RepeatMode) -> LoopStatus {
+    match repeat {
+        RepeatMode::Sequential => LoopStatus::None,
+        RepeatMode::SingleTrack => LoopStatus::Track,
+        RepeatMode::Shuffle => LoopStatus::Playlist,
     }
 }
 
@@ -1007,9 +1032,19 @@ mod tests {
     }
 
     /// `Playlist` loop is tmper's shuffle, in both directions.
+    ///
+    /// Each `Set` is followed by the snapshot the daemon sends to confirm it,
+    /// because that is what the next `Set` is read against: the mirror is the
+    /// desktop's view, and a `Set` arrives at whatever the desktop currently
+    /// believes — which a widget has from the properties it was last told.
     #[tokio::test]
     async fn the_repeat_mode_round_trips_through_the_bus() {
-        let (player, mut rx, _state) = player();
+        let (player, mut rx, state) = player();
+        let confirmed = |mode| {
+            let mut snap = snapshot();
+            snap.repeat = mode;
+            state.lock().unwrap().apply(&snap);
+        };
 
         player
             .set_loop_status(LoopStatus::Track)
@@ -1021,6 +1056,7 @@ mod tests {
                 mode: RepeatMode::SingleTrack
             }
         );
+        confirmed(RepeatMode::SingleTrack);
 
         player.set_shuffle(true).await.expect("call");
         assert_eq!(
@@ -1029,12 +1065,37 @@ mod tests {
                 mode: RepeatMode::Shuffle
             }
         );
+        confirmed(RepeatMode::Shuffle);
+
         player.set_shuffle(false).await.expect("call");
         assert_eq!(
             sent(&mut rx).await,
             Request::SetRepeat {
                 mode: RepeatMode::Sequential
-            }
+            },
+            "the loop was shuffled, not looped on one track"
+        );
+    }
+
+    /// The loop and the shuffle are separate axes to a client, and the widget
+    /// re-asserts its own values on every refresh. Clearing a shuffle the
+    /// player never had must not take a track loop with it.
+    #[tokio::test]
+    async fn clearing_a_shuffle_that_was_never_set_keeps_the_track_loop() {
+        let (player, mut rx, state) = player();
+        state.lock().unwrap().apply(&StateSnapshot {
+            repeat: RepeatMode::SingleTrack,
+            ..snapshot()
+        });
+
+        player.set_shuffle(false).await.expect("call");
+
+        assert_eq!(
+            sent(&mut rx).await,
+            Request::SetRepeat {
+                mode: RepeatMode::SingleTrack
+            },
+            "the loop was the only thing set, and it is still set"
         );
     }
 
@@ -1150,7 +1211,9 @@ mod tests {
 
         // The other half: tmper's one repeat mode is *two* MPRIS properties, so
         // a `Set` of either of them still owes the desktop a signal about the
-        // other one — and only about that one.
+        // other one — and only about that one, or a widget showing "shuffled"
+        // next to a loop that still reads `None` is drawing the wrong thing
+        // until the next unrelated change comes along.
         player.set_shuffle(true).await.expect("call");
         let mut shuffled = settled();
         shuffled.repeat = RepeatMode::Shuffle;

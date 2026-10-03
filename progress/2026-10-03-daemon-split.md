@@ -210,3 +210,92 @@ daemon 先找到的那一个上。**位置也不是**——那是对「调用者
 - **阶段 3**：MPRIS2（`mpris-server` + zbus）；封面缓存成真文件供 `mpris:artUrl`。
 - **阶段 4**：daemon 中途死掉后的自动重连、陈旧 socket 的显式处理、四份文档对账、
   `cargo llvm-cov` 复测。
+
+## 追加（同日）：阶段 3 —— MPRIS2
+
+daemon 现在在会话总线上占名 `org.mpris.MediaPlayer2.tmper`（`mpris-server` 0.10，走 zbus——
+这台机器本来就有的 D-Bus 栈）。它从**推给客户端快照的同一个地方**推给桌面：媒体控件看到的
+状态和 TUI 看到的状态是一份状态、播报一次。
+
+### 只报动了的部分
+
+快照每秒来 31 个，其中绝大多数只差一个 `position_secs`，而位置不是 MPRIS 属性（客户端要
+位置时会问 `Position`）。`State::apply` 把快照和上次播报过的镜像做 diff，只发变化的属性——
+否则就是每秒 31 条 `PropertiesChanged` 和一块永远在重绘的控件。
+
+两处细节是**承重**的：
+
+- **音量要收窄。** tmper 的音量是 `f32`，直接加宽到 MPRIS 的 `f64` 会得到
+  `0.800000011920929`——同一条 80%，后面挂了十一位噪声，而且不再往返：客户端设 0.8、读回
+  0.8 却发现变了。`to_volume` 取三位小数（比任何音量滑条都细），往返精确，diff 也不会
+  永远发现同一个「变化」。
+- **setter 要先把值记进镜像。** zbus 对每个属性 `Set` 会**自己**发一条 `PropertiesChanged`，
+  内容在 setter 返回那一刻从 getter 读——而我们的 setter 是 fire-and-forget，返回时 daemon
+  还没应用。不记的话，每一次调音量都会被播报成「被替换掉的那个音量」，一毫秒后才是真的：
+  滑条每动一格，先弹回去、再弹过来。`Player::record` 把打算生效的值先写进 getter 读的镜像，
+  并且**按快照将来拼写的方式**写，否则随后到的那条快照又会发现一次差异——一次点击又变成
+  两条信号。
+
+  循环模式是这条规则里最尖的例子：tmper 一个三态 `RepeatMode`，MPRIS 是两个 flag
+  （`LoopStatus` + `Shuffle`）。setter 只记**客户端点名的那一个**——另一个如果真被这次
+  `Set` 带着动了（`Shuffle=true` 就是 `Playlist`；在乱序上点 `Track` 顺带关掉 shuffle），
+  随后那条快照会播报它，而那是控件**需要**知道的事实，不是重复。（试过「两个 flag 一起记」
+  来省掉这条信号：控件会停在「已乱序 + 未循环」的画面上，直到下一次不相干的变更为止。）
+  镜像要挡的是另一种：zbus 从旧 getter 读出来的、一毫秒后就被真值推翻的那一条。
+
+  同理，「关掉 shuffle」不能理解成「停止循环」——控件每次刷新都会重报自己的值，而 `Track`
+  循环配一次 `Shuffle=false` 不该把循环一起删掉。`set_shuffle(false)` 因此要回读循环轴
+  （即客户端眼里的现状），再决定请求 `Sequential` 还是 `SingleTrack`。
+
+seek 是唯一「结果在所有属性里都看不见」的命令，所以拿到 MPRIS 为此专设的那条信号：
+状态之后跟一条 `Seeked`。
+
+### 封面
+
+`mpris:artUrl` 必须是个 URL，所以封面落盘到 `$XDG_CACHE_HOME/tmper`（新增
+`paths::cache_dir()`），文件名按**曲目路径**取而不是按内容：桌面只在元数据变化时取一次图，
+换个名字就等于让控件重新下一张它已经有的图。缓存按 mtime 留最新 8 张（`KEEP`）；快照里带
+的是路径，客户端直接读同一个文件，封面不必过 socket。
+
+### 顺带的发现：客户端会吞掉欢迎词后面的问候
+
+验证过程中 `tmper status` 偶发 `the player closed the connection`——25 次里 3 次，且只在
+daemon 有流量时（MPRIS churn），安静时 25/25 全过。真因不在 daemon：
+`DaemonHandle::connect` 的握手借了一个 `BufReader` 读 `Welcome`，读完就 drop。`BufReader`
+为了回答一次 `read_line` 会把 socket 上**所有**能读到的字节搬进自己的缓冲（最多 8 KiB），
+而 daemon 在接受握手的那一刻就把快照和队列发出来了——这些字节于是和那个 reader 一起进了
+垃圾桶。落在行边界上表现为「丢失问候」（队列只在**变化**时推，所以客户端会永远等一个它
+已经收到过的队列）；落在行中间就是 `malformed: expected value at line 1 column 1`，被客户端
+自己的措辞报成了「连接被关闭」。修法是把握手挪到异步侧，**同一个 reader** 接着交给读任务
+用——「一个字节都不丢」从「要记得的性质」变成结构上的性质。新测试对该行为回归有效（把旧
+写法装回去，测试变红，已实测）。`ipc` 里那份阻塞版封帧随之失去最后一个调用者，一并删除：
+一份实现不会和自己就上限、CRLF、截断行的含义产生分歧。
+
+### 验证
+
+自动：**513 通过 / 6 ignored**，clippy 干净。
+
+真会话总线 + 隔离 `TMPER_*` 目录，用 `busctl` 逐项核对：身份 / desktop entry / 能力标志、
+空载时的 metadata、播放中的 metadata（微秒长度、`/tmper/track/{:016x}` 的 track id）、封面
+PNG 落在缓存里且 `artUrl` 指向它、每次 `Set` 只有一条信号且带的是新值、`PlayPause` 两个
+方向、`Seek` 之后跟一条 `Seeked`、暂停反映在 daemon 自己的状态里。`tmper status` 在同样的
+churn 下 40/40 通过（修之前 3/25 失败）。
+
+**留给你的（这里验不了）**：Plasma 媒体控件真的把它画出来、媒体键真的送过来。本机能验的
+只到总线这一层。
+
+### 一次事故，如实记下
+
+验证 MPRIS 的过程中，有一次 `source env.sh` 静默失败（那个文件属于上一个临时根），daemon
+于是带着**默认 XDG 路径**起来了，碰了你真实的 `~/.local/state/tmper/`：`playlists.json` 在
+21:36 被重写（原 mtime 14:48），并新建了一个 496 字节的 `tmper-daemon.log`，还有一个随后被
+删掉的 socket。事后 diff：**`playlists.json` 与重写前的副本逐字节相同**（7864 字节，两个歌单
+72/37 首，`id` 字段是 20:27 那次真实运行留下的）——内容没有丢、也没有改。`state.json`
+（20:27）、`library.json`、`library.db`、`config.toml` 都没被碰：daemon 是被 `SIGKILL` 掉的，
+`shutdown()` / `save_state` 没有机会跑。此后所有验证都走一个会**拒绝 `/tmp` 以外任何根**的
+启动脚本。
+
+### 还没做
+
+- **阶段 4**：daemon 中途死掉后的自动重连（重连横幅）、四份文档对账、`cargo llvm-cov`
+  复测。（空闲退出与陈旧 socket 已在前面阶段落地并有测试。）
