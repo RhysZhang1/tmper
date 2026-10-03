@@ -616,6 +616,9 @@ fn atomic_saturating_sub(value: &AtomicUsize, amount: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Brings `channels` / `sample_rate` / … into scope for the
+    // `InstrumentedSource` delegation assertions.
+    use rodio::Source as _;
 
     #[test]
     #[ignore = "requires a real or virtual audio output device"]
@@ -773,6 +776,13 @@ mod tests {
                 generation: self.generation,
             });
         }
+
+        fn failed(&self, engine: &AudioEngine, message: &str) {
+            engine.inject_decoder_event(DecoderEvent::Failed {
+                generation: self.generation,
+                message: message.to_string(),
+            });
+        }
     }
 
     #[tokio::test]
@@ -806,5 +816,307 @@ mod tests {
         second.finished(&engine);
         assert_eq!(engine.drain_events(), vec![PlaybackEvent::Finished]);
         assert_eq!(engine.state(), &PlaybackState::Finished);
+    }
+
+    // ── InstrumentedSource: the FFT ring buffer and its backpressure ledger ──
+
+    /// Build a source the way the decoder does: count the packet in, then hand
+    /// the source that same count to release as it plays.
+    fn instrumented<I: Iterator<Item = f32>>(
+        samples: I,
+        count: usize,
+        capacity: usize,
+    ) -> (
+        InstrumentedSource<I>,
+        Arc<Mutex<VecDeque<f32>>>,
+        Arc<AtomicUsize>,
+    ) {
+        let buffer = Arc::new(Mutex::new(VecDeque::new()));
+        let queued = Arc::new(AtomicUsize::new(count));
+        let source =
+            InstrumentedSource::new(samples, buffer.clone(), capacity, queued.clone(), count);
+        (source, buffer, queued)
+    }
+
+    #[test]
+    fn instrumented_source_copies_every_sample_it_yields() {
+        let (mut source, buffer, queued) = instrumented(vec![1.0f32, 2.0, 3.0].into_iter(), 3, 8);
+
+        assert_eq!(source.next(), Some(1.0));
+        assert_eq!(source.next(), Some(2.0));
+        assert_eq!(source.next(), Some(3.0));
+        assert_eq!(source.next(), None, "ends with the inner iterator");
+
+        let copied: Vec<f32> = lock(&buffer).iter().copied().collect();
+        assert_eq!(copied, vec![1.0, 2.0, 3.0]);
+        assert_eq!(
+            queued.load(Ordering::SeqCst),
+            0,
+            "every sample accounted for"
+        );
+    }
+
+    #[test]
+    fn instrumented_source_evicts_the_oldest_sample_at_capacity() {
+        let (mut source, buffer, _) = instrumented((1..=6).map(|i| i as f32), 6, 4);
+        while source.next().is_some() {}
+
+        let copied: Vec<f32> = lock(&buffer).iter().copied().collect();
+        assert_eq!(
+            copied,
+            vec![3.0, 4.0, 5.0, 6.0],
+            "the buffer keeps the newest window"
+        );
+    }
+
+    /// Backpressure waits on this counter. Every track change and seek drops a
+    /// packet before it finishes playing, so a dropped source has to release
+    /// the samples it never delivered — otherwise the count never returns to
+    /// zero and decoding stalls for good.
+    #[test]
+    fn dropping_a_partly_played_packet_releases_its_unplayed_samples() {
+        let (mut source, _, queued) = instrumented((0..10).map(|i| i as f32), 10, 32);
+
+        assert_eq!(source.next(), Some(0.0));
+        assert_eq!(source.next(), Some(1.0));
+        assert_eq!(queued.load(Ordering::SeqCst), 8);
+
+        drop(source);
+        assert_eq!(
+            queued.load(Ordering::SeqCst),
+            0,
+            "the 8 unplayed samples must be released"
+        );
+    }
+
+    #[test]
+    fn dropping_a_fully_played_packet_does_not_underflow_the_counter() {
+        let (mut source, _, queued) = instrumented(vec![1.0f32, 2.0].into_iter(), 2, 32);
+        while source.next().is_some() {}
+        assert_eq!(queued.load(Ordering::SeqCst), 0);
+
+        drop(source);
+        assert_eq!(
+            queued.load(Ordering::SeqCst),
+            0,
+            "released twice must saturate, not wrap"
+        );
+    }
+
+    /// The wrapper must forward rodio's metadata untouched — comparing against
+    /// an identical source rather than literals, because `SamplesBuffer`
+    /// deliberately reports `None` for `current_frame_len`.
+    #[test]
+    fn instrumented_source_delegates_source_metadata() {
+        let inner = rodio::buffer::SamplesBuffer::new(2, 44_100, vec![0.0f32; 16]);
+        let reference = inner.clone();
+        let buffer = Arc::new(Mutex::new(VecDeque::new()));
+        let mut source = InstrumentedSource::new(
+            inner,
+            buffer.clone(),
+            32,
+            Arc::new(AtomicUsize::new(16)),
+            16,
+        );
+
+        assert_eq!(source.channels(), reference.channels());
+        assert_eq!(source.sample_rate(), reference.sample_rate());
+        assert_eq!(source.current_frame_len(), reference.current_frame_len());
+        assert_eq!(source.total_duration(), reference.total_duration());
+
+        // And those forwarded values are the ones we constructed with.
+        assert_eq!(source.channels(), 2);
+        assert_eq!(source.sample_rate(), 44_100);
+
+        // Pull a sample through the real `SamplesBuffer` path so this covers
+        // the same `next` the decoder thread uses, not just the accessors.
+        assert_eq!(source.next(), Some(0.0));
+        assert_eq!(lock(&buffer).len(), 1);
+    }
+
+    /// The queue counters are diagnostics: `peak_queued_samples` is only read
+    /// by the device-gated bound test, so without this it and the tracking in
+    /// `play_file` could rot unnoticed.
+    #[test]
+    fn queue_diagnostics_start_empty() {
+        let mut engine = AudioEngine::new_headless();
+        assert_eq!(engine.queued_samples(), 0);
+        assert_eq!(engine.peak_queued_samples(), 0);
+
+        let _ = engine.begin_fake_session(Path::new("song.fake"));
+        assert_eq!(
+            engine.queued_samples(),
+            0,
+            "a new session must start with an empty queue"
+        );
+        assert_eq!(engine.peak_queued_samples(), 0);
+    }
+
+    // ── Session bookkeeping helpers ──
+
+    #[test]
+    fn atomic_saturating_sub_decrements_and_clamps_at_zero() {
+        let value = AtomicUsize::new(10);
+        atomic_saturating_sub(&value, 4);
+        assert_eq!(value.load(Ordering::SeqCst), 6);
+
+        atomic_saturating_sub(&value, 99);
+        assert_eq!(value.load(Ordering::SeqCst), 0, "must not wrap around");
+    }
+
+    #[test]
+    fn update_peak_only_moves_up() {
+        let peak = AtomicUsize::new(5);
+        update_peak(&peak, 3);
+        assert_eq!(peak.load(Ordering::SeqCst), 5, "a lower value is ignored");
+        update_peak(&peak, 9);
+        assert_eq!(peak.load(Ordering::SeqCst), 9);
+    }
+
+    #[test]
+    fn session_cancelled_reacts_to_both_signals() {
+        let cancel = AtomicBool::new(false);
+        let generation = AtomicU64::new(7);
+
+        assert!(!session_cancelled(&cancel, &generation, 7), "live session");
+        assert!(
+            session_cancelled(&cancel, &generation, 6),
+            "generation moved on — the session was replaced"
+        );
+
+        cancel.store(true, Ordering::SeqCst);
+        assert!(
+            session_cancelled(&cancel, &generation, 7),
+            "explicit cancel"
+        );
+    }
+
+    #[test]
+    fn send_failure_carries_the_generation() {
+        let (tx, rx) = mpsc::channel();
+        send_failure(&tx, 42, "decode failed".into());
+
+        match rx.try_recv() {
+            Ok(DecoderEvent::Failed {
+                generation,
+                message,
+            }) => {
+                assert_eq!(generation, 42);
+                assert_eq!(message, "decode failed");
+            }
+            _ => panic!("expected a Failed event"),
+        }
+    }
+
+    #[test]
+    fn send_failure_without_a_receiver_is_not_fatal() {
+        let (tx, rx) = mpsc::channel();
+        drop(rx);
+        // The main loop may be gone; the decode thread must still wind down
+        // cleanly rather than panicking on a closed channel.
+        send_failure(&tx, 1, "nobody is listening".into());
+    }
+
+    // ── Failure and cancellation paths (headless) ──
+
+    #[test]
+    fn drain_events_turns_a_decoder_failure_into_a_failed_state() {
+        let mut engine = AudioEngine::new_headless();
+        let decoder = FakeDecoder {
+            generation: engine.begin_fake_session(Path::new("broken.fake")),
+        };
+
+        decoder.failed(&engine, "unsupported codec");
+        assert_eq!(
+            engine.drain_events(),
+            vec![PlaybackEvent::Failed("unsupported codec".into())]
+        );
+        assert_eq!(
+            engine.state(),
+            &PlaybackState::Failed("unsupported codec".into())
+        );
+        assert!(!engine.is_playing(), "a failed track is not playing");
+    }
+
+    #[test]
+    fn drain_events_ignores_finished_and_failed_from_a_replaced_session() {
+        let mut engine = AudioEngine::new_headless();
+        let stale = FakeDecoder {
+            generation: engine.begin_fake_session(Path::new("stale.fake")),
+        };
+        let current = FakeDecoder {
+            generation: engine.begin_fake_session(Path::new("current.fake")),
+        };
+
+        stale.ready(&engine, 10.0, 44_100);
+        stale.finished(&engine);
+        stale.failed(&engine, "gone");
+        assert!(
+            engine.drain_events().is_empty(),
+            "every event from the replaced session is dropped"
+        );
+
+        current.ready(&engine, 20.0, 48_000);
+        assert_eq!(
+            engine.drain_events().len(),
+            1,
+            "the live session still lands"
+        );
+    }
+
+    // ── State machine guards ──
+
+    #[test]
+    fn pause_and_resume_do_nothing_from_a_stopped_engine() {
+        let mut engine = AudioEngine::new_headless();
+
+        engine.pause();
+        assert_eq!(engine.state(), &PlaybackState::Stopped);
+        engine.resume();
+        assert_eq!(
+            engine.state(),
+            &PlaybackState::Stopped,
+            "resuming a stopped engine must not claim to be playing"
+        );
+    }
+
+    #[test]
+    fn pause_is_idempotent_and_resume_restores_playing() {
+        let mut engine = AudioEngine::new_headless();
+        let decoder = FakeDecoder {
+            generation: engine.begin_fake_session(Path::new("song.fake")),
+        };
+        decoder.ready(&engine, 180.0, 44_100);
+        engine.drain_events();
+        assert_eq!(engine.state(), &PlaybackState::Playing);
+
+        engine.pause();
+        assert_eq!(engine.state(), &PlaybackState::Paused);
+        engine.pause(); // must not restart the paused window
+        assert_eq!(engine.state(), &PlaybackState::Paused);
+
+        engine.resume();
+        assert_eq!(engine.state(), &PlaybackState::Playing);
+        engine.resume(); // already playing — a no-op
+        assert_eq!(engine.state(), &PlaybackState::Playing);
+    }
+
+    #[test]
+    fn stop_clears_the_session_and_resets_the_queue_counter() {
+        let mut engine = AudioEngine::new_headless();
+        let decoder = FakeDecoder {
+            generation: engine.begin_fake_session(Path::new("song.fake")),
+        };
+        decoder.ready(&engine, 180.0, 44_100);
+        engine.drain_events();
+        assert!(engine.duration_secs().is_some());
+
+        engine.stop();
+
+        assert_eq!(engine.state(), &PlaybackState::Stopped);
+        assert_eq!(engine.position_secs(), 0.0);
+        assert!(engine.duration_secs().is_none());
+        assert_eq!(engine.queued_samples(), 0);
+        assert!(!engine.is_playing());
     }
 }
