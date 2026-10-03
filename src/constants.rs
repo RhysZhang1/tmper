@@ -41,9 +41,13 @@ pub mod runtime {
 
     // ── Cover art ──
 
-    /// Maximum chunk size (bytes) for Kitty graphics protocol payloads.
-    /// Kitty terminals recommend keeping payloads ≤ 4 KiB per escape sequence.
-    pub const KITTY_CHUNK_SIZE: usize = 4096;
+    /// Maximum base64 payload per Kitty graphics escape sequence.
+    ///
+    /// The protocol's limit is 4096 bytes for the *whole* sequence, header
+    /// included, so the payload is held a little under it. Konsole accepts
+    /// exactly 4096 and kitty is lenient, but the spec's number is the one
+    /// that stays valid everywhere.
+    pub const KITTY_CHUNK_SIZE: usize = 4000;
 
     /// Color registers the in-process SIXEL encoder may use.
     ///

@@ -314,6 +314,7 @@ mod tests {
 
     #[test]
     fn test_cycle_theme_forward_and_back() {
+        let _guard = crate::paths::config_file_lock();
         let mut app = test_app();
         seed_settings(&mut app);
         app.ui_state.settings_state.cursor = 0;
@@ -326,6 +327,7 @@ mod tests {
 
     #[test]
     fn test_cycle_theme_wraps_around() {
+        let _guard = crate::paths::config_file_lock();
         let mut app = test_app();
         seed_settings(&mut app);
         app.ui_state.settings_state.cursor = 0;
@@ -337,6 +339,7 @@ mod tests {
 
     #[test]
     fn test_cycle_bars_forward_and_reverse() {
+        let _guard = crate::paths::config_file_lock();
         let mut app = test_app();
         seed_settings(&mut app);
         app.ui_state.settings_state.cursor = 1;
@@ -348,6 +351,7 @@ mod tests {
 
     #[test]
     fn test_cycle_smoothing() {
+        let _guard = crate::paths::config_file_lock();
         let mut app = test_app();
         seed_settings(&mut app);
         app.ui_state.settings_state.cursor = 2;
@@ -358,6 +362,7 @@ mod tests {
 
     #[test]
     fn test_cycle_volume_wraps_to_zero() {
+        let _guard = crate::paths::config_file_lock();
         let mut app = test_app();
         seed_settings(&mut app);
         app.ui_state.settings_state.cursor = 3;
@@ -373,6 +378,7 @@ mod tests {
 
     #[test]
     fn test_cycle_seek_step() {
+        let _guard = crate::paths::config_file_lock();
         let mut app = test_app();
         seed_settings(&mut app);
         app.ui_state.settings_state.cursor = 4;
@@ -385,6 +391,7 @@ mod tests {
 
     #[test]
     fn test_cycle_show_cover_art_toggles() {
+        let _guard = crate::paths::config_file_lock();
         let mut app = test_app();
         seed_settings(&mut app);
         app.ui_state.settings_state.cursor = 5;
@@ -425,6 +432,7 @@ mod tests {
 
     #[test]
     fn test_confirm_row_returns_to_player() {
+        let _guard = crate::paths::config_file_lock();
         let mut app = test_app();
         seed_settings(&mut app);
         app.ui_state.view.active_view = ViewMode::Settings;
@@ -485,6 +493,10 @@ mod tests {
 
     #[test]
     fn test_enter_on_theme_cycles_and_persists() {
+        // Held across the press *and* the read: every other test that cycles a
+        // setting writes this same file, and one of them landing in between
+        // would leave `theme = "nord"` (or a half-truncated file) here.
+        let _guard = crate::paths::config_file_lock();
         let mut app = test_app();
         seed_settings(&mut app);
         app.ui_state.settings_state.cursor = 0;

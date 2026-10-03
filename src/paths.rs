@@ -202,6 +202,26 @@ fn test_root() -> PathBuf {
         .clone()
 }
 
+/// The lock that serialises the tests which use the shared `config.toml`.
+///
+/// Every runtime dir lands under one [`test_root`] for the whole test
+/// *process*, so every test that cycles a setting — each cycle persists through
+/// `write_config` — writes the same file, and the one test that reads it back
+/// to prove the write happened can observe another test's config instead of its
+/// own. That is not hypothetical: `command_theme_switches_and_loads_the_palette`
+/// (`:theme nord`) landing between the press and the read turned
+/// `test_enter_on_theme_cycles_and_persists` red on a coverage run.
+///
+/// The config file is the shared resource, so this is its lock: writers take it
+/// for the duration of the test, and the reader holds it across both the press
+/// and the read. Poisoning is ignored — a panicking test has already failed,
+/// and the rest of the suite should not be dragged down with it.
+#[cfg(test)]
+pub fn config_file_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

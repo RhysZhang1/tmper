@@ -1063,6 +1063,8 @@ mod tests {
 
     #[test]
     fn command_theme_switches_and_loads_the_palette() {
+        // `:theme` persists, and the settings tests share this file.
+        let _guard = crate::paths::config_file_lock();
         let mut app = test_app();
         run_command(&mut app, "theme nord");
 

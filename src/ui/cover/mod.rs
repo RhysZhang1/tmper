@@ -21,7 +21,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
-use image::GenericImageView;
+use image::ImageEncoder;
 
 use crate::constants::runtime;
 use crate::ui::ViewMode;
@@ -97,6 +97,16 @@ impl SixelEncoder for IcySixelEncoder {
     }
 }
 
+/// How the cover reaches the screen. The two graphics protocols are mutually
+/// exclusive; `Blocks` means neither was confirmed and the half-block layer in
+/// `player_view` owns the panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Protocol {
+    Kitty,
+    Sixel,
+    Blocks,
+}
+
 /// Manages cover-art rendering state and terminal protocol output.
 ///
 /// All fields are private — interaction goes through the public methods.
@@ -109,9 +119,17 @@ pub struct CoverRenderer {
     /// from `App::new`, and the probe needs the tty in raw mode, which
     /// `App::run` sets up afterwards. Tests pin the value instead.
     sixel_available: Option<bool>,
-    /// Whether the terminal speaks the Kitty graphics protocol (resolved once
-    /// at construction; see `is_kitty_graphics_compatible`).
-    kitty_available: bool,
+    /// Whether the terminal speaks the Kitty graphics protocol — likewise the
+    /// probe's answer in production.
+    ///
+    /// This used to be decided from the environment (`KITTY_WINDOW_ID`,
+    /// `TERM_PROGRAM`, `GHOSTTY_RESOURCES_DIR`), which misses every terminal
+    /// that does not advertise itself that way: Konsole 26.08 answers the
+    /// protocol's own `a=q` query with `OK` and renders the images, while
+    /// setting none of those variables. Asking is both wider and stricter —
+    /// a terminal that answers is one that implements the protocol, and one
+    /// that stays silent cannot be handed a payload it would swallow.
+    kitty_available: Option<bool>,
     /// Cached SIXEL payload — re-sent only when the cover or area changes.
     sixel_cache: Option<Vec<u8>>,
     /// Cover identity the cached SIXEL payload was rendered for.
@@ -146,23 +164,22 @@ impl CoverRenderer {
     pub fn new() -> Self {
         let mut renderer =
             Self::with_writer(Box::new(std::io::stdout()), Box::new(IcySixelEncoder));
-        renderer.sixel_available = None; // ask the startup probe
-        renderer.kitty_available = is_kitty_graphics_compatible();
+        // Both protocols are the startup probe's call — it has not run yet.
+        renderer.sixel_available = None;
+        renderer.kitty_available = None;
         renderer
     }
 
     /// Test constructor — inject a writer and an encoder. The injected encoder
     /// is assumed to work, so SIXEL is forced on: a test process has no
-    /// terminal to probe and the tests stub the encoder anyway.
-    /// `kitty_available` starts off and is switched on by the tests that
-    /// exercise that path: terminal detection reads the environment, which
-    /// cannot be varied per-test without racing the other tests.
+    /// terminal to probe and the tests stub the encoder anyway. The Kitty path
+    /// starts off and is switched on by the tests that exercise it.
     fn with_writer(out: Box<dyn Write + Send>, encoder: Box<dyn SixelEncoder>) -> Self {
         Self {
             out,
             encoder,
             sixel_available: Some(true),
-            kitty_available: false,
+            kitty_available: Some(false),
             sixel_cache: None,
             last_sixel_gen: 0,
             last_sixel_rect: None,
@@ -179,10 +196,12 @@ impl CoverRenderer {
     /// The UI reads this (a frame late) to decide whether the half-block
     /// fallback is needed on top of it.
     pub fn native_active(&self) -> bool {
-        if self.kitty_available {
-            self.kitty_active
-        } else {
-            self.sixel_cache.is_some()
+        match self.protocol() {
+            Protocol::Kitty => self.kitty_active,
+            Protocol::Sixel => self.sixel_cache.is_some(),
+            // Nothing was drawn, so the block layer must stay: a panel with
+            // neither is the one outcome worth ruling out.
+            Protocol::Blocks => false,
         }
     }
 
@@ -193,14 +212,35 @@ impl CoverRenderer {
             .unwrap_or_else(|| terminal_caps().sixel)
     }
 
-    /// Render the cover via whichever protocol this terminal supports:
-    /// Kitty if available, otherwise SIXEL. Mutually exclusive — the two
-    /// graphics layers would otherwise fight over the same area.
-    pub fn render(&mut self, params: &CoverParams) {
-        if self.kitty_available {
-            self.render_kitty(params);
+    /// Whether the terminal answered the Kitty protocol's own query.
+    fn kitty_supported(&self) -> bool {
+        self.kitty_available
+            .unwrap_or_else(|| terminal_caps().kitty)
+    }
+
+    /// Which protocol this terminal gets. Resolved per frame rather than at
+    /// construction because the probe runs after `App::new`; the answer cannot
+    /// change afterwards, so the two layers stay mutually exclusive.
+    fn protocol(&self) -> Protocol {
+        if self.kitty_supported() {
+            Protocol::Kitty
+        } else if self.sixel_supported() {
+            Protocol::Sixel
         } else {
-            self.render_sixel(params);
+            Protocol::Blocks
+        }
+    }
+
+    /// Render the cover via whichever protocol this terminal supports:
+    /// Kitty if it answered, else SIXEL. Mutually exclusive — the two graphics
+    /// layers would otherwise fight over the same area.
+    pub fn render(&mut self, params: &CoverParams) {
+        match self.protocol() {
+            Protocol::Kitty => self.render_kitty(params),
+            Protocol::Sixel => self.render_sixel(params),
+            // The half-block layer keeps the panel; there is nothing to draw
+            // and nothing to clear.
+            Protocol::Blocks => {}
         }
     }
 
@@ -269,34 +309,51 @@ impl CoverRenderer {
 
         match image::load_from_memory(&cover[..]) {
             Ok(img) => {
-                let (img_w, img_h) = img.dimensions();
-                // Approximate cell size: 10 px wide × 20 px tall (Kitty default)
-                let cell_w = 10u32;
-                let cell_h = 20u32;
-                let area_w = w_chars as u32 * cell_w;
-                let area_h = h_chars as u32 * cell_h;
+                // The box in pixels, from the same cell size the half-block
+                // layer is laid out with. Hard-coded 10×20 was wrong on every
+                // terminal whose cells are not that, which is most of them.
+                let cell_w = params.cell_px.0.max(1) as u32;
+                let cell_h = params.cell_px.1.max(1) as u32;
+                let box_w = (w_chars as u32 * cell_w).max(1);
+                let box_h = (h_chars as u32 * cell_h).max(1);
 
-                // Scale image to fill the cover rect, preserving its aspect
-                // (which is the rect's aspect too — see `fit_cover_rect`).
-                // Deliberately not capped at 1.0: a cap left artwork smaller
-                // than the rect rendered at its own size, uncovered strip and
-                // all, which is one of the ways the panel showed through.
-                let scale = (area_w as f64 / img_w as f64).min(area_h as f64 / img_h as f64);
-                let out_w = (img_w as f64 * scale).round().max(1.0) as u32;
-                let out_h = (img_h as f64 * scale).round().max(1.0) as u32;
+                // Stretched to the box rather than fitted inside it: the box is
+                // already aspect-fitted to the artwork (`player_view::fit_cover_rect`),
+                // so filling it is exact, and letterboxing here would only
+                // re-open the slack the cover panel used to show.
+                let resized = img.resize_exact(box_w, box_h, image::imageops::FilterType::Lanczos3);
 
-                let resized = img.resize_exact(out_w, out_h, image::imageops::FilterType::Lanczos3);
+                // The header below says `f=100`, which means *PNG*: the
+                // terminal trusts that byte when it picks a decoder and drops
+                // the image when the payload is something else — silently, and
+                // doubly so under `q=2`. This used to send raw RGB (right
+                // pixels, right size, wrong format), which is why Konsole
+                // showed an empty cover panel over a payload that was
+                // perfectly well formed. Encode what the header promises.
+                // `PngEncoder::new` is the fast preset, and the raster is only
+                // the cover panel — a few milliseconds, once per cover.
                 let rgb = resized.to_rgb8();
-                let raw = rgb.into_raw();
+                let mut png = Vec::new();
+                if let Err(e) = image::codecs::png::PngEncoder::new(&mut png).write_image(
+                    rgb.as_raw(),
+                    box_w,
+                    box_h,
+                    image::ExtendedColorType::Rgb8,
+                ) {
+                    tracing::warn!("Failed to encode cover for the Kitty protocol: {e}");
+                    return;
+                }
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
 
-                // Base64 encode the pixel data
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&raw);
+                // Place the image at the cover rect. The protocol draws at the
+                // cursor, and after a ratatui draw that is wherever the last
+                // changed cell happened to be — so it is set explicitly here,
+                // exactly as the SIXEL path does. (There used to be a `p=`
+                // parameter here holding the pixel offset; `p` is the
+                // *placement id*, not a position, and terminals that validate
+                // it — Konsole — dropped the whole image for it.)
+                let _ = write!(self.out, "\x1b[{};{}H", y_chars + 1, x_chars + 1);
 
-                // Pixel position (p=x,y) from character cell position
-                let px = x_chars as u32 * cell_w;
-                let py = y_chars as u32 * cell_h;
-
-                // Output Kitty protocol — NO cursor movement, NO crossterm
                 let max_chunk = crate::constants::runtime::KITTY_CHUNK_SIZE;
                 for (i, chunk) in b64.as_bytes().chunks(max_chunk).enumerate() {
                     let chunk_str =
@@ -306,14 +363,26 @@ impl CoverRenderer {
                     } else {
                         0
                     };
-                    // `c`/`r` tell the terminal how many cells the image
-                    // occupies. This used to say `c=3`, which asked every
-                    // Kitty terminal for a three-column cover; naming both
-                    // dimensions ties the image to the cover rect exactly.
-                    let _ = write!(
-                        self.out,
-                        "\x1b_Ga=T,f=100,s={out_w},v={out_h},c={w_chars},r={h_chars},p={px},{py},m={more};{chunk_str}\x1b\\",
-                    );
+                    if i == 0 {
+                        // `c`/`r` tell the terminal how many cells the image
+                        // occupies. This used to say `c=3`, which asked every
+                        // Kitty terminal for a three-column cover; naming both
+                        // dimensions ties the image to the cover rect exactly.
+                        // `q=2` asks for no reply at all: an error message is
+                        // an APC sequence, and one arriving after startup is
+                        // read as *keystrokes* by the input thread.
+                        let _ = write!(
+                            self.out,
+                            "\x1b_Ga=T,f=100,q=2,s={box_w},v={box_h},c={w_chars},r={h_chars},m={more};{chunk_str}\x1b\\",
+                        );
+                    } else {
+                        // Continuation chunks carry the payload and the `m`
+                        // flag and nothing else. Repeating the whole command
+                        // header on each one — which is what this did — makes
+                        // every chunk a *separate*, truncated image; Konsole
+                        // rejects those outright.
+                        let _ = write!(self.out, "\x1b_Gm={more};{chunk_str}\x1b\\");
+                    }
                 }
                 let _ = self.out.flush();
                 self.kitty_active = true;
@@ -330,7 +399,9 @@ impl CoverRenderer {
         // cover is the same one that was cleared.
         self.last_kitty_rect = None;
         if self.kitty_active {
-            let _ = write!(self.out, "\x1b_Ga=d,d=I\x1b\\");
+            // `q=2`: no reply, for the same reason the display command asks
+            // for none — a late APC reply is read as keystrokes.
+            let _ = write!(self.out, "\x1b_Ga=d,d=I,q=2\x1b\\");
             let _ = self.out.flush();
             self.kitty_active = false;
         }
@@ -500,17 +571,68 @@ pub struct TerminalCaps {
     /// The terminal advertised SIXEL graphics in its primary device
     /// attributes reply (DA1, parameter 4).
     pub sixel: bool,
+    /// The terminal answered the Kitty graphics protocol's own query.
+    pub kitty: bool,
+    /// A multiplexer is between tmper and the terminal it is drawing on.
+    /// Both graphics answers are worthless when one is: see [`detect_mux`].
+    pub mux: Option<Mux>,
+}
+
+/// A terminal multiplexer in the output path.
+///
+/// Graphics payloads do not survive one by default. tmux and screen pass them
+/// only through an explicit passthrough envelope that their users have to
+/// enable, and zellij likewise; without it the bytes are swallowed *silently*
+/// while the query answers may still come from the real terminal underneath —
+/// the one combination that would leave the cover panel blank. So a
+/// multiplexer means the half-block layer, full stop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mux {
+    Tmux,
+    Screen,
+    Zellij,
+}
+
+/// Which multiplexer tmper is running inside, if any.
+fn detect_mux() -> Option<Mux> {
+    mux_from(|name| std::env::var_os(name).is_some())
+}
+
+/// [`detect_mux`] with the environment lookup passed in: the process
+/// environment cannot be varied per-test without racing every other test.
+fn mux_from(has: impl Fn(&str) -> bool) -> Option<Mux> {
+    if has("TMUX") {
+        Some(Mux::Tmux)
+    } else if has("STY") {
+        Some(Mux::Screen)
+    } else if has("ZELLIJ") {
+        Some(Mux::Zellij)
+    } else {
+        None
+    }
 }
 
 /// xterm's "report character cell size in pixels" (`CSI 16 t`), plus the pair
 /// of text-area reports (`CSI 14 t` / `CSI 18 t`) for terminals that implement
-/// only those — their quotient gives the same answer — and finally the primary
-/// device attributes request (`CSI c`).
+/// only those — their quotient gives the same answer — then the Kitty graphics
+/// protocol's support query, and finally the primary device attributes
+/// request (`CSI c`).
+///
+/// The Kitty query is an APC sequence; terminals that do not implement the
+/// protocol ignore it (verified on Konsole 26.08, which *does* implement it
+/// and answers `\x1b_Gi=31;OK\x1b\\`, and on the terminals that do not, where
+/// nothing is drawn and nothing is answered).
 ///
 /// DA1 goes **last** on purpose. Replies come back in the order the queries
 /// were sent and every terminal answers DA1, so a complete DA1 reply is a
 /// barrier: everything asked before it has already arrived.
-const TERMINAL_QUERY: &[u8] = b"\x1b[16t\x1b[14t\x1b[18t\x1b[c";
+const TERMINAL_QUERY: &[u8] = b"\x1b[16t\x1b[14t\x1b[18t\
+\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\
+\x1b[c";
+
+/// The part of [`TERMINAL_QUERY`] that is safe to send through a multiplexer:
+/// the cell-size reports and the DA1 barrier, none of the graphics questions.
+const TERMINAL_QUERY_NO_GRAPHICS: &[u8] = b"\x1b[16t\x1b[14t\x1b[18t\x1b[c";
 
 /// How long the terminal gets to answer before we settle for `TIOCGWINSZ`.
 ///
@@ -565,8 +687,15 @@ pub fn probe_terminal_once() -> TerminalCaps {
         // Sixel". Terminals that omit the 4 cannot display a sixel and say so
         // here rather than by silently swallowing the payload.
         tracing::info!(
-            "terminal graphics: sixel {} (DA1)",
-            if caps.sixel { "yes" } else { "no" }
+            "terminal graphics: sixel {} (DA1), kitty {} (a=q){}",
+            if caps.sixel { "yes" } else { "no" },
+            if caps.kitty { "yes" } else { "no" },
+            match caps.mux {
+                Some(Mux::Tmux) => " — inside tmux, using block art",
+                Some(Mux::Screen) => " — inside screen, using block art",
+                Some(Mux::Zellij) => " — inside zellij, using block art",
+                None => "",
+            }
         );
         caps
     })
@@ -587,8 +716,23 @@ pub fn probe_terminal_once() -> TerminalCaps {
 /// to `InternalEvent::PrimaryDeviceAttributes`, which has no public `Event`
 /// counterpart and is dropped by the reader.
 fn query_terminal(budget: Duration) -> TerminalCaps {
+    let mux = detect_mux();
     let mut out = std::io::stdout();
-    query_terminal_on(&mut out, std::io::stdin().as_raw_fd(), budget)
+    let mut caps = query_terminal_on(
+        &mut out,
+        std::io::stdin().as_raw_fd(),
+        budget,
+        mux.is_none(),
+    );
+    caps.mux = mux;
+    // Whatever the multiplexer answered, it was not the terminal: a payload
+    // would be swallowed, so no graphics — and the answers are dropped rather
+    // than reported, to keep the log honest about what was used.
+    if mux.is_some() {
+        caps.sixel = false;
+        caps.kitty = false;
+    }
+    caps
 }
 
 /// [`query_terminal`] with the terminal passed in.
@@ -598,13 +742,23 @@ fn query_terminal(budget: Duration) -> TerminalCaps {
 /// Taking the descriptor as a parameter is what lets the tests drive that loop
 /// over a pipe, where "data is waiting" and "nothing ever arrives" are both
 /// reproducible without a terminal.
-fn query_terminal_on(out: &mut dyn Write, fd: RawFd, budget: Duration) -> TerminalCaps {
+///
+/// `graphics` is false inside a multiplexer: the questions are not asked and
+/// the answers are not read, because neither would describe the terminal the
+/// image has to survive in.
+fn query_terminal_on(
+    out: &mut dyn Write,
+    fd: RawFd,
+    budget: Duration,
+    graphics: bool,
+) -> TerminalCaps {
     let mut caps = TerminalCaps::default();
-    if out
-        .write_all(TERMINAL_QUERY)
-        .and_then(|_| out.flush())
-        .is_err()
-    {
+    let query = if graphics {
+        TERMINAL_QUERY
+    } else {
+        TERMINAL_QUERY_NO_GRAPHICS
+    };
+    if out.write_all(query).and_then(|_| out.flush()).is_err() {
         return caps;
     }
 
@@ -614,9 +768,10 @@ fn query_terminal_on(out: &mut dyn Write, fd: RawFd, budget: Duration) -> Termin
     loop {
         // The DA1 reply is the barrier: it was asked last, so once it is
         // complete every earlier answer is already in `seen`. Waiting longer
-        // would only slow startup down.
-        if let Some(sixel) = parse_da1_sixel(&seen) {
-            caps.sixel = sixel;
+        // would only slow startup down. The answers are read out after the
+        // loop, so that a run that never asked the graphics questions cannot
+        // come back holding their answers.
+        if parse_da1_sixel(&seen).is_some() {
             break;
         }
         let left = deadline.saturating_duration_since(Instant::now());
@@ -655,10 +810,45 @@ fn query_terminal_on(out: &mut dyn Write, fd: RawFd, budget: Duration) -> Termin
     // Whatever arrived, parse it — a terminal may answer one query and not the
     // other, and half an answer is still worth having.
     caps.cell_px = parse_cell_size_reply(&seen);
-    if let Some(sixel) = parse_da1_sixel(&seen) {
-        caps.sixel = sixel;
+    if graphics {
+        caps.sixel = parse_da1_sixel(&seen).unwrap_or(false);
+        // No reply is a no: the query asks a question every implementation of
+        // the protocol answers, so silence means the protocol is not there to
+        // be asked. `Some(false)` would mean the terminal rejected the query.
+        caps.kitty = parse_kitty_reply(&seen).unwrap_or(false);
     }
     caps
+}
+
+/// Whether the terminal answered the Kitty graphics protocol's query with OK.
+///
+/// The reply to `a=q` is `\x1b_Gi=31;OK\x1b\\` — an APC string carrying the id
+/// the query was sent with and the verdict. Only `OK` counts: anything else
+/// (an error reply, another program's response, silence) leaves the protocol
+/// unusable, and the caller falls back rather than painting an image the
+/// terminal would eat.
+fn parse_kitty_reply(bytes: &[u8]) -> Option<bool> {
+    let mut i = 0;
+    while i + 3 < bytes.len() {
+        // `ESC _ G` — the APC introducer.
+        if bytes[i] != 0x1b || bytes[i + 1] != b'_' || bytes[i + 2] != b'G' {
+            i += 1;
+            continue;
+        }
+        let Some(semi) = bytes[i + 3..].iter().position(|b| *b == b';') else {
+            return None; // the parameters are still arriving
+        };
+        let body = i + 3 + semi + 1;
+        let Some(end) = bytes[body..]
+            .windows(2)
+            .position(|w| w == b"\x1b\\")
+            .map(|p| body + p)
+        else {
+            return None; // the message is still arriving
+        };
+        return Some(&bytes[body..end] == b"OK");
+    }
+    None
 }
 
 /// The SIXEL bit of a primary device attributes reply, if the reply is here.
@@ -785,32 +975,6 @@ fn csi_reports(bytes: &[u8]) -> Vec<Vec<u16>> {
 /// from them.
 fn plausible_cell(w: u16, h: u16) -> Option<(u16, u16)> {
     ((1..=64).contains(&w) && (1..=128).contains(&h)).then_some((w, h))
-}
-
-/// Returns true if the terminal supports the Kitty graphics protocol.
-/// Checks known env vars — no stdin query needed.
-fn is_kitty_graphics_compatible() -> bool {
-    // Inside a multiplexer the graphics sequences are swallowed unless
-    // passthrough is explicitly configured, and they fail silently. That was
-    // survivable while the block art was always drawn underneath; now that the
-    // blocks stand aside for a native image, guessing wrong would leave an
-    // empty panel. Fall through to SIXEL / blocks instead.
-    if std::env::var_os("TMUX").is_some() || std::env::var_os("STY").is_some() {
-        return false;
-    }
-    // Native Kitty terminal
-    if std::env::var("KITTY_WINDOW_ID").is_ok() {
-        return true;
-    }
-    // WezTerm: sets TERM_PROGRAM=WezTerm, supports full Kitty protocol
-    if matches!(std::env::var("TERM_PROGRAM").as_deref(), Ok("WezTerm")) {
-        return true;
-    }
-    // Ghostty: supports Kitty protocol
-    if std::env::var("GHOSTTY_RESOURCES_DIR").is_ok() {
-        return true;
-    }
-    false
 }
 
 #[cfg(test)]
@@ -1162,7 +1326,7 @@ mod tests {
         write_fd(write_end.0, b"\x1b[6;15;8t\x1b[?62;1;4c");
 
         let mut sent = Vec::new();
-        let caps = query_terminal_on(&mut sent, read_end.0, Duration::from_secs(5));
+        let caps = query_terminal_on(&mut sent, read_end.0, Duration::from_secs(5), true);
 
         assert_eq!(caps.cell_px, Some((8, 15)));
         assert!(caps.sixel, "DA1 parameter 4 advertises sixel");
@@ -1185,7 +1349,7 @@ mod tests {
         });
 
         let mut sent = Vec::new();
-        let caps = query_terminal_on(&mut sent, read_end.0, Duration::from_secs(5));
+        let caps = query_terminal_on(&mut sent, read_end.0, Duration::from_secs(5), true);
         tail.join().expect("writer thread");
 
         assert_eq!(caps.cell_px, Some((8, 15)));
@@ -1200,7 +1364,7 @@ mod tests {
 
         let started = Instant::now();
         let mut sent = Vec::new();
-        let caps = query_terminal_on(&mut sent, read_end.0, Duration::from_millis(40));
+        let caps = query_terminal_on(&mut sent, read_end.0, Duration::from_millis(40), true);
         let waited = started.elapsed();
 
         assert_eq!(caps, TerminalCaps::default());
@@ -1226,7 +1390,7 @@ mod tests {
 
         let started = Instant::now();
         let mut sent = Vec::new();
-        let caps = query_terminal_on(&mut sent, read_end.0, Duration::from_secs(30));
+        let caps = query_terminal_on(&mut sent, read_end.0, Duration::from_secs(30), true);
         let waited = started.elapsed();
 
         assert_eq!(caps.cell_px, None, "it did not answer the cell query");
@@ -1245,7 +1409,7 @@ mod tests {
         write_fd(write_end.0, b"\x1b[6;15;8t\x1b[?62;1;2;6;9;15;18;21;22;29c");
 
         let mut sent = Vec::new();
-        let caps = query_terminal_on(&mut sent, read_end.0, Duration::from_secs(5));
+        let caps = query_terminal_on(&mut sent, read_end.0, Duration::from_secs(5), true);
 
         assert_eq!(caps.cell_px, Some((8, 15)));
         assert!(!caps.sixel);
@@ -1313,7 +1477,7 @@ mod tests {
 
         let started = Instant::now();
         let mut sent = Vec::new();
-        let caps = query_terminal_on(&mut sent, read_end.0, Duration::from_secs(30));
+        let caps = query_terminal_on(&mut sent, read_end.0, Duration::from_secs(30), true);
         let waited = started.elapsed();
 
         assert_eq!(caps, TerminalCaps::default());
@@ -1419,12 +1583,11 @@ mod tests {
         bytes
     }
 
-    /// The terminal-detection path reads the environment, which a test cannot
-    /// vary without racing every other test in the process, so the resolved
-    /// flag is switched on directly — the same way `sixel_available` is.
+    /// The probe cannot run in a test process, so the resolved flag is pinned
+    /// directly — the same way `sixel_available` is.
     fn kitty_renderer(buf: &SharedBuf) -> CoverRenderer {
         let mut r = renderer(buf);
-        r.kitty_available = true;
+        r.kitty_available = Some(true);
         r
     }
 
@@ -1495,6 +1658,211 @@ mod tests {
         assert!(
             r.needs_clear(),
             "SIXEL residue must be cleared for the search results"
+        );
+    }
+
+    // ── Kitty payload geometry ──
+
+    /// The protocol draws at the cursor and the image is scaled into the cell
+    /// box it is told to occupy, so both have to be stated: the cursor is moved
+    /// to the cover rect (after a ratatui draw it is wherever the last changed
+    /// cell was), and the raster is the rect's pixels.
+    #[test]
+    fn the_kitty_payload_is_placed_at_the_rect_in_the_terminals_pixels() {
+        let buf = SharedBuf::default();
+        let mut r = kitty_renderer(&buf);
+        let png = make_png();
+
+        let mut p = params(1, (4, 2, 8, 6), Some(&png));
+        p.cell_px = (8, 15); // the box is 64x90 px
+        r.render(&p);
+
+        let out = sent(&buf);
+        assert!(
+            out.contains("\x1b[3;5H"),
+            "the image must be placed at the rect, not at the cursor: {out:?}"
+        );
+        assert!(out.contains("s=64,v=90"), "raster is the box's pixels");
+        assert!(out.contains("c=8,r=6"), "and it occupies the box's cells");
+        // `p` is the placement id. Sending the pixel offset there made
+        // terminals that validate it — Konsole — drop the image entirely.
+        assert!(!out.contains(",p="), "no pixel offset in the `p` slot");
+    }
+
+    /// The header says `f=100`, which means PNG, and the terminal picks its
+    /// decoder from that byte. This path used to send raw RGB underneath it:
+    /// the right pixels at the right size in the wrong format, which Konsole
+    /// threw away without a word — under `q=2` it cannot even complain. What
+    /// the header promises is what has to go on the wire.
+    #[test]
+    fn the_kitty_payload_is_the_png_its_header_promises() {
+        let buf = SharedBuf::default();
+        let mut r = kitty_renderer(&buf);
+        r.render(&params(1, (0, 0, 8, 6), Some(&make_png())));
+
+        let out = sent(&buf);
+        assert!(out.contains(",f=100,"), "the header declares PNG: {out:?}");
+
+        // Reassemble the transmission: the first chunk's data follows the
+        // command, every later one is `\x1b_Gm=N;<data>`.
+        let mut b64 = String::new();
+        for seq in out.split("\x1b_G").skip(1) {
+            let body = seq.split("\x1b\\").next().unwrap_or_default();
+            if let Some((_, data)) = body.split_once(';') {
+                b64.push_str(data);
+            }
+        }
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(&b64)
+            .expect("the chunks are one base64 stream");
+
+        assert_eq!(&raw[..8], b"\x89PNG\r\n\x1a\n", "PNG magic, not raw RGB");
+        let (w, h) = (
+            u32::from_be_bytes(raw[16..20].try_into().unwrap()),
+            u32::from_be_bytes(raw[20..24].try_into().unwrap()),
+        );
+        assert!(
+            out.contains(&format!("s={w},v={h}")),
+            "the PNG's own raster {w}x{h} is the one the header names"
+        );
+    }
+
+    /// A payload larger than one escape sequence is transmitted in chunks, and
+    /// only the first of them carries the command: the rest are `m` and data.
+    /// Repeating the header — which this did — turns every chunk into its own
+    /// truncated image, and Konsole rejects the lot.
+    #[test]
+    fn a_large_kitty_payload_is_chunked_as_one_transmission() {
+        let buf = SharedBuf::default();
+        let mut r = kitty_renderer(&buf);
+        // Noise, so the PNG does not compress below the chunk size.
+        let mut state = 0x12345678u32;
+        let noise: Vec<u8> = (0..200 * 200 * 3)
+            .map(|_| {
+                state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                (state >> 24) as u8
+            })
+            .collect();
+        let png = {
+            let mut bytes = Vec::new();
+            image::DynamicImage::ImageRgb8(
+                image::RgbImage::from_raw(200, 200, noise).expect("200x200x3 bytes"),
+            )
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+            bytes
+        };
+
+        r.render(&params(1, (0, 0, 25, 13), Some(&png)));
+        let out = sent(&buf);
+
+        assert_eq!(
+            out.matches("\x1b_Ga=T").count(),
+            1,
+            "one transmission, one command header"
+        );
+        assert!(out.contains("\x1b_Gm=1;"), "continuation chunks follow it");
+        assert!(
+            out.contains("\x1b_Gm=0;"),
+            "and the last chunk ends the transmission"
+        );
+        assert!(
+            out.contains(",q=2,"),
+            "no replies: a late one is read as keystrokes"
+        );
+    }
+
+    /// Truecolor beats a 256-register palette, so a terminal that answers both
+    /// questions gets Kitty.
+    #[test]
+    fn kitty_wins_over_sixel_when_both_are_answered() {
+        let buf = SharedBuf::default();
+        let mut r = kitty_renderer(&buf);
+        assert_eq!(r.protocol(), Protocol::Kitty);
+
+        r.sixel_available = Some(true); // still Kitty
+        assert_eq!(r.protocol(), Protocol::Kitty);
+        r.kitty_available = Some(false);
+        assert_eq!(r.protocol(), Protocol::Sixel, "no answer → the other one");
+    }
+
+    /// The one outcome the fallback chain exists to prevent: an empty cover
+    /// panel. When neither protocol is confirmed, nothing is written at all and
+    /// the block layer keeps the panel.
+    #[test]
+    fn a_terminal_that_answers_neither_question_keeps_the_block_art() {
+        let buf = SharedBuf::default();
+        let mut r = renderer(&buf);
+        r.sixel_available = Some(false);
+        r.kitty_available = Some(false);
+        assert_eq!(r.protocol(), Protocol::Blocks);
+
+        let p = params(1, (0, 0, 10, 10), Some(&[1, 2, 3]));
+        r.render(&p);
+
+        assert_eq!(written(&buf), 0, "no payload for a terminal that eats it");
+        assert!(!r.native_active(), "and the blocks must stay");
+    }
+
+    // ── Kitty capability query ──
+
+    #[test]
+    fn the_kitty_reply_is_read() {
+        assert_eq!(parse_kitty_reply(b"\x1b_Gi=31;OK\x1b\\"), Some(true));
+        assert_eq!(parse_kitty_reply(b"\x1b_Gi=31;ENOENT\x1b\\"), Some(false));
+    }
+
+    #[test]
+    fn an_incomplete_kitty_reply_is_not_an_answer() {
+        assert_eq!(parse_kitty_reply(b"\x1b_Gi=31;OK"), None, "no terminator");
+        assert_eq!(parse_kitty_reply(b"\x1b_Gi=31"), None, "no separator");
+        assert_eq!(parse_kitty_reply(b"\x1b_Gi=31;"), None, "no message");
+        assert_eq!(parse_kitty_reply(b""), None);
+    }
+
+    /// The replies share one input buffer, and DA1 arrives after the query —
+    /// reading the wrong one would hand a SIXEL-only terminal a Kitty payload.
+    #[test]
+    fn the_kitty_reply_is_found_among_other_traffic() {
+        let both = b"\x1b[6;15;8t\x1b_Gi=31;OK\x1b\\\x1b[?62;1;4c";
+        assert_eq!(parse_kitty_reply(both), Some(true));
+        assert_eq!(parse_da1_sixel(both), Some(true));
+
+        let sixel_only = b"\x1b[6;15;8t\x1b[?62;1;4c";
+        assert_eq!(parse_kitty_reply(sixel_only), None, "silence is not an OK");
+    }
+
+    // ── Multiplexers ──
+
+    #[test]
+    fn a_multiplexer_is_recognised_by_its_variable() {
+        assert_eq!(mux_from(|k| k == "TMUX"), Some(Mux::Tmux));
+        assert_eq!(mux_from(|k| k == "STY"), Some(Mux::Screen));
+        assert_eq!(mux_from(|k| k == "ZELLIJ"), Some(Mux::Zellij));
+        assert_eq!(mux_from(|_| false), None);
+    }
+
+    /// Under a multiplexer the graphics questions are not even asked: the
+    /// answers would describe the terminal on the far side of a layer that
+    /// swallows payloads, which is how a cover panel ends up blank.
+    #[test]
+    fn no_graphics_questions_are_asked_inside_a_multiplexer() {
+        let (read_end, write_end) = Fd::pipe();
+        // Everything a fully capable terminal could say.
+        write_fd(write_end.0, b"\x1b[6;15;8t\x1b_Gi=31;OK\x1b\\\x1b[?62;1;4c");
+        drop(write_end);
+
+        let mut asked = Vec::new();
+        let caps = query_terminal_on(&mut asked, read_end.0, Duration::from_secs(5), false);
+
+        assert_eq!(caps.cell_px, Some((8, 15)), "the cell size still matters");
+        assert!(!caps.sixel && !caps.kitty, "neither answer was taken up");
+        assert!(
+            !asked.windows(3).any(|w| w == b"\x1b_G"),
+            "the Kitty query was sent through a multiplexer"
         );
     }
 }
