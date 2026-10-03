@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Terminal music player (codename: **tmper**) — a terminal-native music player for Arch Linux/KDE Plasma. Written in Rust with ratatui TUI framework. Supports multi-format audio decoding, metadata display, cover art, LRC lyrics syncing, spectrum visualizer, playlist management, a SQLite library index, and Vim-style keyboard navigation.
 
-The project is **implemented and working** (~10,900 lines of Rust, 181 tests + 6 device-gated). The source of truth for the architecture is `DESIGN.md`; `STATUS.md` holds current capabilities/limits/plan; per-session change logs live in `progress/`. All docs (CLAUDE.md / README.md / DESIGN.md / STATUS.md) were reconciled with the code on 2026-10-03.
+The project is **implemented and working** (~11,000 lines of Rust, 223 tests + 6 device-gated). The source of truth for the architecture is `DESIGN.md`; `STATUS.md` holds current capabilities/limits/plan; per-session change logs live in `progress/`. All docs (CLAUDE.md / README.md / DESIGN.md / STATUS.md) were reconciled with the code on 2026-10-03.
 
 ## Layout
 
@@ -120,8 +120,9 @@ cargo llvm-cov --all-features --workspace # prints per-module line coverage + a 
 - The default suite is **device-free**: App/engine tests build a headless engine (`App::new_headless` → `AudioEngine::new_headless` → `Sink::new_idle()`), so `cargo test` passes with no sound card. Exactly 6 tests touch real output; they are named `audio_output_*` and marked `#[ignore]`
 - Logical modules have `#[cfg(test)] mod tests { ... }` inline
 - Tests follow Arrange-Act-Assert pattern; cover normal paths + boundary conditions
-- **Line coverage 75.55%** (measured 2026-10-03 via `cargo llvm-cov`, after the XDG/streaming merge;
-  a few timing-sensitive tests make this wobble by ~0.3% between runs).
-  The merge added ~880 lines of production code (engine rewrite, scanner, FTS5) against only 7 new
-  tests, so the total dipped from 77.81%. Do not claim "covered" from test counts alone — run
-  `cargo llvm-cov --all-features --workspace` to measure.
+- **Line coverage 80.09%** (measured 2026-10-03 via `cargo llvm-cov`; a few timing-sensitive tests
+  make this wobble by ~0.3% between runs). The XDG/streaming merge briefly dipped it to 75.55%
+  before the follow-up fix series recovered it. Weakest modules now: `library/scanner.rs` (30%,
+  error paths), `paths.rs` (29% — the non-test XDG branches cannot run under `cfg(test)`),
+  `audio/engine.rs` (48%, the merged rewrite), `ui/views/player_view.rs` (72%).
+  Do not claim "covered" from test counts alone — run `cargo llvm-cov --all-features --workspace`.

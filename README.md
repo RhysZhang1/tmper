@@ -367,8 +367,8 @@ tmper/
 ```bash
 cargo build                        # 调试编译
 cargo build --release              # 发布编译（资源已内嵌的可执行文件）
-cargo test                         # 默认：全部无需音频设备的测试
-cargo test audio_output_ -- --ignored --test-threads=1  # 需要真实/虚拟设备
+cargo test                         # 默认：全部无需音频设备的测试（223 个）
+cargo test audio_output_ -- --ignored --test-threads=1  # 需要真实/虚拟设备（6 个）
 cargo clippy -- -D warnings        # 代码检查
 cargo fmt --all                    # 格式化
 

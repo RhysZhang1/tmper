@@ -610,18 +610,32 @@ pub struct Config {
 ### 9.1 处理流程
 
 ```
-crossterm KeyEvent → KeyHandler (双键序列检测: gg, dd)
-    → handle_key_event():
-        ├─ 视图切换键 (1-7, 8)
-        ├─ Esc (清除搜索/帮助)
-        ├─ 搜索模式 (累积字符)
-        ├─ 视图专用按键 (Playlists/Browser/Library/Settings)
-        └─ 全局按键 (Space, n/p, j/k, Enter, ...)
+crossterm KeyEvent
+    ├─ 文本输入模式（命令/队列搜索/曲库搜索/歌单重命名）
+    │     → 绕过 KeyHandler，直接 handle_key_event()（累积字符）
+    └─ 其余
+          → KeyHandler (双键序列检测: gg, dd) → handle_key_event()
+                ├─ 视图切换键 (1-7, 8)
+                ├─ Esc (清除搜索/帮助)
+                ├─ 视图专用按键 (Playlists/Browser/Library/Settings)
+                └─ 全局按键 (Space, n/p, j/k, Enter, ...)
 ```
+
+**文本输入模式必须绕过 `KeyHandler`**（`App::in_text_entry`，见 `handlers/mod.rs`）。`KeyHandler`
+既解析 `dd` 又持有退出键，若在打字时仍然生效，搜索框里输入 `dd` 会删掉当前曲目、输入 `q`
+会退出程序、含 `g`/`d` 的查询会丢字符。绕过时同时丢弃挂起的前缀键，避免它稍后冒出来。
 
 ### 9.2 双键序列
 
-`KeyHandler` 记录上一个按键 + 时间戳。200ms 内收到第二个键 → 匹配序列（`gg` → JumpTop, `dd` → RemoveSelected）。超时 → 丢弃第一个键。
+`KeyHandler` 把裸 `g` / `d` 暂存一个按键的时间，因为二者都可能开启序列（`gg` → JumpTop,
+`dd` → RemoveSelected）。不变式是**每个按键都恰好按顺序投递一次**，因此挂起键有两条释放途径：
+
+1. 下一个按键到达 —— 能组成序列就组成，否则挂起键先于当前键投递；
+2. 窗口（200ms）过期后由 `flush_expired()` 释放 —— 事件循环每个 tick 调用，所以单个 `g`/`d`
+   不会一直挂着等下一个按键。
+
+只有**不带修饰键**的 `g`/`d` 才开启序列：`Ctrl+d`（半页滚动）若被当作 `d` 前缀，连按两次就会
+变成 `dd` 并删除曲目。窗口过期后，挂起键不再与后续按键配对。
 
 ### 9.3 Cover 渲染与输入隔离
 
@@ -661,12 +675,14 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 
 > 下表统计的是**测试用例数量**，不是**行覆盖率**。行覆盖率需用 `cargo llvm-cov` 单独测量
 > （见 [10.3 行覆盖率](#103-行覆盖率)）。
-> **现状（2026-10-03 实测，XDG/流式合并后）**：总行覆盖率 **75.55%**（函数 79.13%、区域 76.48%；
-> 少数计时敏感测试会让该数字每次浮动 ~0.3%）。合并带进约 880 行新生产代码
-> （引擎重写、扫描器、FTS5），而新增测试只有 7 个，故总覆盖率从 77.81% 回落。
-> 最大的几个未覆盖块：`audio/engine.rs` 49%（重写后从 94% 掉下来）、
-> `library/scanner.rs` 30%、`ui/views/player_view.rs` 72%、`app/playback.rs` 24%、
-> `input/handler.rs` 19%。
+> **现状（2026-10-03 实测）**：总行覆盖率 **80.09%**（函数 82.13%、区域 79.16%；
+> 少数计时敏感测试会让该数字每次浮动 ~0.3%）。XDG/流式合并一度把它压到 75.55%
+> （合并带进约 880 行新生产代码，而新增测试只有 7 个），随后的缺陷修复系列又推回 80% 以上 ——
+> 主要来自 `input/handler.rs` 19%→98%（该文件此前零测试）、`app/playback.rs` 24%→64%、
+> `ui/cover/mod.rs` 59%→87%、`visualizer/render.rs` 82%→96%。
+> 剩余的几个未覆盖块：`library/scanner.rs` 30%（生产扫描器的错误路径）、
+> `paths.rs` 29%（非测试分支在 `cfg(test)` 下无法执行）、`audio/engine.rs` 48%、
+> `ui/views/player_view.rs` 72%。
 
 | 模块 | 测试数 | 覆盖内容 |
 |------|--------|----------|
@@ -675,31 +691,35 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 | lyrics/parser.rs | 7 | 标准 LRC、元数据、多时间戳、逐字、空文件、损坏行、排序 |
 | visualizer/fft.rs | 1 | 440Hz 峰值检测 |
 | visualizer/processor.rs | 2 | 桶数量、平滑收敛 |
-| visualizer/render.rs | 2 | 渲染输出、颜色渐变 |
+| visualizer/render.rs | 6 | 渲染输出、颜色渐变、行宽恰为 width（含 num_bars > width）、`bar_at_column` 跨过居中留白、绘制与配色逐列对齐 |
 | library/database.rs | 10 | upsert、重复更新、搜索、artists、albums、delete、前缀精确匹配、`delete_missing_under` 不误伤同前缀兄弟目录 |
 | library/scanner.rs | 1 | 扩展名过滤（生产扫描器 `scan_incremental` 的错误路径尚无单测） |
 | library/playlist_manager.rs | 2 | M3U 往返、相对路径 |
 | metadata/reader.rs | 3 | FLAC、WAV（无标签）、不存在的文件 |
-| ui/theme.rs | 4 | hex 颜色解析（有效/无效回退）、缺失主题回退默认、真实主题 13 色槽加载 |
+| ui/theme.rs | 5 | hex 颜色解析（有效/无效回退）、多字节输入不 panic、缺失主题回退默认、真实主题 13 色槽加载 |
 | input/command.rs | 4 | quit、theme、volume、unknown |
+| input/handler.rs | 15 | 双键序列、非组合键两个按键都按序投递、超时释放挂起键、过期前缀不再配对、Ctrl+D 永不解析为 dd、退出键清理挂起、控制字符过滤 |
+| input/keymap.rs | 5 | 单字符/^X/特殊名称、非 ASCII 单字符不再静默变空格、未知名称回退 |
 | playlist.rs | — | （v3.5 后仅存 `PlaylistData` 数据模型，逻辑并入 playlist_view） |
 | paths.rs | 2 | XDG 目录拼接、测试期重定向到临时根（三个目录都隔离） |
-| app/mod.rs | 13 | 视图切换、音量、循环、加载播放、停止、命令模式、搜索（含 4 个 tokio 集成式） |
+| app/mod.rs | 14 | 视图切换、音量、循环、加载播放、停止、命令模式、搜索、文本输入模式旁路集合（含 4 个 tokio 集成式） |
+| app/playback.rs | 8 | 陈旧歌单游标下 prev/next 不越界、空歌单 no-op、曲终三模式、FFT 取最新样本窗口 |
+| app/persistence.rs | 1 | 部分字段的 state.json 仍恢复其包含的设置 |
 | app/handlers/mod.rs | 22 | 键位匹配、视图分发切换、滚动 clamp、test_support 辅助（test_app/seed_settings） |
-| app/handlers/browser.rs | 14 | 焦点切换、库/文件系统导航与 clamp、Enter 进入目录/加库去重、Backspace 边界、刷新过滤排序 |
+| app/handlers/browser.rs | 16 | 焦点切换、库/文件系统导航与 clamp、Enter 进入目录/加库去重、混合目录（子目录+音频）选中行不串位、Backspace 边界、刷新过滤排序 |
 | app/handlers/library.rs | 19 | 面板导航、搜索输入/回车/回退、clamp_scroll、库加载 upsert 与去重、Enter 播放、扫描完成才剪枝（含 1 个 tokio 集成式） |
 | app/handlers/playlist.rs | 18 | 焦点切换、新建歌单插入模式、展开/删除/重复保护、M3U 导出、flat-model 解析、clamp |
 | app/handlers/settings.rs | 16 | 布局 19 行、j/k 导航 clamp、主题/柱数/平滑/音量/步长/封面循环、跳过行、Enter 动作、M3U 导出、config 持久化 |
 | ui/render_tests | 2 | 最小支持尺寸渲染、极窄终端不 panic |
 | ui/views/file_browser_view.rs | 3 | 空/填充渲染、聚焦样式 |
-| ui/views/library_view.rs | 4 | 三面板标题、数据行、搜索栏、光标闪烁 |
+| ui/views/library_view.rs | 6 | 三面板标题、数据行、搜索栏、光标闪烁、长列表滚动保持选中行可见 |
 | ui/views/lyrics_view.rs | 4 | 空提示、歌词+当前高亮、offset 标签、滚动保持当前行可见 |
 | ui/views/playlist_view.rs | 8 | flat-model 行数/行号/解析、styled lines（展开/输入/播放前缀）、渲染与通知弹出 |
 | ui/views/settings_view.rs | 3 | rebuild_settings 布局与配置值、渲染冒烟（含 scroll clamp） |
 | ui/views/player_view.rs | 6 | cover 块渲染（空字节/零面积/内存 PNG）、渲染冒烟、搜索命中与无匹配 |
-| ui/cover/mod.rs | 6 | 一次性发送不变量、区域重发、视图切换/隐藏/无封面清除、chafa 失败不重试（注入式 writer/encoder） |
+| ui/cover/mod.rs | 9 | 一次性发送不变量、区域重发、视图切换/隐藏/无封面清除、chafa 失败不重试、Kitty 尺寸变化重发、搜索覆盖层清理两个协议（注入式 writer/encoder） |
 | ui/widgets/help_popup.rs | 1 | 帮助文案与当前键位/XDG 路径一致 |
-| **总计** | **187** | **181 默认运行 + 6 设备门控（`#[ignore]`）** |
+| **总计** | **229** | **223 默认运行 + 6 设备门控（`#[ignore]`）** |
 
 #### 测试分层
 
