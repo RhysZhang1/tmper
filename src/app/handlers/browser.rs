@@ -1,6 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::app::App;
+use crate::ipc::proto::Request;
 use crate::ui::views::file_browser_view::{BrowserPanel, FsItem};
 
 impl App {
@@ -91,15 +92,21 @@ impl App {
             KeyCode::Enter => match state.focused {
                 BrowserPanel::Library => {
                     let idx = state.selected_library_index;
-                    let lib_len = state.library_paths.len();
-                    if idx < lib_len {
+                    let removed = if idx < state.library_paths.len() {
                         let path = state.library_paths.remove(idx);
-                        self.ui_state.player.tracks.retain(|t| t.path != path);
-                        if path.is_dir() {
-                            let _ = self.library_db.delete_missing_under(&path, &[]);
-                        }
                         let new_len = state.library_paths.len();
                         state.selected_library_index = idx.min(new_len.saturating_sub(1));
+                        Some(path)
+                    } else {
+                        None
+                    };
+                    if let Some(path) = removed {
+                        // Taking a path out of the library takes its rows out
+                        // of the index — for a directory, everything under it,
+                        // and for a single file, that file. The queue is left
+                        // alone: what is playing now is not a claim about what
+                        // the collection holds.
+                        self.dispatch(Request::RemoveLibraryPath { root: path });
                         self.save_library_paths();
                     }
                 }
@@ -183,7 +190,6 @@ mod tests {
     use super::*;
     use crate::app::handlers::test_support::test_app;
     use crate::ui::views::file_browser_view::{BrowserPanel, FsItem};
-    use crate::ui::TrackDisplay;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -328,27 +334,57 @@ mod tests {
 
     // ── Enter actions ──
 
+    /// Removing a library path takes its rows out of the index with it — the
+    /// two describe the same files, and a row whose directory is no longer
+    /// claimed would keep listing itself in every panel.
     #[test]
-    fn test_enter_library_removes_path_and_track() {
+    fn test_enter_library_removes_path_and_forgets_its_rows() {
         let mut app = test_app();
         let removed = PathBuf::from("/music/gone.flac");
-        app.ui_state.player.tracks.push(TrackDisplay {
-            path: removed.clone(),
-            title: "Gone".into(),
-            artist: "A".into(),
-            duration_secs: 1.0,
-        });
+        let kept = PathBuf::from("/music/keep.flac");
+        for path in [&removed, &kept] {
+            app.player_mut()
+                .library_mut()
+                .db_mut()
+                .upsert(
+                    &path.to_string_lossy(),
+                    "T",
+                    Some("A"),
+                    Some("Album"),
+                    None,
+                    Some(1),
+                    Some(1),
+                    None,
+                    None,
+                    1.0,
+                    0,
+                    44100,
+                    2,
+                    "FLAC",
+                    10,
+                    1,
+                )
+                .expect("upsert");
+        }
         {
             let s = &mut app.ui_state.file_browser_state;
             s.focused = BrowserPanel::Library;
-            s.library_paths = vec![removed.clone(), PathBuf::from("/music/keep.flac")];
+            s.library_paths = vec![removed.clone(), kept.clone()];
             s.selected_library_index = 0;
         }
         press(&mut app, KeyCode::Enter);
         let s = &app.ui_state.file_browser_state;
         assert!(!s.library_paths.contains(&removed));
-        assert_eq!(s.library_paths, vec![PathBuf::from("/music/keep.flac")]);
-        assert!(app.ui_state.player.tracks.iter().all(|t| t.path != removed));
+        assert_eq!(s.library_paths, vec![kept.clone()]);
+        let db = app.player().library().db();
+        assert!(db
+            .get_by_path(&removed.to_string_lossy())
+            .unwrap()
+            .is_none());
+        assert!(
+            db.get_by_path(&kept.to_string_lossy()).unwrap().is_some(),
+            "only the removed path's rows go"
+        );
     }
 
     #[test]

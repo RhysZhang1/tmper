@@ -17,8 +17,6 @@ use crate::event::AppEvent;
 use crate::input::handler::KeyHandler;
 use crate::input::keymap::{self, KeyBindings};
 use crate::ipc::proto::{Event, NoticeLevel, Request};
-use crate::library::database::LibraryDb;
-use crate::library::scanner::ScanUpdate;
 use crate::ui::cover::{CoverParams, CoverRenderer};
 use crate::ui::theme::Theme;
 use crate::ui::{self, PlayerCore, TrackDisplay, UiState};
@@ -89,14 +87,10 @@ pub struct App {
     should_quit: bool,
     key_handler: KeyHandler,
     key_bindings: KeyBindings,
-    library_db: LibraryDb,
     /// The newest spectrum frame pushed by the player.
     player_bars: Vec<f32>,
     cover_renderer: CoverRenderer,
     last_seek_time: Option<std::time::Instant>,
-    library_scan_tx: Option<tokio::sync::mpsc::UnboundedSender<ScanUpdate>>,
-    library_scan_cancels: Vec<Arc<std::sync::atomic::AtomicBool>>,
-    library_scans_active: usize,
     /// The track the client has already done its per-path work for. Cover art
     /// and lyrics are read from the file by the client, not shipped over the
     /// socket; this is what notices that the path changed and the work is due.
@@ -127,8 +121,6 @@ impl App {
         config: &Config,
         player: Box<dyn PlayerHandle>,
     ) -> crate::error::AppResult<Self> {
-        let library_db = LibraryDb::open(&crate::paths::data_dir().join("library.db"))
-            .unwrap_or_else(|_| LibraryDb::open_memory().expect("in-memory db"));
         let key_bindings = KeyBindings::load();
         let quit_key = keymap::parse_key_str(&key_bindings.quit);
         let app = Self {
@@ -146,13 +138,9 @@ impl App {
             should_quit: false,
             key_handler: KeyHandler::new(runtime::KEY_TIMEOUT_MS, quit_key),
             key_bindings,
-            library_db,
             player_bars: Vec::new(),
             cover_renderer: CoverRenderer::new(),
             last_seek_time: None,
-            library_scan_tx: None,
-            library_scan_cancels: Vec::new(),
-            library_scans_active: 0,
             loaded_track: None,
         };
         // Persisted state is restored by `run`, not here: constructing an App
@@ -239,6 +227,16 @@ impl App {
                     .collect();
             }
             Event::Visualizer { bars } => self.player_bars = bars,
+            Event::LibraryArtists { artists } => self.apply_library_artists(artists),
+            Event::LibraryAlbums { artist, albums } => self.apply_library_albums(artist, albums),
+            Event::LibraryTracks {
+                artist,
+                album,
+                tracks,
+            } => self.apply_library_tracks(artist, album, tracks),
+            Event::SearchResults { query, tracks } => self.apply_search_results(query, tracks),
+            Event::ScanProgress { scanned, changed } => self.apply_scan_progress(scanned, changed),
+            Event::ScanFinished(report) => self.apply_scan_finished(report),
             Event::Notice { level, message } => {
                 if matches!(level, NoticeLevel::Error) {
                     tracing::warn!("Player notice: {message}");
@@ -335,10 +333,6 @@ impl App {
         // SIXEL at all, which is what decides between a graphics payload and
         // the half-block art.
         crate::ui::cover::probe_terminal_once();
-
-        let (library_scan_tx, mut library_scan_rx) =
-            tokio::sync::mpsc::unbounded_channel::<ScanUpdate>();
-        self.library_scan_tx = Some(library_scan_tx);
 
         // Seed visible_rows from actual terminal size so the first keypress
         // uses the correct value instead of the hardcoded default (20).
@@ -462,12 +456,6 @@ impl App {
                         needs_draw = true;
                     }
                 }
-                update = library_scan_rx.recv() => {
-                    if let Some(update) = update {
-                        self.handle_scan_update(update);
-                        needs_draw = true;
-                    }
-                }
             }
 
             if self.should_quit {
@@ -529,10 +517,9 @@ impl App {
             }
         }
 
-        // Stop the scanner channel, then tell the player we are leaving — an
-        // in-process player saves its state and lets the device go, a socket
-        // one does nothing at all and keeps playing.
-        self.library_scan_tx = None;
+        // Tell the player we are leaving — an in-process player saves its
+        // state and lets the device go, a socket one does nothing at all and
+        // keeps playing.
         if let Err(e) = self.player.detach() {
             tracing::warn!("Failed to detach from the player cleanly: {e}");
         }

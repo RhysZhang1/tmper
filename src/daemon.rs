@@ -110,12 +110,25 @@ pub struct Daemon {
     idle_since: Option<Instant>,
 }
 
+/// Give the player's scanner a runtime to walk on.
+///
+/// Only the daemon has one: scans are spawned tasks, and a synchronous test
+/// has no reactor to spawn them on. There, a scan request is refused and
+/// logged — the same thing a client sees when a scan of an empty directory
+/// turns up nothing.
+fn attach_scanner(player: &mut Player) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        player.attach_scanner(handle);
+    }
+}
+
 impl Daemon {
     pub fn new(config: &Config) -> AppResult<Self> {
         let mut player = Player::new(config)?;
         // The daemon is the program's persistent half, so it is the one that
         // restores what the last run left behind.
         player.load_state();
+        attach_scanner(&mut player);
         Ok(Self {
             player,
             clients: HashMap::new(),
@@ -126,8 +139,10 @@ impl Daemon {
 
     #[cfg(test)]
     pub fn new_headless(config: &Config) -> Self {
+        let mut player = Player::new_headless(config);
+        attach_scanner(&mut player);
         Self {
-            player: Player::new_headless(config),
+            player,
             clients: HashMap::new(),
             next_id: 0,
             idle_since: None,

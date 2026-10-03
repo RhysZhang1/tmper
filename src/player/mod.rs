@@ -8,6 +8,7 @@
 //! tested path and the shipped path are the same path.
 
 pub mod fft;
+pub mod library;
 pub mod persistence;
 
 use std::path::{Path, PathBuf};
@@ -18,6 +19,8 @@ use crate::config::Config;
 use crate::error::AppResult;
 use crate::ipc::proto::{Event, NoticeLevel, QueueTrack, RepeatMode, Request, StateSnapshot};
 use crate::metadata::reader::read_metadata;
+
+use self::library::{Library, ScanNotice};
 
 /// Display metadata of the track that is loaded, whether or not it is still
 /// sounding: stopping does not clear the title off the screen.
@@ -56,6 +59,9 @@ impl NowPlaying {
 
 pub struct Player {
     engine: AudioEngine,
+    /// The index of what is on disk, and the scanner that fills it. Moved
+    /// here in phase 2: SQLite has one writer, and two TUIs are two clients.
+    library: Library,
     /// The global queue. Insertion-ordered, unique by path.
     queue: Vec<QueueTrack>,
     playing_index: Option<usize>,
@@ -97,19 +103,26 @@ pub struct Player {
 
 impl Player {
     pub fn new(config: &Config) -> AppResult<Self> {
-        Ok(Self::with_engine(config, AudioEngine::new()?))
+        Ok(Self::with_engine(
+            config,
+            AudioEngine::new()?,
+            Library::open(),
+        ))
     }
 
     /// Device-free player for tests: the sink's queue receiver is dropped, so
-    /// nothing opens ALSA/PulseAudio and nothing actually sounds.
+    /// nothing opens ALSA/PulseAudio and nothing actually sounds. The library
+    /// is in memory as well — a test that wrote to the real `library.db` would
+    /// leave rows for the next test to find.
     #[cfg(test)]
     pub fn new_headless(config: &Config) -> Self {
-        Self::with_engine(config, AudioEngine::new_headless())
+        Self::with_engine(config, AudioEngine::new_headless(), Library::in_memory())
     }
 
-    fn with_engine(config: &Config, engine: AudioEngine) -> Self {
+    fn with_engine(config: &Config, engine: AudioEngine, library: Library) -> Self {
         Self {
             engine,
+            library,
             queue: Vec::new(),
             playing_index: None,
             active_list: Vec::new(),
@@ -144,6 +157,17 @@ impl Player {
     /// if a track ended, and report the state as it now stands.
     pub fn tick(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
+        // Scanner messages first: they are the index being written, and a
+        // client that asked for a scan should hear about it before it hears
+        // about the clock again.
+        for notice in self.library.drain() {
+            events.push(match notice {
+                ScanNotice::Progress { scanned, changed } => {
+                    Event::ScanProgress { scanned, changed }
+                }
+                ScanNotice::Finished(report) => Event::ScanFinished(report),
+            });
+        }
         for event in self.engine.drain_events() {
             match event {
                 // The duration it carries is already in the snapshot, read
@@ -215,6 +239,49 @@ impl Player {
             Request::QueueRemove { path } => self.remove_from_queue(&path),
             Request::SetActiveList { songs } => {
                 self.active_list = songs;
+                Vec::new()
+            }
+            Request::LibraryArtists => vec![Event::LibraryArtists {
+                artists: self.library.artists(),
+            }],
+            Request::LibraryAlbums { artist } => vec![Event::LibraryAlbums {
+                albums: self.library.albums_by(&artist),
+                artist,
+            }],
+            Request::LibraryTracks { artist, album } => vec![Event::LibraryTracks {
+                tracks: self.library.tracks_by(&artist, &album),
+                artist,
+                album,
+            }],
+            Request::SearchLibrary { query } => vec![Event::SearchResults {
+                tracks: self.library.search(&query),
+                query,
+            }],
+            Request::IndexPaths { paths } => {
+                // The queue's own paths go in too: a track the user played is
+                // part of the collection whether or not a scan has seen it.
+                let mut all = paths;
+                all.extend(self.queue.iter().map(|track| track.path.clone()));
+                self.library.ensure_indexed(&all);
+                Vec::new()
+            }
+            Request::ScanLibrary { root } => {
+                // A refusal (no runtime to walk on) is logged, not announced:
+                // to everything the user can see, a scan of nothing and no
+                // scan at all are the same event.
+                self.library.start_scan(&root);
+                Vec::new()
+            }
+            Request::CancelScan => {
+                self.library.cancel_scans();
+                Vec::new()
+            }
+            Request::RemoveLibraryPath { root } => {
+                // The queue is deliberately untouched: it is what is playing
+                // now, not what the collection claims. A track that is
+                // sounding keeps sounding, and `QueueRemove` is the verb for
+                // taking a row out of the queue.
+                self.library.forget(&root);
                 Vec::new()
             }
             Request::SubscribeVisualizer { on } => {
@@ -316,6 +383,24 @@ impl Player {
     /// The queue as the client mirrors it.
     pub fn queue(&self) -> Vec<QueueTrack> {
         self.queue.clone()
+    }
+
+    /// Hand the scanner a runtime to walk on. Called once, by the daemon: the
+    /// client has no business spawning work in the player's process, and a
+    /// scan requested without one is refused rather than attempted.
+    pub fn attach_scanner(&mut self, handle: tokio::runtime::Handle) {
+        self.library.attach_scanner(handle);
+    }
+
+    /// The index, for tests that seed or assert on it directly.
+    #[cfg(test)]
+    pub fn library(&self) -> &Library {
+        &self.library
+    }
+
+    #[cfg(test)]
+    pub fn library_mut(&mut self) -> &mut Library {
+        &mut self.library
     }
 
     /// The most recent spectrum frame.
@@ -1105,6 +1190,187 @@ mod tests {
         player.execute(Request::SubscribeVisualizer { on: false });
         assert!(!player.fft_subscribed);
         assert!(player.fft_cancel.is_none(), "the thread must be stopped");
+    }
+
+    // ── Library ──
+
+    /// Seed one index row without touching disk: these tests are about the
+    /// questions the daemon answers, not about the tag reader.
+    fn index_track(player: &mut Player, path: &str, title: &str, artist: &str, album: &str) {
+        player
+            .library_mut()
+            .db_mut()
+            .upsert(
+                path,
+                title,
+                Some(artist),
+                Some(album),
+                None,
+                Some(1),
+                Some(1),
+                Some("Rock"),
+                Some(2024),
+                200.0,
+                320,
+                44100,
+                2,
+                "FLAC",
+                10_000,
+                1_000,
+            )
+            .expect("upsert failed");
+    }
+
+    #[test]
+    fn the_artist_list_comes_back_as_an_event() {
+        let mut player = player();
+        index_track(&mut player, "/music/a.flac", "A", "Artist", "Album");
+
+        let events = player.execute(Request::LibraryArtists);
+        let Some(Event::LibraryArtists { artists }) = events.first() else {
+            panic!("expected an artist answer, got {events:?}");
+        };
+        assert_eq!(artists, &vec!["Artist".to_string()]);
+    }
+
+    /// Both answers carry the cursor key back, so the client can drop a reply
+    /// that arrived after the user moved on.
+    #[test]
+    fn album_and_track_answers_echo_the_key_they_were_asked_for() {
+        let mut player = player();
+        index_track(&mut player, "/music/a.flac", "A", "Artist", "Album");
+
+        let events = player.execute(Request::LibraryAlbums {
+            artist: "Artist".into(),
+        });
+        assert!(
+            matches!(
+                events.first(),
+                Some(Event::LibraryAlbums { artist, albums })
+                    if artist == "Artist" && albums == &vec!["Album".to_string()]
+            ),
+            "got {events:?}"
+        );
+
+        let events = player.execute(Request::LibraryTracks {
+            artist: "Artist".into(),
+            album: "Album".into(),
+        });
+        let Some(Event::LibraryTracks {
+            artist,
+            album,
+            tracks,
+        }) = events.first()
+        else {
+            panic!("expected a track answer, got {events:?}");
+        };
+        assert_eq!((artist.as_str(), album.as_str()), ("Artist", "Album"));
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].title, "A");
+        assert_eq!(tracks[0].artist, "Artist");
+    }
+
+    #[test]
+    fn a_search_reports_the_query_it_answered() {
+        let mut player = player();
+        index_track(&mut player, "/music/a.flac", "Nightfall", "Artist", "Album");
+
+        let events = player.execute(Request::SearchLibrary {
+            query: "night".into(),
+        });
+        let Some(Event::SearchResults { query, tracks }) = events.first() else {
+            panic!("expected search results, got {events:?}");
+        };
+        assert_eq!(query, "night");
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].path, PathBuf::from("/music/a.flac"));
+    }
+
+    /// A track the user played belongs in the collection even if no scan ever
+    /// walked its directory — and the client cannot say so, because it does not
+    /// know the queue the daemon is holding.
+    #[test]
+    fn indexing_paths_also_indexes_the_queue() {
+        let mut player = player();
+        player.set_queue(vec![QueueTrack {
+            path: fixture("test.wav"),
+            title: "test".into(),
+            artist: "X".into(),
+            duration_secs: 2.0,
+        }]);
+
+        player.execute(Request::IndexPaths { paths: Vec::new() });
+
+        let row = player
+            .library()
+            .db()
+            .get_by_path(&fixture("test.wav").to_string_lossy())
+            .expect("query")
+            .expect("the queue's track should be indexed");
+        assert_eq!(row.title, "test");
+    }
+
+    /// Forgetting a path is an edit to the collection, not to what is playing:
+    /// a track that is sounding keeps sounding.
+    #[test]
+    fn forgetting_a_path_drops_its_rows_and_leaves_the_queue_alone() {
+        let mut player = player();
+        index_track(&mut player, "/music/a.flac", "A", "Artist", "Album");
+        player.set_queue(vec![QueueTrack {
+            path: PathBuf::from("/music/a.flac"),
+            title: "A".into(),
+            artist: "Artist".into(),
+            duration_secs: 1.0,
+        }]);
+
+        player.execute(Request::RemoveLibraryPath {
+            root: PathBuf::from("/music"),
+        });
+
+        assert!(player.library().artists().is_empty(), "rows should be gone");
+        assert_eq!(player.queue().len(), 1, "the queue is not the library");
+    }
+
+    /// Without a runtime there is nothing to walk on, and a scan is refused
+    /// rather than allowed to panic inside `spawn_blocking`.
+    #[test]
+    fn a_scan_without_a_runtime_is_refused() {
+        let mut player = player();
+        player.execute(Request::ScanLibrary {
+            root: PathBuf::from("tests/fixtures"),
+        });
+        assert_eq!(player.library().scans_active(), 0);
+
+        player.execute(Request::CancelScan); // and cancelling is a no-op
+    }
+
+    /// The tick is where a scanner thread's report becomes a client's event.
+    #[tokio::test]
+    async fn a_finished_scan_reaches_the_client_as_an_event() {
+        let mut player = player();
+        player.attach_scanner(tokio::runtime::Handle::current());
+        player.execute(Request::ScanLibrary {
+            root: PathBuf::from("tests/fixtures"),
+        });
+
+        let report = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                for event in player.tick() {
+                    if let Event::ScanFinished(report) = event {
+                        return report;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the scan should finish");
+
+        assert!(report.complete);
+        assert_eq!(report.failed, 0);
+        assert!(report.scanned >= 3, "three fixtures at least: {report:?}");
+        assert_eq!(report.active, 0);
+        assert_eq!(player.library().artists().len(), 1, "test files carry tags");
     }
 
     // ── Shutdown ──

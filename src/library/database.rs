@@ -354,7 +354,9 @@ impl LibraryDb {
         Ok(result)
     }
 
-    #[cfg(test)]
+    /// Remove one row by exact path. Unlike [`Self::delete_missing_under`],
+    /// which addresses a directory by its prefix, this is how a single file
+    /// leaves the index.
     pub fn delete_by_path(&self, path: &str) -> AppResult<()> {
         self.conn
             .execute("DELETE FROM tracks WHERE path = ?1", params![path])

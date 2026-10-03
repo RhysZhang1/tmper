@@ -48,6 +48,42 @@ pub struct QueueTrack {
     pub duration_secs: f64,
 }
 
+/// What one finished scan did, as counted by the walker and the index.
+///
+/// Sent whole rather than as a sentence: the numbers are the daemon's, the
+/// sentence about them is the view's — the daemon has no keys to advertise and
+/// no status bar to fill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanReport {
+    pub scanned: usize,
+    pub changed: usize,
+    /// Rows dropped because the files are gone from disk. Zero unless the
+    /// walk was complete and was not cancelled.
+    pub removed: usize,
+    pub failed: usize,
+    pub cancelled: bool,
+    /// The walk could read everything it saw. `false` means the listing was
+    /// partial, and a partial listing is not evidence that anything is gone.
+    pub complete: bool,
+    /// Scans still running after this one ended.
+    pub active: usize,
+}
+
+/// One row of a library answer.
+///
+/// Deliberately not [`QueueTrack`]: a row in the index carries no duration,
+/// and its artist may be missing from the tags entirely. What the row should
+/// *look* like — `title`, or `title — artist` for a search that mixes artists
+/// together — is the view's decision, so both labels cross and neither is
+/// pre-formatted here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackLine {
+    pub path: PathBuf,
+    pub title: String,
+    /// Empty when the tags carry none.
+    pub artist: String,
+}
+
 /// Everything a client can ask for.
 ///
 /// Fire-and-forget: the daemon answers with events, never with a return value.
@@ -118,6 +154,46 @@ pub enum Request {
         songs: Vec<PathBuf>,
     },
 
+    /// The artist list — the library panel's first question.
+    LibraryArtists,
+    /// The albums of one artist. The artist comes back with the answer so a
+    /// client can drop a reply that lost a race with the cursor: two `j`
+    /// presses put two of these on the wire, and only the last one describes
+    /// where the user actually is.
+    LibraryAlbums {
+        artist: String,
+    },
+    /// The tracks of one album of one artist, for the same reason.
+    LibraryTracks {
+        artist: String,
+        album: String,
+    },
+    /// FTS5 prefix search over title, artist, album and genre. The query is
+    /// echoed back so a reply cannot land under a newer one.
+    SearchLibrary {
+        query: String,
+    },
+    /// Read the tags of any of these paths that are not indexed yet. The
+    /// queue's own paths are indexed too — a track that was played belongs in
+    /// the library whether or not a scan ever saw it.
+    IndexPaths {
+        paths: Vec<PathBuf>,
+    },
+    /// Walk a directory into the index, incrementally: files whose size and
+    /// mtime are unchanged are not re-read, and a complete walk prunes what is
+    /// gone from disk. Progress arrives as [`Event::ScanProgress`].
+    ScanLibrary {
+        root: PathBuf,
+    },
+    /// Stop every running scan at its next file boundary.
+    CancelScan,
+    /// Drop a directory from the index, along with the queue entries under
+    /// it. Sent when the user removes a library path: the rows describe files
+    /// the library no longer claims.
+    RemoveLibraryPath {
+        root: PathBuf,
+    },
+
     /// Start or stop the spectrum stream. The daemon runs the FFT thread only
     /// while at least one client is subscribed.
     SubscribeVisualizer {
@@ -159,11 +235,46 @@ pub enum Event {
     Snapshot(Box<StateSnapshot>),
     /// The whole queue, whenever it changes ([`StateSnapshot::queue_rev`]
     /// tells the client whether it has missed one).
-    Queue { rev: u64, tracks: Vec<QueueTrack> },
+    Queue {
+        rev: u64,
+        tracks: Vec<QueueTrack>,
+    },
     /// Spectrum bars, only while subscribed.
-    Visualizer { bars: Vec<f32> },
+    Visualizer {
+        bars: Vec<f32>,
+    },
+    /// The answers to the library questions. Each carries the key it was asked
+    /// for, so a client showing a cursor that has since moved can tell.
+    LibraryArtists {
+        artists: Vec<String>,
+    },
+    LibraryAlbums {
+        artist: String,
+        albums: Vec<String>,
+    },
+    LibraryTracks {
+        artist: String,
+        album: String,
+        /// In the index's own order, which is by track number.
+        tracks: Vec<TrackLine>,
+    },
+    SearchResults {
+        query: String,
+        tracks: Vec<TrackLine>,
+    },
+    /// A scan is still walking.
+    ScanProgress {
+        scanned: usize,
+        changed: usize,
+    },
+    /// A scan ended. The index has already been written and pruned — the
+    /// report describes work that is done, not work that is about to start.
+    ScanFinished(ScanReport),
     /// A one-line message for the client's notification toast.
-    Notice { level: NoticeLevel, message: String },
+    Notice {
+        level: NoticeLevel,
+        message: String,
+    },
     /// The daemon is exiting; clients should leave too.
     Bye,
 }
@@ -275,6 +386,27 @@ mod tests {
                     PathBuf::from("/music/b.flac"),
                 ],
             },
+            Request::LibraryArtists,
+            Request::LibraryAlbums {
+                artist: "一首歌的歌手".into(),
+            },
+            Request::LibraryTracks {
+                artist: "Artist".into(),
+                album: "Album".into(),
+            },
+            Request::SearchLibrary {
+                query: "night".into(),
+            },
+            Request::IndexPaths {
+                paths: vec![PathBuf::from("/music/a.flac")],
+            },
+            Request::ScanLibrary {
+                root: PathBuf::from("/music"),
+            },
+            Request::CancelScan,
+            Request::RemoveLibraryPath {
+                root: PathBuf::from("/music"),
+            },
             Request::SubscribeVisualizer { on: true },
             Request::SetFftParams {
                 num_bars: 32,
@@ -326,6 +458,44 @@ mod tests {
             Event::Visualizer {
                 bars: vec![0.0, 0.25, 1.0],
             },
+            Event::LibraryArtists {
+                artists: vec!["Artist".into(), "另一个".into()],
+            },
+            Event::LibraryAlbums {
+                artist: "Artist".into(),
+                albums: vec!["Album".into()],
+            },
+            Event::LibraryTracks {
+                artist: "Artist".into(),
+                album: "Album".into(),
+                tracks: vec![TrackLine {
+                    path: PathBuf::from("/music/a.flac"),
+                    title: "A".into(),
+                    artist: "Artist".into(),
+                }],
+            },
+            Event::SearchResults {
+                query: "night".into(),
+                tracks: vec![TrackLine {
+                    path: PathBuf::from("/music/一首歌.flac"),
+                    title: "A".into(),
+                    // A row whose tags carry no artist: empty, not a stand-in.
+                    artist: String::new(),
+                }],
+            },
+            Event::ScanProgress {
+                scanned: 12,
+                changed: 3,
+            },
+            Event::ScanFinished(ScanReport {
+                scanned: 12,
+                changed: 3,
+                removed: 1,
+                failed: 0,
+                cancelled: false,
+                complete: true,
+                active: 0,
+            }),
             Event::Notice {
                 level: NoticeLevel::Warn,
                 message: "daemon busy".into(),
