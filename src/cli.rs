@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "tmper", about = "A terminal-native music player")]
+#[command(name = "tmper", version, about = "A terminal-native music player")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -67,5 +67,24 @@ impl Command {
             | Command::Status
             | Command::Quit => true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::error::ErrorKind;
+
+    /// `--version` was missing for most of the project's life: clap only grows
+    /// the flag when the derive is told `version`, and without it the one
+    /// command every program answers exited with "unexpected argument".
+    #[test]
+    fn the_cli_answers_version() {
+        let err = Cli::try_parse_from(["tmper", "--version"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DisplayVersion);
+        assert!(
+            err.to_string().contains(env!("CARGO_PKG_VERSION")),
+            "the flag prints the version the binary was built from: {err}"
+        );
     }
 }

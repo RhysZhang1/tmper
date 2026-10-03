@@ -1,9 +1,14 @@
 [package]
 name = "tmper"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 license = "MIT"
 description = "A terminal-native music player for Arch Linux"
+# Not tmper's own code (that needs only 1.82, for `Option::is_none_or`) but the
+# tree under it: quantette, the colour quantiser behind icy_sixel, asks for 1.90.
+# Stating it here makes cargo fail on an old toolchain with a sentence about this
+# crate instead of one about a transitive dependency three levels down.
+rust-version = "1.90"
 
 [profile.release]
 opt-level = 3
