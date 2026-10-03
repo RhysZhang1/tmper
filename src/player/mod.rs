@@ -13,7 +13,7 @@ pub mod persistence;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use crate::audio::engine::{AudioEngine, PlaybackEvent};
+use crate::audio::engine::{AudioEngine, PlaybackEvent, PlaybackState};
 use crate::config::Config;
 use crate::error::AppResult;
 use crate::ipc::proto::{Event, NoticeLevel, QueueTrack, RepeatMode, Request, StateSnapshot};
@@ -43,6 +43,13 @@ pub struct Player {
     /// when it owned the policy.
     active_list: Vec<PathBuf>,
     now_playing: Option<NowPlaying>,
+    /// The track the last run ended on, from `state.json`.
+    ///
+    /// Startup deliberately does not resume it — a player that makes noise the
+    /// moment it exists is a player you learn to fear — but it is what `Resume`
+    /// falls back to when the deck is empty, so `play` after a restart means
+    /// "carry on" instead of "nothing happened".
+    last_track: Option<PathBuf>,
     repeat: RepeatMode,
     volume: f32,
     lyrics_offset_ms: i64,
@@ -78,6 +85,7 @@ impl Player {
             playing_index: None,
             active_list: Vec::new(),
             now_playing: None,
+            last_track: None,
             repeat: RepeatMode::Sequential,
             volume: config.playback.default_volume,
             lyrics_offset_ms: 0,
@@ -136,19 +144,19 @@ impl Player {
             Request::Toggle => {
                 if self.engine.is_playing() {
                     self.engine.pause();
+                    Vec::new()
                 } else {
-                    self.engine.resume();
+                    // Deliberately `resume` and not `engine.resume()`: the key
+                    // that silences the player has to be the key that brings it
+                    // back, whatever silence it was.
+                    self.resume()
                 }
-                Vec::new()
             }
             Request::Pause => {
                 self.engine.pause();
                 Vec::new()
             }
-            Request::Resume => {
-                self.engine.resume();
-                Vec::new()
-            }
+            Request::Resume => self.resume(),
             Request::Stop => {
                 self.stop_playback();
                 Vec::new()
@@ -405,14 +413,65 @@ impl Player {
         if was_playing {
             // Deleting the track that is sounding stops it: the user asked for
             // this row to be gone, and continuing to play it would be a lie.
-            self.stop_playback();
+            // Unload rather than stop, or `play` would faithfully start the
+            // track the user just deleted.
+            self.unload();
         }
         events
     }
 
+    /// Put sound back in the air: unpause, or start the loaded track over.
+    ///
+    /// "Resume" is deliberately wider than unpausing. [`Request::Stop`] does
+    /// not unload the track — the deck still has something on it — and a queue
+    /// that runs out is silenced the same way, so in both the only honest
+    /// reading of *play* is to start that track again. Answering `Paused` alone
+    /// (which is all this used to do through `engine.resume`) made `tmper stop`
+    /// a dead end: `tmper play`, the TUI's space bar and every media key after
+    /// it did nothing at all, and a stop was indistinguishable from a pause
+    /// that could not be undone.
+    fn resume(&mut self) -> Vec<Event> {
+        match self.engine.state() {
+            // Already on its way. Without this, a second press while the
+            // decoder is still loading would restart the track from the top.
+            state if state.is_active() => Vec::new(),
+            PlaybackState::Paused => {
+                self.engine.resume();
+                Vec::new()
+            }
+            // Stopped, or a load that failed. `Stop` rewound the position, so
+            // this is a restart rather than a continuation. With even the deck
+            // empty the track the last run ended on is the answer — otherwise a
+            // restarted daemon turns `play` into a key that does nothing.
+            _ => {
+                let path = self
+                    .now_playing
+                    .as_ref()
+                    .map(|now| now.path.clone())
+                    .or_else(|| self.last_track.clone());
+                match path {
+                    Some(path) => self.play(&path),
+                    None => Vec::new(),
+                }
+            }
+        }
+    }
+
+    /// Silence the player, keeping the track on the deck so [`Player::resume`]
+    /// can start it again. This is what [`Request::Stop`] means.
     fn stop_playback(&mut self) {
         self.engine.stop();
         self.playing_index = None;
+    }
+
+    /// Silence the player *and* take the track off the deck.
+    ///
+    /// For the cases where the track is gone rather than merely quiet. After
+    /// this `resume` has nothing to offer — which is the point: a track the
+    /// user deleted from the queue must not come back on the next keypress.
+    fn unload(&mut self) {
+        self.stop_playback();
+        self.now_playing = None;
     }
 
     fn set_volume(&mut self, volume: f32) {
@@ -653,6 +712,90 @@ mod tests {
 
         player.execute(Request::Toggle);
         assert!(player.state().status.is_active());
+    }
+
+    /// `stop` is not `pause`: it rewinds, so what `play` does afterwards is
+    /// start the track over rather than continue it.
+    #[tokio::test]
+    async fn stop_then_play_starts_the_track_again() {
+        let mut player = player();
+        player.execute(Request::Play {
+            path: fixture("test.wav"),
+        });
+
+        player.execute(Request::Stop);
+        assert_eq!(player.state().status, PlaybackState::Stopped);
+        // The deck still has the track on it — that is what makes `play` work.
+        assert!(player.state().path.is_some());
+
+        player.execute(Request::Resume);
+        assert!(
+            player.state().status.is_active(),
+            "play after stop must bring the track back"
+        );
+        // From the top, not from where it was silenced.
+        assert!(player.state().position_secs < 0.05);
+    }
+
+    /// The same wall the CLI hits, hit by the key that is supposed to be the
+    /// transport: space after a stop has to bring the music back.
+    #[tokio::test]
+    async fn toggle_after_a_stop_plays_again() {
+        let mut player = player();
+        player.execute(Request::Play {
+            path: fixture("test.wav"),
+        });
+        player.execute(Request::Stop);
+
+        player.execute(Request::Toggle);
+        assert!(
+            player.state().status.is_active(),
+            "space after a stop must not be a dead key"
+        );
+    }
+
+    /// With nothing loaded there is nothing to bring back, and inventing a
+    /// track would be worse than staying quiet.
+    #[test]
+    fn resume_with_an_empty_deck_does_nothing() {
+        let mut player = player();
+        player.execute(Request::Resume);
+        player.execute(Request::Toggle);
+        assert_eq!(player.state().status, PlaybackState::Stopped);
+        assert_eq!(player.state().path, None);
+    }
+
+    /// Deleting the playing row takes the track off the deck, so `play` cannot
+    /// resurrect what the user just removed.
+    #[tokio::test]
+    async fn a_deleted_track_is_not_resumable() {
+        let mut player = player();
+        player.execute(Request::Play {
+            path: fixture("test.wav"),
+        });
+        player.execute(Request::QueueRemove {
+            path: fixture("test.wav"),
+        });
+
+        assert_eq!(player.state().path, None, "the deck should be empty");
+        player.execute(Request::Resume);
+        assert_eq!(player.state().status, PlaybackState::Stopped);
+    }
+
+    /// A stop rewinds, which is what separates it from a pause — and why the
+    /// `play` after it is a restart rather than a continuation.
+    #[tokio::test]
+    async fn stop_rewinds_the_position() {
+        let mut player = player();
+        player.execute(Request::Play {
+            path: fixture("test.wav"),
+        });
+        // Let the clock run so there is a position to lose.
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        assert!(player.state().position_secs > 0.0);
+
+        player.execute(Request::Stop);
+        assert_eq!(player.state().position_secs, 0.0);
     }
 
     #[test]

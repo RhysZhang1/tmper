@@ -69,11 +69,16 @@ pub enum Request {
     Play {
         path: PathBuf,
     },
-    /// Space: pause if playing, resume if paused.
+    /// Space: pause if it is sounding, otherwise play.
     Toggle,
+    /// Hold the position: `Resume` continues from here.
     Pause,
+    /// Make sound come out again — unpause, or start the loaded track over if
+    /// it was stopped. Distinct from [`Request::Play`], which names a file.
     Resume,
-    /// Stop playback and stay stopped (`:stop`). Distinct from [`Request::Shutdown`].
+    /// Silence the player, releasing the audio device, and rewind. The track
+    /// stays loaded, so `Resume` starts it again from the top; distinct from
+    /// [`Request::Shutdown`], which ends the daemon.
     Stop,
     Next,
     Prev,

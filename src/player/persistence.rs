@@ -23,8 +23,8 @@ struct SavedState {
     volume: Option<f32>,
     repeat_mode: Option<RepeatMode>,
     lyrics_offset_ms: Option<i64>,
-    /// Recorded for reference only — startup deliberately does not resume
-    /// playback (see [`Player::load_state`]).
+    /// Remembered so `Resume` has somewhere to fall back to. Startup itself
+    /// deliberately does not resume playback (see [`Player::load_state`]).
     last_track_path: Option<String>,
 }
 
@@ -82,6 +82,9 @@ impl Player {
         if let Some(offset) = saved.lyrics_offset_ms {
             self.lyrics_offset_ms = offset;
         }
+        // Remembered, not played: the daemon stays silent until something asks
+        // for sound, and this is what `Resume` asks with.
+        self.last_track = saved.last_track_path.map(std::path::PathBuf::from);
         tracing::info!("Restored saved state (volume={:.2})", self.volume);
     }
 }
@@ -184,5 +187,35 @@ mod tests {
             (player.volume - 0.33).abs() < 1e-6,
             "unreadable state must not clobber the live value"
         );
+    }
+
+    /// Restoring a track is not starting it — but it is what makes `play` mean
+    /// something on a daemon that has just come up with an empty deck.
+    #[tokio::test]
+    async fn a_restored_track_is_what_resume_falls_back_to() {
+        let _guard = lock();
+        let track = std::fs::canonicalize("tests/fixtures/test.wav").expect("fixture file");
+        write_state_file(
+            "state.json",
+            &format!(
+                r#"{{"last_track_path": {:?}}}"#,
+                track.to_string_lossy().as_ref()
+            ),
+        );
+
+        let mut player = new_player();
+        player.load_state();
+        assert_eq!(
+            player.state().path,
+            None,
+            "loading state must not start playback"
+        );
+
+        player.execute(crate::ipc::proto::Request::Resume);
+        assert!(
+            player.state().status.is_active(),
+            "play must fall back to the track the last run ended on"
+        );
+        assert_eq!(player.state().path.as_deref(), Some(track.as_path()));
     }
 }
