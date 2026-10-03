@@ -501,13 +501,15 @@ fn render_right_panel(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
             Constraint::Percentage(36),
             Constraint::Length(1),
             Constraint::Length(1),
+            Constraint::Length(1),
         ])
         .split(area);
 
     render_lyrics_section(f, split[0], params);
     render_spectrum_section(f, split[1], params);
     render_song_info(f, split[2], params);
-    render_control_bar(f, split[3], params);
+    render_now_playing(f, split[3], params);
+    render_control_bar(f, split[4], params);
 }
 
 fn render_lyrics_section(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
@@ -644,6 +646,39 @@ fn render_song_info(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
         let para = Paragraph::new(line);
         f.render_widget(para, area);
     }
+}
+
+/// The track's name and artist on their own line, directly above the transport.
+///
+/// The cover panel draws them too, but only on the branch where it has no
+/// image to show — so with cover art on, the thing the window is *about* was
+/// nowhere on screen. This line does not care whether there is a cover.
+fn render_now_playing(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
+    let title = if params.title.is_empty() || params.title == "No track" {
+        "No track"
+    } else {
+        params.title
+    };
+
+    let mut spans = vec![Span::styled(
+        format!(" {}", title),
+        Style::default()
+            .fg(params.theme.text)
+            .add_modifier(Modifier::BOLD),
+    )];
+
+    // "—" is what an absent artist looks like on the way in (same test the
+    // cover fallback makes), and a separator with nothing after it reads as a
+    // rendering bug rather than as missing metadata.
+    if !params.artist.is_empty() && params.artist != "—" {
+        spans.push(Span::styled(" — ", Style::default().fg(params.theme.muted)));
+        spans.push(Span::styled(
+            params.artist.to_string(),
+            Style::default().fg(params.theme.secondary),
+        ));
+    }
+
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_control_bar(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
@@ -1004,6 +1039,45 @@ mod tests {
     // ── Panel sections ──
 
     /// Render the whole view at a fixed size and flatten the buffer to text.
+    /// The now-playing row: the one the transport bar sits under, read out of
+    /// the right panel only.
+    ///
+    /// Anchored to the transport rather than to the title, because the cover
+    /// panel centres the same title in its no-image fallback — searching for
+    /// the text finds that row first whenever there is no cover. The columns
+    /// are indexed into the cell grid, not into a string: a wide glyph is one
+    /// cell spanning two columns, so string offsets drift on any CJK content
+    /// to the left of the cut.
+    fn now_playing_row(params: &PlayerViewParams, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|f| render_player_view(f, f.area(), params))
+            .unwrap();
+
+        let cells = terminal.backend().buffer().content();
+        let w = width as usize;
+        let row_of = |text: &str| {
+            cells.chunks(w).position(|row| {
+                row.iter()
+                    .map(|c| c.symbol())
+                    .collect::<String>()
+                    .contains(text)
+            })
+        };
+
+        let transport = row_of("Vol:").expect("the transport bar is on screen");
+        assert!(transport > 0, "nothing is drawn above the transport");
+        // The left half of the row is the cover panel and its divider.
+        let right_starts_at = w * 33 / 100 + 1;
+        let row = &cells[(transport - 1) * w..transport * w];
+        row[right_starts_at..]
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>()
+            .trim()
+            .to_string()
+    }
+
     fn render_to_string(params: &PlayerViewParams, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
@@ -1118,6 +1192,76 @@ mod tests {
             !out.contains("line00"),
             "the window has scrolled away from the start"
         );
+    }
+
+    /// The reason this line exists. Cover art on used to mean the track name
+    /// and artist appeared *nowhere*: the only code that drew them was the
+    /// cover panel's no-image fallback, so switching covers on deleted them
+    /// from the screen. So this test supplies a cover and demands the text.
+    #[test]
+    fn the_track_name_and_artist_survive_a_cover() {
+        let theme = Theme::default();
+        let cover_rect = Cell::new((0u16, 0u16, 0u16, 0u16));
+        let cache = RefCell::new(None);
+        let playlists = PlaylistManagerState::default();
+        let art = Arc::new(make_png());
+
+        let mut params = base_params(&theme, &cover_rect, &cache, &playlists, &[]);
+        params.title = "Bohemian Rhapsody";
+        params.artist = "Queen";
+        params.show_cover_art = true;
+        params.cover_art = Some(&art);
+
+        assert_eq!(
+            now_playing_row(&params, 100, 30),
+            "Bohemian Rhapsody — Queen"
+        );
+    }
+
+    /// Without a cover the row must not change — the fallback panel already
+    /// centres the same text, and this line is not a second copy of it that
+    /// happens to sit elsewhere.
+    #[test]
+    fn the_track_name_row_does_not_depend_on_a_cover() {
+        let theme = Theme::default();
+        let cover_rect = Cell::new((0u16, 0u16, 0u16, 0u16));
+        let cache = RefCell::new(None);
+        let playlists = PlaylistManagerState::default();
+        let art = Arc::new(make_png());
+
+        let mut with_cover = base_params(&theme, &cover_rect, &cache, &playlists, &[]);
+        with_cover.title = "Bohemian Rhapsody";
+        with_cover.artist = "Queen";
+        with_cover.cover_art = Some(&art);
+
+        let mut without = base_params(&theme, &cover_rect, &cache, &playlists, &[]);
+        without.title = "Bohemian Rhapsody";
+        without.artist = "Queen";
+        without.cover_art = None;
+
+        assert_eq!(
+            now_playing_row(&with_cover, 100, 30),
+            now_playing_row(&without, 100, 30)
+        );
+    }
+
+    /// An absent artist must not leave a separator dangling off the title.
+    #[test]
+    fn a_missing_artist_leaves_no_dangling_separator() {
+        let theme = Theme::default();
+        let cover_rect = Cell::new((0u16, 0u16, 0u16, 0u16));
+        let cache = RefCell::new(None);
+        let playlists = PlaylistManagerState::default();
+
+        let mut params = base_params(&theme, &cover_rect, &cache, &playlists, &[]);
+        params.title = "Untitled Demo";
+        params.artist = "";
+
+        assert_eq!(now_playing_row(&params, 100, 30), "Untitled Demo");
+
+        // The player passes "—" through for an artist it does not know.
+        params.artist = "—";
+        assert_eq!(now_playing_row(&params, 100, 30), "Untitled Demo");
     }
 
     #[test]

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Terminal music player (codename: **tmper**) — a terminal-native music player for Arch Linux/KDE Plasma. Written in Rust with ratatui TUI framework. Supports multi-format audio decoding, metadata display, cover art, LRC lyrics syncing, spectrum visualizer, playlist management, a SQLite library index, and Vim-style keyboard navigation.
 
-The project is **implemented and working** (~24,750 lines of Rust, 521 tests + 6 device-gated) and is **two processes in one binary**: a long-lived `tmper daemon` that owns the sound, the queue and the library, and a TUI client that attaches to it over a unix socket. Closing the TUI does not stop the music. The daemon also publishes the player on the session bus as an MPRIS2 player, so Plasma media controls, media keys and `playerctl` drive the same state the TUI shows.
+The project is **implemented and working** (~24,800 lines of Rust, 524 tests + 7 device-gated) and is **two processes in one binary**: a long-lived `tmper daemon` that owns the sound, the queue and the library, and a TUI client that attaches to it over a unix socket. Closing the TUI does not stop the music. The daemon also publishes the player on the session bus as an MPRIS2 player, so Plasma media controls, media keys and `playerctl` drive the same state the TUI shows.
 
 The source of truth for the architecture is `DESIGN.md`; `STATUS.md` holds current capabilities/limits/plan; per-session change logs live in `progress/`. All docs (CLAUDE.md / README.md / DESIGN.md / STATUS.md) were reconciled with the code on 2026-10-03.
 

@@ -64,8 +64,8 @@ for five minutes it writes the queue and playback position to `state.json` and e
 │                                  ││    ▄▄██████████████████████████████████████████████████▅▅████████▄▄    │
 │                                  │└────────────────────────────────────────────────────────────────────────┘
 │                                  │ 🎵  Late Night  💿  A Night at the Opera  ♪ Rock  📅  1975  FLAC
+│                                  │ Bohemian Rhapsody — Queen
 │                                  │▶ 03:12 / 05:55 Vol:80% [███████████████░░░░░░░░░░░░░] ⟳ 顺 序 循 环
-│                                  │
 │                                  │
 └──────────────────────────────────┘
 ```
@@ -157,7 +157,9 @@ for five minutes it writes the queue and playback position to `state.json` and e
 ### Interface
 - **Seven views**: player `1` / library `2` / lyrics `3` / visualizer `4` / playlists `5` /
   file browser `6` / settings `7`
-- Two-column player: cover and playlists on the left, lyrics, spectrum, info and controls on the right
+- Two-column player: cover and playlists on the left; lyrics, spectrum, info, a **track name /
+  artist** line and the transport on the right. The track name line is always there — it does not
+  come and go with the cover setting
 - Vim-style modal keys, `gg` / `dd` sequences, `/` live search, `:` command mode, help on `8`
 - Five built-in themes: Tokyo Night, Dracula, Nord, Solarized Dark, Catppuccin Mocha
 - Custom keybindings in `$XDG_CONFIG_HOME/tmper/keybindings.toml`
@@ -505,7 +507,7 @@ tmper/
 ```bash
 cargo build                        # debug
 cargo build --release              # release (a single self-contained file)
-cargo test                         # default: device-free tests (521)
+cargo test                         # default: device-free tests (524)
 cargo test audio_output_ -- --ignored --test-threads=1  # needs a real/virtual device (6)
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all
@@ -523,7 +525,7 @@ cargo llvm-cov --all-features --workspace
 the TUI tests drive a local handle, so `cargo test` is green with no sound card. Exactly six tests
 touch real output; they are named `audio_output_*` and marked `#[ignore]`.
 
-Coverage is **89.96% lines / 90.61% regions / 88.63% functions** (measured 2026-10-03 across 528 tests
+Coverage is **89.96% lines / 90.61% regions / 88.63% functions** (measured 2026-10-03 across 531 tests
 = 521 default + 7 ignored: 6 device-gated and the screenshot tool above). What remains uncovered is structural rather than
 neglected — see [DESIGN.md §10](DESIGN.md).
 
