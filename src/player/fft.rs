@@ -54,6 +54,11 @@ pub fn spawn(
             let magnitudes = analyzer.process(&samples);
             let bars = processor.process(&magnitudes, sample_rate.load(Ordering::Relaxed));
 
+            // A setting change may have replaced this worker during analysis.
+            // Prevent the cancelled worker from publishing its old bar count.
+            if cancel_rx.has_changed().is_err() {
+                break;
+            }
             *lock(&bars_out) = bars;
 
             std::thread::sleep(Duration::from_millis(runtime::FFT_LOOP_SLEEP_MS));

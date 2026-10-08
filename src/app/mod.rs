@@ -680,6 +680,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn visualizer_bar_count_syncs_without_restarting_the_app() {
+        let mut ta = TestApp::new();
+        ta.app.ui_state.visualizer_data = vec![0.5; 32];
+        ta.app.player_bars = vec![0.5; 32];
+
+        let previous = (
+            ta.app.config.visualizer.num_bars,
+            ta.app.config.visualizer.smoothing,
+        );
+        ta.app.config.visualizer.num_bars = 48;
+        ta.app.sync_visualizer_from_config(previous);
+
+        assert_eq!(ta.app.ui_state.visualizer_data.len(), 48);
+        assert_eq!(ta.app.player_bars.len(), 48);
+    }
+
     // ── P0: Volume after seek ──
 
     #[tokio::test]

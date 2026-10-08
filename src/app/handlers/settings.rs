@@ -9,6 +9,10 @@ use crate::ui::ViewMode;
 impl App {
     pub(super) fn handle_settings_key(&mut self, key: &KeyEvent) {
         use crossterm::event::KeyCode;
+        let visualizer_before = (
+            self.config.visualizer.num_bars,
+            self.config.visualizer.smoothing,
+        );
         let state = &mut self.ui_state.settings_state;
         let config = &mut self.config;
 
@@ -73,6 +77,8 @@ impl App {
             }
             _ => {}
         }
+
+        self.sync_visualizer_from_config(visualizer_before);
     }
 
     /// Export all playlists to M3U files in the data directory.
@@ -220,6 +226,26 @@ impl App {
         if self.ui_state.theme.name != self.config.ui.theme {
             self.ui_state.theme = Theme::load(&self.config.ui.theme);
         }
+    }
+
+    /// Rebuild the spectrum pipeline as soon as a live visualizer setting is
+    /// changed. The FFT worker captures these values when it starts, so merely
+    /// updating `Config` is not enough.
+    pub(crate) fn sync_visualizer_from_config(&mut self, previous: (u32, f32)) {
+        let current = (
+            self.config.visualizer.num_bars,
+            self.config.visualizer.smoothing,
+        );
+        if current == previous {
+            return;
+        }
+
+        self.ui_state.visualizer_data = vec![0.0; current.0 as usize];
+        self.player_bars = self.ui_state.visualizer_data.clone();
+        self.dispatch(Request::SetFftParams {
+            num_bars: current.0,
+            smoothing: current.1,
+        });
     }
 
     pub(crate) fn write_config(config: &crate::config::Config) {

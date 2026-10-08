@@ -362,8 +362,15 @@ impl Player {
                 num_bars,
                 smoothing,
             } => {
-                self.num_bars = num_bars.max(1) as usize;
-                self.smoothing = smoothing;
+                let num_bars = num_bars.max(1) as usize;
+                if self.num_bars != num_bars || self.smoothing != smoothing {
+                    self.num_bars = num_bars;
+                    self.smoothing = smoothing;
+                    *crate::audio::engine::lock(&self.bars) = vec![0.0; num_bars];
+                    if self.fft_subscribed {
+                        self.start_fft();
+                    }
+                }
                 Vec::new()
             }
             Request::SetLyricsOffset { ms } => {
@@ -1369,6 +1376,29 @@ mod tests {
         player.execute(Request::SubscribeVisualizer { on: false });
         assert!(!player.fft_subscribed);
         assert!(player.fft_cancel.is_none(), "the thread must be stopped");
+    }
+
+    #[tokio::test]
+    async fn fft_settings_restart_the_subscribed_worker() {
+        let mut player = player();
+        player.execute(Request::SubscribeVisualizer { on: true });
+        let previous = player.fft_cancel.as_ref().unwrap().subscribe();
+        player.execute(Request::SetFftParams {
+            num_bars: 48,
+            smoothing: 0.5,
+        });
+        assert!(previous.has_changed().is_err());
+        assert_eq!(player.bars().len(), 48);
+        assert_eq!(player.num_bars, 48);
+        assert_eq!(player.smoothing, 0.5);
+
+        let unchanged = player.fft_cancel.as_ref().unwrap().subscribe();
+        player.execute(Request::SetFftParams {
+            num_bars: 48,
+            smoothing: 0.5,
+        });
+        assert!(unchanged.has_changed().is_ok());
+        player.execute(Request::SubscribeVisualizer { on: false });
     }
 
     // ── Library ──

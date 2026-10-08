@@ -1,12 +1,11 @@
-use std::collections::VecDeque;
-
 pub struct SpectrumProcessor {
     num_bars: usize,
     alpha: f32,
     /// Smoothed bar heights.
     smoothing: Vec<f32>,
-    peak_window: VecDeque<f32>,
-    peak_alpha: f32,
+    /// Slowly decaying reference level, used to avoid pumping every frame's
+    /// loudest band back to full height.
+    normalization_peak: f32,
     start_freq: f32,
     end_freq: f32,
 }
@@ -17,8 +16,7 @@ impl SpectrumProcessor {
             num_bars,
             alpha,
             smoothing: vec![0.0; num_bars],
-            peak_window: VecDeque::with_capacity(64),
-            peak_alpha: 0.1,
+            normalization_peak: 0.0,
             start_freq: 60.0,
             end_freq: 8000.0,
         }
@@ -50,28 +48,31 @@ impl SpectrumProcessor {
             }
         }
 
-        // Smooth in both directions — slow rise AND slow fall.
-        // Lower alpha = smoother / lazier movement.
+        // Fast attack makes kicks and transients feel immediate; a slower
+        // release keeps the columns fluid instead of jittery.
+        let attack = self.alpha.sqrt();
+        let release = self.alpha * 0.45;
         for (bar, smooth) in bars.iter_mut().zip(self.smoothing.iter_mut()) {
-            let raw = *bar;
-            *smooth = self.alpha * raw + (1.0 - self.alpha) * *smooth;
+            // A square-root curve reveals quieter bands without changing
+            // their ordering or requiring a fixed input gain.
+            let raw = bar.sqrt();
+            let response = if raw > *smooth { attack } else { release };
+            *smooth = response * raw + (1.0 - response) * *smooth;
             *bar = *smooth;
         }
 
-        // Dynamic range normalization
+        // Dynamic normalization with a peak envelope. Normalizing against the
+        // current maximum would pin one bar at 100% even while audio decays.
         let max_val = bars.iter().cloned().fold(0.0f32, f32::max);
         if max_val > 0.0 {
-            let old_peak = self.peak_window.back().copied().unwrap_or(max_val);
-            let new_peak = self.peak_alpha * max_val + (1.0 - self.peak_alpha) * old_peak;
-            self.peak_window.push_back(new_peak);
-            if self.peak_window.len() > 64 {
-                self.peak_window.pop_front();
-            }
-
-            let peak = self.peak_window.back().copied().unwrap_or(max_val);
-            let divisor = max_val.max(peak * 0.3);
+            self.normalization_peak =
+                if self.normalization_peak == 0.0 || max_val >= self.normalization_peak {
+                    max_val
+                } else {
+                    (self.normalization_peak * 0.96).max(max_val)
+                };
             for bar in bars.iter_mut() {
-                *bar = (*bar / divisor).clamp(0.0, 1.0);
+                *bar = (*bar / self.normalization_peak).clamp(0.0, 1.0);
             }
         }
 
@@ -110,5 +111,21 @@ mod tests {
                 "Bar should be > 0 after repeated non-zero input"
             );
         }
+    }
+
+    #[test]
+    fn silence_releases_instead_of_staying_normalized_to_full_height() {
+        let mut proc = SpectrumProcessor::new(8, 0.35);
+        let signal = vec![1.0f32; 512];
+        let silence = vec![0.0f32; 512];
+
+        let initial = proc.process(&signal, 44100);
+        assert!(initial.iter().any(|&bar| bar > 0.9));
+
+        let mut released = Vec::new();
+        for _ in 0..20 {
+            released = proc.process(&silence, 44100);
+        }
+        assert!(released.iter().all(|&bar| bar < 0.2));
     }
 }
