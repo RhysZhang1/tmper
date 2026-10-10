@@ -362,7 +362,12 @@ impl Player {
                 num_bars,
                 smoothing,
             } => {
-                let num_bars = num_bars.max(1) as usize;
+                let num_bars = num_bars.clamp(1, 256) as usize;
+                let smoothing = if smoothing.is_finite() {
+                    smoothing.clamp(0.0, 1.0)
+                } else {
+                    0.35
+                };
                 if self.num_bars != num_bars || self.smoothing != smoothing {
                     self.num_bars = num_bars;
                     self.smoothing = smoothing;
@@ -378,6 +383,7 @@ impl Player {
                 Vec::new()
             }
             Request::GetState => Vec::new(),
+            Request::Sync { id } => vec![Event::Synced { id }],
             Request::Shutdown => {
                 // Deliberately not silenced here. `Player::shutdown` does that,
                 // and it runs *after* the daemon has written `state.json` —
@@ -422,6 +428,7 @@ impl Player {
             duration_secs: self
                 .engine
                 .duration_secs()
+                .filter(|duration| *duration > 0.0)
                 .or_else(|| now.map(|n| n.duration_secs))
                 .unwrap_or(0.0),
             cover_path: now.and_then(|n| n.cover_path.clone()),
@@ -459,6 +466,10 @@ impl Player {
     }
 
     /// The collection's paths, as the browser panel lists them.
+    pub fn is_scanning(&self) -> bool {
+        self.library.scans_active() > 0
+    }
+
     pub fn library_paths(&self) -> Vec<PathBuf> {
         self.library.paths().to_vec()
     }

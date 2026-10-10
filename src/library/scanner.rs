@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::metadata::reader::TrackInfo;
 
 pub const AUDIO_EXTENSIONS: &[&str] = &[
-    "mp3", "flac", "ogg", "opus", "wav", "aac", "m4a", "ape", "wv", "aiff", "wma",
+    "mp3", "flac", "ogg", "oga", "wav", "aac", "m4a", "aiff", "aif",
 ];
 
 pub struct ScannedTrack {
@@ -59,7 +59,7 @@ pub fn scan_directory(dir: &Path) -> Vec<PathBuf> {
 pub fn scan_incremental(
     root: PathBuf,
     known: HashMap<PathBuf, (u64, i64)>,
-    tx: tokio::sync::mpsc::UnboundedSender<ScanUpdate>,
+    tx: tokio::sync::mpsc::Sender<ScanUpdate>,
     cancel: Arc<AtomicBool>,
 ) {
     let mut seen = Vec::new();
@@ -74,7 +74,7 @@ pub fn scan_incremental(
     for entry in walkdir::WalkDir::new(&root).follow_links(false) {
         if cancel.load(Ordering::Relaxed) {
             let scanned = seen.len();
-            let _ = tx.send(ScanUpdate::Finished {
+            let _ = tx.blocking_send(ScanUpdate::Finished {
                 root,
                 seen,
                 scanned,
@@ -117,7 +117,7 @@ pub fn scan_incremental(
 
         if known.get(&path) == Some(&(file_size, file_mtime)) {
             if seen.len() % 100 == 0 {
-                let _ = tx.send(ScanUpdate::Progress {
+                let _ = tx.blocking_send(ScanUpdate::Progress {
                     scanned: seen.len(),
                     changed,
                 });
@@ -126,10 +126,12 @@ pub fn scan_incremental(
         }
 
         match crate::metadata::reader::read_metadata(&path) {
-            Ok(info) => {
+            Ok(mut info) => {
+                // The index does not store pictures; do not queue megabytes of artwork.
+                info.cover_art = None;
                 changed += 1;
                 if tx
-                    .send(ScanUpdate::Track(Box::new(ScannedTrack {
+                    .blocking_send(ScanUpdate::Track(Box::new(ScannedTrack {
                         info,
                         file_size,
                         file_mtime,
@@ -147,7 +149,7 @@ pub fn scan_incremental(
     }
 
     let scanned = seen.len();
-    let _ = tx.send(ScanUpdate::Finished {
+    let _ = tx.blocking_send(ScanUpdate::Finished {
         root,
         seen,
         scanned,
@@ -201,7 +203,7 @@ mod tests {
 
     /// Run a scan to completion and return every update it produced.
     fn scan(root: PathBuf, known: HashMap<PathBuf, (u64, i64)>, cancel: bool) -> Vec<ScanUpdate> {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(128);
         scan_incremental(root, known, tx, Arc::new(AtomicBool::new(cancel)));
         let mut updates = Vec::new();
         while let Ok(update) = rx.try_recv() {

@@ -29,7 +29,7 @@
 
 tmper 是一个运行在终端中的全功能音乐播放器。核心特性：
 
-- **多格式解码**: MP3、FLAC、OGG、Opus、WAV、AAC、M4A、WMA、APE、WavPack、AIFF
+- **多格式解码**: MP3、FLAC、Ogg Vorbis、WAV、AAC-LC（ADTS/M4A）、ALAC（M4A）、AIFF
 - **元数据**: ID3v1/v2、Vorbis Comments、APE、MP4 标签，含内嵌封面图
 - **LRC 歌词**: 标准/增强 LRC 解析，实时同步，编码自动检测
 - **频谱可视化**: 2048 点 FFT，对数分桶，颜色渐变
@@ -236,14 +236,22 @@ pub enum Event { Welcome { proto, version, pid }, Snapshot(Box<StateSnapshot>),
 
 **状态整体推送，不做增量。** 每 tick 一份 `StateSnapshot`（位置、时长、状态、音量、循环、元数据、封面缓存路径、`queue_rev`、`active_playlist`）。快照是全量的，因此**重连不需要补课协议**——下一个快照就是补课。队列、歌单、曲库路径、事件都只在变化时推，各带一个版本号或键。
 
-**两条 framing 实现之间存在第二份代码，靠测试钉住。** `BufRead` 与 `AsyncBufRead` 没有共同父 trait，所以 `read_line` 的逻辑存在两次；约束被刻意收窄（上限、容忍 CRLF、区分 EOF 与截断），再由测试把**同一串字节**喂给两个实现断言结论一致。
+**一套异步 framing 实现。** 普通消息是一行 JSON；协议 2 对超过 1 MiB 的消息发送
+`{ "_tmper_chunk": "<base64>", "more": true/false }` 分块帧。每片原始数据 512 KiB，
+每物理行最多 1 MiB，重组最多 64 MiB / 1024 片；空片、非法 base64、中断序列和截断均拒绝。
+分块的边界可以落在 UTF-8 字符中间，重组后才解析原消息。队列/歌单仍整体应用；尚无应用层分页。
 
-**读写各有一次踩过的坑。** `BufReader` 为了回答一次 `read_line` 会把能读到的字节全部搬进自己的缓冲，所以：握手必须用**客户端随后继续使用的那一个 reader**（`DaemonHandle::dial` → `read_events`），而 socket 的读任务**绝不能作为 `select!` 的分支**——分支被取消时读了一半的行连同缓冲区一起消失。详见 `progress/2026-10-03-daemon-split.md`。
+**共享状态与定向回复分开。** Snapshot、Queue、Playlists 等广播；查询、歌单操作回复和请求错误
+只交给请求者。`Sync { id } → Synced { id }` 是同一连接上的执行屏障，CLI 不再把周期快照误认为命令回复。
+
+**Reader 归属不变。** 握手与后续消息共用同一个 BufReader。客户端读取在独立任务中；daemon 只会在
+writer 已结束、整条连接即将丢弃时取消读取，绝不在继续复用连接的情况下取消半行读取。
+writer 失败或邮箱关闭会关闭整条连接，正常 shutdown 最多等两秒排空再终止慢连接。
 
 ### 3.2 daemon (src/daemon.rs)
 
 - **陈旧 socket**：启动时若 socket 文件存在，先试着连它——连得上说明已有 daemon 在跑，第二个直接退出（一张声卡上两个播放器不是这个程序回答得了的问题）；连不上（`ECONNREFUSED`/`ENOENT`）说明是死掉的 daemon 留下的，删掉重建。daemon 退出时自己 `remove_file`。
-- **空闲退出**：`clients.is_empty() && !status.is_active()` 持续 `DAEMON_IDLE_EXIT_SECS`（300 秒）。**暂停算空闲**——它只是按住一个位置而不是在做事情，而一个暂停可以挂好几天，把它算作活动就等于永不退出。判定收在 `Daemon::should_exit(now)`，`now` 是参数，测试因此不必等五分钟。
+- **空闲退出**：`clients.is_empty() && !status.is_active() && !player.is_scanning()` 持续 `DAEMON_IDLE_EXIT_SECS`（300 秒）。**暂停算空闲**——它只是按住一个位置而不是在做事情，而一个暂停可以挂好几天，把它算作活动就等于永不退出。判定收在 `Daemon::should_exit(now)`，`now` 是参数，测试因此不必等五分钟。
 - **退出前存现场**：`Player::shutdown()` 先 `save_state()` 再静音设备——顺序是承重的（`stop_playback()` 是回卷，先静音就会把 `position_secs: 0.0` 存进去）。
 - **MPRIS 在 socket 之后装配，且从不致命**：没有会话总线就记一条日志照常播放。
 - **`spawn_detached` 在 `cfg(test)` 下拒绝执行**：测试二进制里 `current_exe()` 是测试 harness，spawn 它等于把整个测试套件脱离地重跑一遍。
@@ -754,7 +762,11 @@ pub struct Config {
 
 ### 8.1 状态保存（daemon）
 
-`state.json` 在三种时刻由 daemon 写出：收到 `Shutdown`、空闲退出、以及收到 `Shutdown` 之前的 `stop` 收尾。
+`state.json` 由 daemon 定期和退出时写出：播放状态修改最多每秒一次，活跃播放位置每 30 秒一次；
+Shutdown、SIGTERM、Ctrl+C 和空闲退出立即保存。保存包含活动歌单 id，恢复时校验其仍在歌单库中。
+`state.json`、`playlists.json`、`library.json` 共用 `storage::atomic_write`：同目录独占临时文件、
+写完 `sync_all`、原子 rename、同步父目录。rename 前失败会保留旧文件并清理临时文件；
+父目录同步失败时新文件可能已经发布，检查点仍会继续重试。
 
 ```json
 {
@@ -855,11 +867,15 @@ SIXEL/Kitty 封面数据直接写入 stdout（绕过 ratatui 差分缓冲），K
 
 ### 10.1 测试分层与分布
 
+2026-10-10 当前集合为 **551 项 = 544 默认 + 7 忽略**。本轮所有项目含音频输出与渲染工具均通过，
+详见 [完整验证记录](progress/2026-10-10-reliability-validation.md)。下方逐模块分布与覆盖率是
+2026-10-04 的历史快照，不能作为新增代码的覆盖率。可用 `cargo test -- --list` 查询当前分布。
+
 #### 测试分布（按测试数）
 
 > 下表统计的是**测试用例数量**，不是**行覆盖率**。行覆盖率需用 `cargo llvm-cov` 单独测量
 > （见 [10.3 行覆盖率](#103-行覆盖率)）。
-> **现状（2026-10-04 实测）**：总行覆盖率 **89.44%**（函数 88.44%、
+> **历史基线（2026-10-04 实测；本轮未重测覆盖率）**：总行覆盖率 **89.44%**（函数 88.44%、
 > 区域 90.35%；少数计时敏感测试会让该数字每次浮动 ~0.3%）。它比 10-03 记录的 89.96% 略低，
 > 但那不是回归：两次测量之间代码和测试都动过（主视图新增了曲目行，`main.rs` 新增了日志轮转），
 > 两个数字各自对应当天的那棵树，不能直接相减。

@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{Decoder, DecoderOptions};
@@ -8,7 +8,7 @@ use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
-use symphonia::core::units::Time;
+use symphonia::core::units::{Time, TimeBase};
 
 use crate::error::{AppError, AppResult};
 
@@ -16,6 +16,10 @@ pub struct AudioDecoder {
     format: Box<dyn FormatReader>,
     decoder: Box<dyn Decoder>,
     track_id: u32,
+    path: PathBuf,
+    time_base: Option<TimeBase>,
+    skip_frames: u64,
+    pending_samples: Option<Vec<f32>>,
     pub sample_rate: u32,
     pub channels: u8,
     pub total_frames: u64,
@@ -65,6 +69,10 @@ impl AudioDecoder {
             format,
             decoder,
             track_id,
+            path: path.to_path_buf(),
+            time_base: codec_params.time_base,
+            skip_frames: 0,
+            pending_samples: None,
             sample_rate,
             channels,
             total_frames,
@@ -72,10 +80,15 @@ impl AudioDecoder {
     }
 
     pub fn read_packet(&mut self) -> AppResult<Option<Vec<f32>>> {
+        if let Some(samples) = self.pending_samples.take() {
+            return Ok(Some(samples));
+        }
         loop {
             let packet = match self.format.next_packet() {
                 Ok(packet) => packet,
-                Err(SymphoniaError::IoError(ref e)) if e.to_string().contains("end of stream") => {
+                Err(SymphoniaError::IoError(ref e))
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
                     return Ok(None);
                 }
                 Err(e) => {
@@ -90,12 +103,23 @@ impl AudioDecoder {
             match self.decoder.decode(&packet) {
                 Ok(decoded) => {
                     let num_frames = decoded.frames();
+                    // Vorbis setup/seek packets can decode to zero frames.
+                    // SampleBuffer::copy_interleaved_ref assumes a nonempty plane.
+                    if num_frames == 0 {
+                        continue;
+                    }
                     let spec = *decoded.spec();
 
                     let mut sample_buf = SampleBuffer::<f32>::new(num_frames as u64, spec);
                     sample_buf.copy_interleaved_ref(decoded);
 
-                    let samples = sample_buf.samples().to_vec();
+                    let channels = self.channels.max(1) as usize;
+                    let discard = self.skip_frames.min(num_frames as u64) as usize;
+                    self.skip_frames -= discard as u64;
+                    let samples = sample_buf.samples()[discard * channels..].to_vec();
+                    if samples.is_empty() {
+                        continue;
+                    }
                     return Ok(Some(samples));
                 }
                 Err(SymphoniaError::DecodeError("no more data")) => {
@@ -125,7 +149,14 @@ impl AudioDecoder {
             match self.read_packet()? {
                 Some(samples) => {
                     let frame_count = samples.len() as u64 / self.channels as u64;
-                    skipped += frame_count;
+                    let needed = target_frames - skipped;
+                    if frame_count > needed {
+                        self.pending_samples =
+                            Some(samples[needed as usize * self.channels as usize..].to_vec());
+                        skipped = target_frames;
+                    } else {
+                        skipped += frame_count;
+                    }
                 }
                 None => break,
             }
@@ -147,16 +178,27 @@ impl AudioDecoder {
             time: Time::new(target.floor() as u64, target.fract()),
             track_id: Some(self.track_id),
         };
+        self.pending_samples = None;
+        self.skip_frames = 0;
         match self.format.seek(SeekMode::Accurate, seek_to) {
-            Ok(_) => {
+            Ok(seeked) => {
                 self.decoder.reset();
+                if let Some(base) = self.time_base {
+                    let actual = base.calc_time(seeked.actual_ts);
+                    let actual_secs = actual.seconds as f64 + actual.frac;
+                    self.skip_frames =
+                        ((target - actual_secs).max(0.0) * self.sample_rate as f64).round() as u64;
+                }
                 Ok(())
             }
             Err(e) => {
                 tracing::warn!(
                     "native seek failed ({e}); falling back to decode-skip to {target_secs}s"
                 );
-                self.skip_to_secs(target_secs)?;
+                // A failed seek may have moved the container cursor. Decode
+                // the fallback from the beginning, retaining the packet tail.
+                *self = Self::open(&self.path.clone())?;
+                self.skip_to_secs(target)?;
                 Ok(())
             }
         }
@@ -166,6 +208,57 @@ impl AudioDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn supported_formats_decode_to_finite_pcm_and_seek_to_the_requested_position() {
+        for name in [
+            "pcm.wav",
+            "lossless.flac",
+            "mpeg.mp3",
+            "vorbis.ogg",
+            "aac.m4a",
+            "alac.m4a",
+            "pcm.aiff",
+            "adts.aac",
+        ] {
+            let path = Path::new("tests/fixtures/formats").join(name);
+            crate::metadata::reader::read_metadata(&path)
+                .unwrap_or_else(|e| panic!("{name}: metadata: {e}"));
+            let mut decoder = AudioDecoder::open(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let mut count = 0;
+            let mut energy = 0.0f64;
+            while let Some(samples) = decoder
+                .read_packet()
+                .unwrap_or_else(|e| panic!("{name}: {e}"))
+            {
+                assert!(
+                    samples.iter().all(|v| v.is_finite()),
+                    "{name}: non-finite PCM"
+                );
+                count += samples.len();
+                energy += samples.iter().map(|v| (*v as f64).powi(2)).sum::<f64>();
+            }
+            let seconds = count as f64 / decoder.sample_rate as f64 / decoder.channels as f64;
+            assert!((2.9..3.2).contains(&seconds), "{name}: decoded {seconds}s");
+            assert!(energy / count as f64 > 0.0001, "{name}: unexpected silence");
+            // A non-packet-aligned target detects ignored actual_ts values.
+            decoder
+                .seek_to_secs(1.234)
+                .unwrap_or_else(|e| panic!("{name}: seek: {e}"));
+            let mut remaining = 0;
+            while let Some(samples) = decoder
+                .read_packet()
+                .unwrap_or_else(|e| panic!("{name}: after seek: {e}"))
+            {
+                remaining += samples.len();
+            }
+            let seconds = remaining as f64 / decoder.sample_rate as f64 / decoder.channels as f64;
+            assert!(
+                (1.73..1.91).contains(&seconds),
+                "{name}: seek left {seconds}s"
+            );
+        }
+    }
 
     #[test]
     fn test_decode_wav() {

@@ -96,7 +96,7 @@ tmper 是一个跑在终端里的本地音乐播放器：Vim 风格键盘操作�
 ## 功能特性
 
 ### 播放与进程模型
-- 支持 MP3、FLAC、OGG、Opus、WAV、AAC、M4A、WMA、APE、WavPack、AIFF 等格式
+- 支持 MP3、FLAC、Ogg Vorbis、WAV、AAC-LC（ADTS/M4A）、ALAC（M4A）、AIFF
 - 基于 [Symphonia](https://github.com/pdeljanov/Symphonia) 纯 Rust 解码，**无需安装 ffmpeg**
 - 有界流式解码，只预缓冲约 2 秒；快速切歌和 seek 会取消旧会话，长文件不会整个读进内存
 - 真实音频 seek、音量控制、顺序 / 随机 / 单曲三种循环
@@ -128,7 +128,8 @@ tmper 是一个跑在终端里的本地音乐播放器：Vim 风格键盘操作�
 - M3U 歌单导入 / 导出；歌单的身份是 id，不是名字或位置
 
 ### 歌词
-- 标准 LRC 和增强 LRC（逐字时间戳）解析
+- 标准 LRC 和增强 LRC 解析；播放器和全屏歌词均按逐字时间戳高亮，隐藏时间标签并保留空格
+- 文件 `[offset:]` 与手动偏移相加；正值提前显示，负值延后显示
 - 自动编码检测：UTF-8 → GBK → Shift-JIS
 - 同名 `.lrc` 放在音频旁即自动加载
 - 实时同步高亮，偏移微调（`[` `]` ±0.5s / `{` `}` ±2s）
@@ -450,8 +451,10 @@ busctl --user list | grep tmper              # 看它有没有占到 org.mpris.M
 
 ### Q: 支持哪些音频格式？
 
-MP3、FLAC、OGG Vorbis、Opus、WAV、AAC（.aac/.m4a）、ALAC（.m4a）、WavPack（.wv）、
-WMA、AIFF、APE。
+MP3、FLAC、Ogg Vorbis（.ogg/.oga）、WAV、AAC-LC（.aac/.m4a）、ALAC（.m4a）、AIFF（.aiff/.aif）。
+
+当前锁定 Symphonia 0.5.5；Opus、WMA、APE、WavPack 和 HE-AAC 未支持，不会作为可播放文件扫描。
+八种合成音频夹具覆盖完整解码、非整秒 seek 和元数据回退；容器扩展名本身不保证其中的编码可播放。
 
 ### Q: 支持 macOS / Windows 吗？
 
@@ -486,6 +489,13 @@ $ tmper                    $ tmper daemon
 - **一个 trait，两种投递时机**：测试用的本地句柄同步应答，socket 句柄下一 tick 到货，
   但两者交给同一个 `apply_event`。**时机不同，应用逻辑完全相同**，所以不存在「测试走一条路、
   生产走另一条路」的假绿。
+- **共享状态，定向回复**：查询结果、歌单创建/导入/导出回复及请求错误只发给请求者；
+  歌单与播放状态变化仍广播。一次性命令用同步屏障确认请求已执行。
+- **有界分块传输**：协议 2 保留 1 MiB 单行上限，大集合自动分块；逻辑消息上限 64 MiB。
+  更新前先用旧版本执行 `tmper quit`，再启动新版，避免客户端与旧 daemon 的协议不匹配。
+- **原子保存与检查点**：JSON 写入临时文件、同步后原子替换；播放状态修改最多每秒保存一次，
+  活跃播放每 30 秒保存位置，正常退出立即保存。异常退出可能损失最近一个检查点之后的变化。
+- **扫描背压**：128 条更新邮箱、每 tick 最多 32 条更新、批量事务；扫描期间不会空闲自退。
 - **一个文件一个写入者**：`state.json`、`library.db`、`playlists.json`、`library.json`
   都只有 daemon 写。
 
@@ -556,7 +566,7 @@ tmper/
 ```bash
 cargo build                        # 调试编译
 cargo build --release              # 发布编译（资源已内嵌的单文件）
-cargo test                         # 默认：全部无需音频设备的测试（527 个）
+cargo test                         # 默认：544 个无需音频设备的测试
 cargo test audio_output_ -- --ignored --test-threads=1  # 需要真实/虚拟设备（6 个）
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all
@@ -574,9 +584,21 @@ cargo llvm-cov --all-features --workspace # 输出各模块行覆盖率与总计
 本地句柄，所以没有声卡也能 `cargo test` 全绿。只有 6 个测试真的碰音频输出，它们叫
 `audio_output_*` 并标了 `#[ignore]`。
 
-覆盖率现状 **89.44% 行 / 90.35% 区域 / 88.44% 函数**（2026-10-04 实测，共 534 个 =
-527 默认运行 + 7 忽略，其中 6 个是设备门控、1 个是生成上面那张截图的工具）。剩下的未覆盖部分是结构性的，不是遗漏——细节见
+历史覆盖率基线 **89.44% 行 / 90.35% 区域 / 88.44% 函数**（2026-10-04 实测，共 534 个 =
+527 默认运行 + 7 忽略，其中 6 个是设备门控、1 个是生成截图的工具）。该覆盖率未在本轮重新测量，不能代表新增代码。细节见
 [DESIGN.md §10](DESIGN.md)。
+
+### 完整验证
+
+```bash
+bash scripts/validate.sh
+```
+
+该脚本检查格式与 Clippy，运行全部 **551 项测试（含 7 项默认忽略项）**，构建 release，
+然后在临时目录、私有 D-Bus、虚拟 ALSA 和伪终端中验证真实 daemon/CLI/TUI、
+双客户端回复隔离、扫描、暂停 seek、MPRIS 双向音量、崩溃恢复和正常退出。
+测试不会改动你的配置或通过扬声器播放测试音。需安装 Python 3 和 `dbus-run-session`；
+具体证据与限制见 [2026-10-10 验证记录](progress/2026-10-10-reliability-validation.md)。
 
 ### 重新生成 README 里的截图
 

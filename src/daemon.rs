@@ -113,6 +113,8 @@ pub struct Daemon {
     /// Absent on a machine with no desktop, in tests, and whenever the bus
     /// refused the name — none of which is a reason to stop playing music.
     mpris: Option<mpris::Handle>,
+    last_checkpoint: Instant,
+    state_dirty: bool,
 }
 
 /// Give the player's scanner a runtime to walk on.
@@ -140,6 +142,8 @@ impl Daemon {
             next_id: 0,
             idle_since: None,
             mpris: None,
+            last_checkpoint: Instant::now(),
+            state_dirty: false,
         })
     }
 
@@ -153,6 +157,8 @@ impl Daemon {
             next_id: 0,
             idle_since: None,
             mpris: None,
+            last_checkpoint: Instant::now(),
+            state_dirty: false,
         }
     }
 
@@ -211,7 +217,17 @@ impl Daemon {
 
     pub fn client_left(&mut self, id: u64) {
         // Dropping the sender is what ends the connection task's writer.
+        let was_watched = self.any_visualizer();
         self.clients.remove(&id);
+        self.stop_unobserved_fft(was_watched);
+    }
+
+    fn stop_unobserved_fft(&mut self, was_watched: bool) {
+        if was_watched && !self.any_visualizer() {
+            let _ = self
+                .player
+                .execute(Request::SubscribeVisualizer { on: false });
+        }
     }
 
     /// Apply one command from one client, and tell everyone what changed.
@@ -231,12 +247,12 @@ impl Daemon {
             // forwarding every unsubscribe would stop it for the client that
             // still wants it.
             if self.any_visualizer() != before {
-                self.apply_to_player(Request::SubscribeVisualizer { on: !before });
+                self.apply_to_player(Request::SubscribeVisualizer { on: !before }, Some(id));
             }
             return;
         }
 
-        self.apply_to_player(request);
+        self.apply_to_player(request, Some(id));
 
         if self.player.should_shutdown() {
             self.broadcast(Event::Bye);
@@ -250,7 +266,7 @@ impl Daemon {
     /// is routed to whoever *is* attached, exactly as if a key had been
     /// pressed.
     pub fn handle_mpris(&mut self, request: Request) {
-        self.apply_to_player(request);
+        self.apply_to_player(request, None);
 
         if self.player.should_shutdown() {
             self.broadcast(Event::Bye);
@@ -280,7 +296,10 @@ impl Daemon {
         if self.player.should_shutdown() {
             return true;
         }
-        if !self.clients.is_empty() || self.player.state().status.is_active() {
+        if !self.clients.is_empty()
+            || self.player.state().status.is_active()
+            || self.player.is_scanning()
+        {
             self.idle_since = None;
             return false;
         }
@@ -292,7 +311,20 @@ impl Daemon {
     pub fn shutdown(&mut self) {
         self.player.save_state();
         self.broadcast(Event::Bye);
+        self.clients.clear();
         self.player.shutdown();
+    }
+
+    /// Debounce edits to one write per second and checkpoint active playback
+    /// every 30 seconds. Normal shutdown always saves immediately.
+    fn checkpoint(&mut self, now: Instant) {
+        let elapsed = now.duration_since(self.last_checkpoint);
+        if (self.state_dirty && elapsed >= Duration::from_secs(1))
+            || (elapsed >= Duration::from_secs(30) && self.player.state().status.is_active())
+        {
+            self.state_dirty = !self.player.save_state();
+            self.last_checkpoint = now;
+        }
     }
 
     // ── Plumbing ──
@@ -304,10 +336,47 @@ impl Daemon {
     /// jump leaves every property exactly as it was. MPRIS has a separate
     /// signal for precisely that, so it is sent after the state it applies to
     /// — a client that then re-read `Position` gets the new one.
-    fn apply_to_player(&mut self, request: Request) {
+    fn apply_to_player(&mut self, request: Request, reply_to: Option<u64>) {
+        if matches!(
+            request,
+            Request::Play { .. }
+                | Request::Toggle
+                | Request::Pause
+                | Request::Resume
+                | Request::Stop
+                | Request::Next
+                | Request::Prev
+                | Request::SeekRelative { .. }
+                | Request::SetVolume { .. }
+                | Request::VolumeStep { .. }
+                | Request::SetRepeat { .. }
+                | Request::QueuePush { .. }
+                | Request::QueueRemove { .. }
+                | Request::SetLyricsOffset { .. }
+                | Request::SetActivePlaylist { .. }
+                | Request::PlaylistDelete { .. }
+        ) {
+            self.state_dirty = true;
+        }
         let seek = matches!(request, Request::SeekRelative { .. });
         for event in self.player.execute(request) {
-            self.route(event);
+            let reply = matches!(
+                event,
+                Event::LibraryArtists { .. }
+                    | Event::LibraryAlbums { .. }
+                    | Event::LibraryTracks { .. }
+                    | Event::SearchResults { .. }
+                    | Event::PlaylistAdded { .. }
+                    | Event::PlaylistImported { .. }
+                    | Event::PlaylistsExported { .. }
+                    | Event::Notice { .. }
+                    | Event::Synced { .. }
+            );
+            if let (true, Some(id)) = (reply, reply_to) {
+                self.send_to(id, event);
+            } else {
+                self.route(event);
+            }
         }
         if seek {
             if let Some(mpris) = self.mpris.as_ref() {
@@ -328,23 +397,31 @@ impl Daemon {
             mpris.apply(snapshot);
         }
         let spectrum = matches!(event, Event::Visualizer { .. });
+        let was_watched = self.any_visualizer();
         self.clients.retain(|id, client| {
             if spectrum && !client.visualizer {
                 return true;
             }
             client.deliver(&event, *id)
         });
+        self.stop_unobserved_fft(was_watched);
     }
 
     fn broadcast(&mut self, event: Event) {
+        let was_watched = self.any_visualizer();
         self.clients
             .retain(|id, client| client.deliver(&event, *id));
+        self.stop_unobserved_fft(was_watched);
     }
 
     fn send_to(&mut self, id: u64, event: Event) {
+        let was_watched = self.any_visualizer();
         if let Some(client) = self.clients.get_mut(&id) {
-            client.deliver(&event, id);
+            if !client.deliver(&event, id) {
+                self.clients.remove(&id);
+            }
         }
+        self.stop_unobserved_fft(was_watched);
     }
 }
 
@@ -394,6 +471,8 @@ pub async fn run() -> AppResult<()> {
     );
 
     let (to_daemon, mut from_client) = mpsc::channel::<FromClient>(runtime::DAEMON_CLIENT_QUEUE);
+    let mut connections = tokio::task::JoinSet::new();
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let frame_rate = config.visualizer.frame_rate.max(1);
     let mut ticker = tokio::time::interval(Duration::from_millis((1000 / frame_rate) as u64));
 
@@ -405,7 +484,7 @@ pub async fn run() -> AppResult<()> {
                         let id = daemon.reserve_client_id();
                         // The connection task owns the socket and nothing
                         // else; the player is untouched by anything it does.
-                        tokio::spawn(serve_client(id, stream, to_daemon.clone()));
+                        connections.spawn(serve_client(id, stream, to_daemon.clone()));
                     }
                     // Losing one connection is not losing the daemon. A
                     // listener that fails every time will simply be logged
@@ -420,14 +499,25 @@ pub async fn run() -> AppResult<()> {
             },
             Some(request) = desktop_command(&mut from_mpris) => daemon.handle_mpris(request),
             _ = ticker.tick() => daemon.tick(),
+            _ = tokio::signal::ctrl_c() => break,
+            _ = terminate.recv() => break,
+            _ = connections.join_next(), if !connections.is_empty() => {},
         }
 
+        daemon.checkpoint(Instant::now());
         if daemon.should_exit(Instant::now()) {
             break;
         }
     }
 
     daemon.shutdown();
+    drop(from_client);
+    // Flush the final state/Bye, with a deadline for peers that stopped reading.
+    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+        while connections.join_next().await.is_some() {}
+    })
+    .await;
+    connections.abort_all();
     // The file outlives the process that made it, and a stale socket turns the
     // next start into a connection-refused retry loop. Removing it is the
     // daemon's job because the daemon is what put it there.
@@ -554,7 +644,7 @@ async fn serve_client(id: u64, stream: UnixStream, to_daemon: mpsc::Sender<FromC
         return;
     }
 
-    let writer = tokio::spawn(async move {
+    let mut writer = tokio::spawn(async move {
         while let Some(event) = mail_rx.recv().await {
             if write_message_async(&mut write_half, &event).await.is_err() {
                 break;
@@ -563,7 +653,11 @@ async fn serve_client(id: u64, stream: UnixStream, to_daemon: mpsc::Sender<FromC
     });
 
     loop {
-        match read_message_async::<_, Request>(&mut reader).await {
+        let result = tokio::select! {
+            result = read_message_async::<_, Request>(&mut reader) => result,
+            _ = &mut writer => break,
+        };
+        match result {
             Ok(Some(request)) => {
                 if to_daemon
                     .send(FromClient::Request { id, request })
@@ -583,16 +677,103 @@ async fn serve_client(id: u64, stream: UnixStream, to_daemon: mpsc::Sender<FromC
     }
 
     let _ = to_daemon.send(FromClient::Gone { id }).await;
-    // The writer ends on its own once the daemon forgets the client and drops
-    // the mailbox. Awaiting it here means the socket closes after its last
-    // message rather than in the middle of one.
-    let _ = writer.await;
+    // A peer that stopped reading must not retain a task or a socket forever.
+    // The read future is cancelled only when this whole connection is ending.
+    writer.abort();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ipc::proto::QueueTrack;
+
+    #[tokio::test]
+    async fn disconnecting_the_last_subscriber_stops_the_fft() {
+        let mut daemon = daemon();
+        let (watcher, _rx) = attach(&mut daemon);
+        daemon.handle(watcher, Request::SubscribeVisualizer { on: true });
+        assert!(daemon
+            .player
+            .tick()
+            .iter()
+            .any(|e| matches!(e, Event::Visualizer { .. })));
+        daemon.client_left(watcher);
+        assert!(!daemon
+            .player
+            .tick()
+            .iter()
+            .any(|e| matches!(e, Event::Visualizer { .. })));
+    }
+
+    #[tokio::test]
+    async fn operation_replies_belong_to_the_requester_while_state_is_shared() {
+        let mut daemon = daemon();
+        let (a, mut rx_a) = attach(&mut daemon);
+        let (_, mut rx_b) = attach(&mut daemon);
+        daemon.handle(
+            a,
+            Request::PlaylistCreate {
+                name: "A's playlist".into(),
+            },
+        );
+        let a_events = drain(&mut rx_a);
+        let b_events = drain(&mut rx_b);
+        assert!(a_events
+            .iter()
+            .any(|e| matches!(e, Event::PlaylistAdded { .. })));
+        assert!(!b_events
+            .iter()
+            .any(|e| matches!(e, Event::PlaylistAdded { .. })));
+        assert!(b_events
+            .iter()
+            .any(|e| matches!(e, Event::Playlists { .. })));
+        daemon.handle(
+            a,
+            Request::SearchLibrary {
+                query: "private query".into(),
+            },
+        );
+        assert!(drain(&mut rx_a)
+            .iter()
+            .any(|e| matches!(e, Event::SearchResults { .. })));
+        assert!(!drain(&mut rx_b)
+            .iter()
+            .any(|e| matches!(e, Event::SearchResults { .. })));
+        daemon.handle(a, Request::SetVolume { volume: 0.3 });
+        daemon.handle(a, Request::Sync { id: 42 });
+        let a_events = drain(&mut rx_a);
+        let b_events = drain(&mut rx_b);
+        assert!(a_events
+            .iter()
+            .any(|e| matches!(e, Event::Synced { id: 42 })));
+        assert!(!b_events.iter().any(|e| matches!(e, Event::Synced { .. })));
+        assert!(snapshots(&b_events).iter().all(|s| s.volume == 0.3));
+    }
+
+    #[tokio::test]
+    async fn a_large_queue_crosses_a_real_socket_during_the_greeting() {
+        let (mut daemon, mut from_client, (mut writer, mut reader)) = connected();
+        let tracks: Vec<_> = (0..12000)
+            .map(|i| QueueTrack {
+                path: format!("/music/{i}.flac").into(),
+                title: "长标题音乐".repeat(10),
+                artist: "Artist".into(),
+                duration_secs: 3.0,
+            })
+            .collect();
+        daemon.player.set_queue(tracks.clone());
+        say_hello(&mut writer).await;
+        let _: Event = read_message_async(&mut reader).await.unwrap().unwrap();
+        apply(&mut daemon, next(&mut from_client).await);
+        let _: Event = read_message_async(&mut reader).await.unwrap().unwrap();
+        let event: Event =
+            tokio::time::timeout(Duration::from_secs(5), read_message_async(&mut reader))
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        assert!(matches!(event, Event::Queue { tracks: received, .. } if received == tracks));
+    }
 
     fn daemon() -> Daemon {
         Daemon::new_headless(&Config::default())
@@ -881,7 +1062,7 @@ mod tests {
     async fn playback_keeps_the_daemon_alive() {
         let mut daemon = daemon();
         let path = std::fs::canonicalize("tests/fixtures/test.wav").expect("fixture");
-        daemon.apply_to_player(Request::Play { path });
+        daemon.apply_to_player(Request::Play { path }, None);
 
         let start = Instant::now();
         assert!(!daemon.should_exit(start + Duration::from_secs(86_400)));
@@ -894,8 +1075,8 @@ mod tests {
     async fn a_paused_daemon_is_idle_like_any_other() {
         let mut daemon = daemon();
         let path = std::fs::canonicalize("tests/fixtures/test.wav").expect("fixture");
-        daemon.apply_to_player(Request::Play { path });
-        daemon.apply_to_player(Request::Pause);
+        daemon.apply_to_player(Request::Play { path }, None);
+        daemon.apply_to_player(Request::Pause, None);
         assert!(
             matches!(
                 daemon.player.state().status,

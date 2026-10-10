@@ -103,7 +103,7 @@ for five minutes it writes the queue and playback position to `state.json` and e
 ## Features
 
 ### Playback and the process model
-- MP3, FLAC, OGG Vorbis, Opus, WAV, AAC, ALAC, M4A, WMA, APE, WavPack, AIFF
+- MP3, FLAC, Ogg Vorbis, WAV, AAC-LC (ADTS/M4A), ALAC (M4A), AIFF
 - Decoded by [Symphonia](https://github.com/pdeljanov/Symphonia) in pure Rust — **no ffmpeg needed**
 - Bounded streaming decode with a ~2 s prebuffer; skipping and seeking retire the old session, so
   a long file is never read into memory
@@ -144,7 +144,8 @@ for five minutes it writes the queue and playback position to `state.json` and e
 - M3U import/export. A playlist's identity is an id — never a name, never a position
 
 ### Lyrics
-- Standard and enhanced (word-level) LRC
+- Standard and enhanced LRC, with word-level highlighting in both lyric views; timing tags stay hidden and spaces are preserved
+- File `[offset:]` and manual offsets are added: positive advances lyrics, negative delays them
 - Encoding detection: UTF-8 → GBK → Shift-JIS
 - A same-named `.lrc` next to the audio file loads automatically
 - Live highlighting and fine offset control (`[` `]` ±0.5 s, `{` `}` ±2 s), full-screen view
@@ -433,7 +434,11 @@ player as well.
 
 ### Which formats are supported?
 
-MP3, FLAC, OGG Vorbis, Opus, WAV, AAC (.aac/.m4a), ALAC (.m4a), WavPack (.wv), WMA, AIFF, APE.
+MP3, FLAC, Ogg Vorbis (.ogg/.oga), WAV, AAC-LC (.aac/.m4a), ALAC (.m4a), AIFF (.aiff/.aif).
+
+The pinned Symphonia 0.5.5 does not support Opus, WMA, APE, WavPack or HE-AAC here.
+Those extensions are excluded from scanning. Eight synthetic fixtures verify full decoding,
+non-packet-aligned seeking and metadata fallback; an extension alone is not a codec guarantee.
 
 ### macOS / Windows?
 
@@ -471,6 +476,16 @@ $ tmper                    $ tmper daemon
 - **One trait, two delivery timings.** The local handle used by tests answers synchronously; the
   socket handle's events arrive a tick later. Both feed the same `apply_event`, so the timings
   differ and nothing else does — there is no second synchronous path that only tests take.
+- **Shared state, private replies.** Query results, playlist operation replies and request errors
+  go only to the requester. CLI verbs use an ordered synchronization barrier for acknowledgement.
+- **Bounded chunking.** Protocol 2 retains a 1 MiB physical line cap and chunks larger collections,
+  with a 64 MiB logical message cap. Before upgrading, run `tmper quit` with the old binary to
+  avoid connecting a new client to an incompatible old daemon.
+- **Atomic saves and checkpoints.** JSON files are written beside the destination, synced and
+  atomically renamed. Playback edits are saved at most once per second, active playback every
+  30 seconds, and graceful shutdown immediately. A crash can lose changes after the last checkpoint.
+- **Scan backpressure.** A 128-update mailbox, at most 32 updates per tick and batched transactions;
+  active scans prevent idle shutdown.
 - **One writer per file.** `state.json`, `library.db`, `playlists.json` and `library.json` are
   written by the daemon and nobody else.
 
@@ -526,7 +541,7 @@ tmper/
 ```bash
 cargo build                        # debug
 cargo build --release              # release (a single self-contained file)
-cargo test                         # default: device-free tests (527)
+cargo test                         # default: 544 device-free tests
 cargo test audio_output_ -- --ignored --test-threads=1  # needs a real/virtual device (6)
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all
@@ -544,9 +559,21 @@ cargo llvm-cov --all-features --workspace
 the TUI tests drive a local handle, so `cargo test` is green with no sound card. Exactly six tests
 touch real output; they are named `audio_output_*` and marked `#[ignore]`.
 
-Coverage is **89.44% lines / 90.35% regions / 88.44% functions** (measured 2026-10-04 across 534 tests
-= 527 default + 7 ignored: 6 device-gated and the screenshot tool above). What remains uncovered is structural rather than
-neglected — see [DESIGN.md §10](DESIGN.md).
+Historical coverage baseline: **89.44% lines / 90.35% regions / 88.44% functions** (measured 2026-10-04 across 534 tests
+= 527 default + 7 ignored: 6 device-gated and the screenshot tool above). Coverage was not remeasured for this change and does not describe the new code — see [DESIGN.md §10](DESIGN.md).
+
+### Full validation
+
+```bash
+bash scripts/validate.sh
+```
+
+Runs format/Clippy checks, all **551 tests including the 7 normally ignored tests**, a release
+build, and a real daemon/CLI/TUI smoke test in temporary directories with a private D-Bus,
+virtual ALSA and a pseudo-terminal. It checks reply isolation, scanning, paused seeking,
+MPRIS volume in both directions, crash recovery and graceful exit, without modifying your
+configuration or playing test tones through speakers. Requires Python 3 and `dbus-run-session`.
+See [validation evidence and limits](progress/2026-10-10-reliability-validation.md).
 
 ### Regenerating the screenshot
 

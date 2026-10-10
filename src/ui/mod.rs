@@ -360,6 +360,7 @@ pub fn render(f: &mut Frame, state: &UiState) {
                 cover_lines_cache: &state.player.cover_lines_cache,
                 lyric_track: state.lyrics.lyric_track.as_ref(),
                 current_lyric_index: state.lyrics.current_lyric_index,
+                lyrics_offset_ms: state.lyrics.lyrics_offset_ms,
                 visualizer_data: &state.visualizer_data,
                 playlist_state: &state.playlist_state,
                 playing_index: state.player.playing_index,
@@ -380,6 +381,7 @@ pub fn render(f: &mut Frame, state: &UiState) {
                     track,
                     state.lyrics.current_lyric_index,
                     state.lyrics.lyrics_offset_ms,
+                    state.player.position,
                 );
             }
         }

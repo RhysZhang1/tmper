@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "codex/**"]
   pull_request:
     branches: [main]
 
@@ -47,6 +47,17 @@ jobs:
       - name: Provide null audio device
         run: printf 'pcm.!default { type null }\nctl.!default { type null }\n' > ~/.asoundrc
       - run: cargo test --workspace --all-features audio_output_ -- --ignored --test-threads=1
+
+  smoke:
+    name: Real daemon, CLI, TUI and crash recovery
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install audio and private bus dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config dbus
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - run: cargo build --locked
+      - run: dbus-run-session -- python3 scripts/smoke_test.py target/debug/tmper
 
   fmt:
     name: Format

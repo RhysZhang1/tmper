@@ -73,7 +73,7 @@ impl App {
                 return;
             }
             let adjusted_pos =
-                position_secs + self.ui_state.lyrics.lyrics_offset_ms as f64 / 1000.0;
+                track.adjusted_position(position_secs, self.ui_state.lyrics.lyrics_offset_ms);
             let idx = LyricEngine::sync(
                 track,
                 adjusted_pos.max(0.0),

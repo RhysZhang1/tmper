@@ -38,6 +38,7 @@ struct SavedState {
     /// asks for it. Rounding is deliberate: the value is a JSON float, and the
     /// engine's clock is second-granular to the ear anyway.
     position_secs: Option<f64>,
+    active_playlist: Option<u64>,
 }
 
 fn state_path() -> std::path::PathBuf {
@@ -45,7 +46,7 @@ fn state_path() -> std::path::PathBuf {
 }
 
 impl Player {
-    pub fn save_state(&self) {
+    pub fn save_state(&self) -> bool {
         let path = state_path();
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -62,13 +63,17 @@ impl Player {
             queue: Some(self.queue.clone()),
             queue_index: self.playing_index,
             position_secs: Some(self.position_secs()),
+            active_playlist: self.active_playlist,
         };
 
         if let Ok(json) = serde_json::to_string_pretty(&saved) {
-            if let Err(e) = std::fs::write(&path, json) {
+            if let Err(e) = crate::storage::atomic_write(&path, json.as_bytes()) {
                 tracing::warn!("Failed to save state: {e}");
+                return false;
             }
+            return true;
         }
+        false
     }
 
     /// Restore persisted playback settings (volume, repeat mode, lyrics
@@ -100,6 +105,9 @@ impl Player {
         // Remembered, not played: the daemon stays silent until something asks
         // for sound, and this is what `Resume` asks with.
         self.last_track = saved.last_track_path.map(std::path::PathBuf::from);
+        self.active_playlist = saved
+            .active_playlist
+            .filter(|id| self.playlists.find(*id).is_some());
 
         // The queue comes back whole — it is the part a client cannot
         // reconstruct, and the daemon is the only thing that has it.
@@ -153,6 +161,31 @@ mod tests {
 
     fn new_player() -> Player {
         Player::new_headless(&Config::default())
+    }
+
+    #[test]
+    fn active_playlist_is_restored_only_if_the_store_still_has_it() {
+        let _guard = lock();
+        let mut player = new_player();
+        player.set_playlists(vec![crate::playlist::PlaylistData {
+            id: 33,
+            name: "Saved".into(),
+            songs: vec![],
+        }]);
+        write_state_file("state.json", r#"{"active_playlist":33}"#);
+        player.load_state();
+        assert_eq!(player.state().active_playlist, Some(33));
+        assert!(player.save_state());
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                &std::fs::read_to_string(state_path()).unwrap()
+            )
+            .unwrap()["active_playlist"],
+            33
+        );
+        write_state_file("state.json", r#"{"active_playlist":99}"#);
+        player.load_state();
+        assert_eq!(player.state().active_playlist, None);
     }
 
     fn write_state_file(name: &str, contents: &str) {

@@ -5,8 +5,9 @@
 //! The cost is a few bytes per message on a unix socket, which is nothing.
 //!
 //! The invariant that makes it safe is that `serde_json` never emits a raw
-//! `\n`: control characters inside strings are escaped, so one message is
-//! always exactly one line.
+//! `\n`: control characters inside strings are escaped, so one ordinary
+//! message is one line. Protocol 2 splits larger messages into
+//! base64 chunk frames; both the physical line and reassembled message are capped.
 //!
 //! Both ends of the socket are tokio tasks and both use the `_async` pair
 //! below. There were once blocking twins of each — the client's handshake was
@@ -19,17 +20,30 @@ pub mod proto;
 
 use std::io;
 
+use base64::Engine;
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-/// A message longer than this is a protocol error, not a big message.
-///
-/// Nothing legitimate comes close: a full snapshot is a few hundred bytes and
-/// the spectrum is ~450. A peer that sends more is either confused or hostile,
-/// and either way the answer is the same — refuse it and close, rather than
-/// grow the buffer until the machine swaps.
+/// Physical NDJSON line cap. Large logical messages use bounded chunk frames.
 pub const MAX_LINE_BYTES: usize = 1024 * 1024;
+/// Logical message cap, including a large queue or playlist store.
+pub const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+const CHUNK_BYTES: usize = 512 * 1024;
+const MAX_CHUNKS: usize = 1024;
+
+#[derive(Serialize, Deserialize)]
+struct Chunk {
+    _tmper_chunk: String,
+    more: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Frame<T> {
+    Chunk(Chunk),
+    Message(T),
+}
 
 /// Write one message and flush it.
 ///
@@ -41,13 +55,26 @@ where
     W: AsyncWrite + Unpin,
     T: Serialize,
 {
-    let line = serde_json::to_string(message)
+    let bytes = serde_json::to_vec(message)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("unserializable: {e}")))?;
-    if line.len() > MAX_LINE_BYTES {
-        return Err(too_long());
+    if bytes.len() > MAX_MESSAGE_BYTES {
+        return Err(message_too_long());
     }
-    writer.write_all(line.as_bytes()).await?;
-    writer.write_all(b"\n").await?;
+    if bytes.len() <= MAX_LINE_BYTES {
+        writer.write_all(&bytes).await?;
+        writer.write_all(b"\n").await?;
+    } else {
+        let mut chunks = bytes.chunks(CHUNK_BYTES).peekable();
+        while let Some(bytes) = chunks.next() {
+            let frame = Chunk {
+                _tmper_chunk: base64::engine::general_purpose::STANDARD.encode(bytes),
+                more: chunks.peek().is_some(),
+            };
+            let line = serde_json::to_vec(&frame).map_err(io::Error::other)?;
+            writer.write_all(&line).await?;
+            writer.write_all(b"\n").await?;
+        }
+    }
     writer.flush().await
 }
 
@@ -62,14 +89,51 @@ where
     R: AsyncBufRead + Unpin,
     T: DeserializeOwned,
 {
-    let Some(buf) = read_line_async(reader).await? else {
-        return Ok(None);
-    };
-    let line = std::str::from_utf8(&buf)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "line is not valid UTF-8"))?;
-    serde_json::from_str(line)
-        .map(Some)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("malformed: {e}")))
+    let mut assembled = Vec::new();
+    let mut chunks = 0;
+    loop {
+        let Some(buf) = read_line_async(reader).await? else {
+            if chunks == 0 {
+                return Ok(None);
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "connection closed mid-message",
+            ));
+        };
+        let frame: Frame<T> = serde_json::from_slice(&buf)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("malformed: {e}")))?;
+        match frame {
+            Frame::Message(message) if chunks == 0 => return Ok(Some(message)),
+            Frame::Message(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "message interrupted chunk sequence",
+                ))
+            }
+            Frame::Chunk(chunk) => {
+                chunks += 1;
+                if chunks > MAX_CHUNKS {
+                    return Err(message_too_long());
+                }
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(chunk._tmper_chunk)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                if bytes.is_empty() {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "empty chunk"));
+                }
+                if assembled.len() + bytes.len() > MAX_MESSAGE_BYTES {
+                    return Err(message_too_long());
+                }
+                assembled.extend_from_slice(&bytes);
+                if !chunk.more {
+                    return serde_json::from_slice(&assembled)
+                        .map(Some)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+                }
+            }
+        }
+    }
 }
 
 /// One line, capped, with a `\r` before the `\n` tolerated.
@@ -115,6 +179,13 @@ fn too_long() -> io::Error {
     )
 }
 
+fn message_too_long() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("message exceeds {MAX_MESSAGE_BYTES} bytes or {MAX_CHUNKS} chunks"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::proto::*;
@@ -123,6 +194,76 @@ mod tests {
 
     fn reader(bytes: &[u8]) -> tokio::io::BufReader<Cursor<Vec<u8>>> {
         tokio::io::BufReader::new(Cursor::new(bytes.to_vec()))
+    }
+
+    #[tokio::test]
+    async fn a_large_unicode_collection_is_chunked_and_followed_by_another_message() {
+        let event = Event::Playlists {
+            playlists: vec![crate::playlist::PlaylistData {
+                id: 1,
+                name: "大歌单".into(),
+                songs: (0..20000)
+                    .map(|i| {
+                        std::path::PathBuf::from(format!(
+                            "/music/{i}/{}\".flac",
+                            "中文\\".repeat(10)
+                        ))
+                    })
+                    .collect(),
+            }],
+        };
+        assert!(serde_json::to_vec(&event).unwrap().len() > MAX_LINE_BYTES);
+        let mut bytes = Vec::new();
+        write_message_async(&mut bytes, &event).await.unwrap();
+        write_message_async(&mut bytes, &Event::Bye).await.unwrap();
+        assert!(bytes
+            .split(|b| *b == b'\n')
+            .all(|line| line.len() <= MAX_LINE_BYTES));
+        let mut source = reader(&bytes);
+        assert_eq!(
+            read_message_async::<_, Event>(&mut source).await.unwrap(),
+            Some(event)
+        );
+        assert_eq!(
+            read_message_async::<_, Event>(&mut source).await.unwrap(),
+            Some(Event::Bye)
+        );
+        assert_eq!(
+            read_message_async::<_, Event>(&mut source).await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupted_and_invalid_chunks_are_rejected() {
+        let chunk = serde_json::to_string(&Chunk {
+            _tmper_chunk: "e30=".into(),
+            more: true,
+        })
+        .unwrap();
+        let mut source = reader(format!("{chunk}\n").as_bytes());
+        assert_eq!(
+            read_message_async::<_, Event>(&mut source)
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        for bytes in [
+            format!("{chunk}\n{{\"t\":\"bye\"}}\n"),
+            "{\"_tmper_chunk\":\"!invalid!\",\"more\":false}\n".into(),
+            "{\"_tmper_chunk\":\"\",\"more\":true}\n".into(),
+            format!("{chunk}\n").repeat(MAX_CHUNKS + 1),
+        ] {
+            let mut source = reader(bytes.as_bytes());
+            assert_eq!(
+                read_message_async::<_, Event>(&mut source)
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
     }
 
     #[tokio::test]

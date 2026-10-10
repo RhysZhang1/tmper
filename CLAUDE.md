@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Terminal music player (codename: **tmper**) — a terminal-native music player for Arch Linux/KDE Plasma. Written in Rust with ratatui TUI framework. Supports multi-format audio decoding, metadata display, cover art, LRC lyrics syncing, spectrum visualizer, playlist management, a SQLite library index, and Vim-style keyboard navigation.
 
-The project is **implemented and working** (~25,200 lines of Rust, 527 tests + 7 device-gated) and is **two processes in one binary**: a long-lived `tmper daemon` that owns the sound, the queue and the library, and a TUI client that attaches to it over a unix socket. Closing the TUI does not stop the music. The daemon also publishes the player on the session bus as an MPRIS2 player, so Plasma media controls, media keys and `playerctl` drive the same state the TUI shows.
+The project is **implemented and working** (~25,200 lines of Rust, 544 default tests + 7 ignored (6 device-gated, 1 renderer utility)) and is **two processes in one binary**: a long-lived `tmper daemon` that owns the sound, the queue and the library, and a TUI client that attaches to it over a unix socket. Closing the TUI does not stop the music. The daemon also publishes the player on the session bus as an MPRIS2 player, so Plasma media controls, media keys and `playerctl` drive the same state the TUI shows.
 
 The source of truth for the architecture is `DESIGN.md`; `STATUS.md` holds current capabilities/limits/plan; per-session change logs live in `progress/`. All docs (CLAUDE.md / README.md / DESIGN.md / STATUS.md) were reconciled with the code on 2026-10-03.
 
@@ -23,6 +23,16 @@ Everything is XDG-based (`src/paths.rs`); the old project-local `config/` + `dat
 - **Themes**: 5 palettes (tokyo-night, dracula, nord, solarized-dark, catppuccin-mocha) embedded via `include_str!` and loaded by `src/ui/theme.rs`; a user copy in `$XDG_CONFIG_HOME/tmper/themes/` wins. UI colors come from `UiState.theme`, never hardcoded.
 
 ## Key Architecture Decisions
+
+2026-10-10 reliability update: protocol 2 transparently chunks large collections (1 MiB physical
+line, 64 MiB logical cap); operation replies are requester-only and CLI acknowledgement uses
+Sync/Synced. JSON writes use storage::atomic_write (file + directory sync), playback checkpoints
+are throttled to 1s for edits / 30s for active position, and SIGTERM/Ctrl+C flush before exit.
+Scanner updates are bounded at 128, drained at most 32 per tick in a transaction; Drop closes
+the mailbox to wake blocked walkers. Both lyric views consume word timestamps and file offset.
+FFT stops on the last subscriber disconnect and restores preferences on reconnect.
+Supported codecs are the pinned Symphonia 0.5.5 set; do not claim Opus/WMA/APE/WavPack/HE-AAC.
+Validation: bash scripts/validate.sh; evidence in progress/2026-10-10-reliability-validation.md.
 
 ### Language: Rust
 - ratatui (most mature Rust TUI framework) + crossterm terminal backend
@@ -52,7 +62,7 @@ Everything is XDG-based (`src/paths.rs`); the old project-local `config/` + `dat
 ### Reading the socket: one line, one owner
 - **A `BufReader` dropped after one line swallows every byte behind it**, and a read future dropped mid-line does the same — `read_line` reads *everything* available into its buffer to answer once. Two rules follow, and both are load-bearing:
   - The handshake reads `Welcome` on the same reader that then becomes the client's read task (`DaemonHandle::dial` → `read_events`); the reader is never re-created.
-  - **The socket reader is never a `select!` branch.** In the daemon's `serve`, the request forwarder is one (cancelling a `send` on a channel is safe), while reading runs in its own spawned task that reports the reason the connection ended. This was a real bug: clients intermittently saw `the player closed the connection` (3 of 25 runs) because the handshake's reader was dropped with the greeting still in its buffer. See `progress/2026-10-03-daemon-split.md`.
+  - **Never cancel a read and continue using the same stream.** The client reads in a dedicated task. The daemon selects its read only against writer completion, which ends the entire connection, so partial bytes are intentionally discarded with that connection. This was a real bug: clients intermittently saw `the player closed the connection` (3 of 25 runs) because the handshake's reader was dropped with the greeting still in its buffer. See `progress/2026-10-03-daemon-split.md`.
 
 ### Audio Pipeline
 ```
@@ -168,7 +178,7 @@ cargo llvm-cov --all-features --workspace # prints per-module line coverage + a 
 - `cfg(test)` redirects every XDG directory into a per-process `test_root()`, including the runtime dir; nothing in the suite touches the real `~/.local/state/tmper`
 - Logical modules have `#[cfg(test)] mod tests { ... }` inline
 - Tests follow Arrange-Act-Assert pattern; cover normal paths + boundary conditions
-- **Line coverage 89.44%** (measured 2026-10-04 via `cargo llvm-cov`; a few timing-sensitive tests
+- **Historical line coverage 89.44%** (not remeasured for 2026-10-10; measured 2026-10-04 via `cargo llvm-cov`; a few timing-sensitive tests
   make this wobble by ~0.3% between runs). What remains is structural, not neglected:
   `audio/engine.rs` (78% — the six `#[ignore]`d device tests count as uncovered, plus `new` and
   `play_file` need a real sound card), `audio/output.rs` (66% — `new` opens a device; the headless

@@ -40,6 +40,7 @@ pub struct PlayerViewParams<'a> {
     pub cover_lines_cache: &'a RefCell<Option<CoverLinesCache>>,
     pub lyric_track: Option<&'a LyricTrack>,
     pub current_lyric_index: usize,
+    pub lyrics_offset_ms: i64,
     pub visualizer_data: &'a [f32],
     pub playlist_state: &'a PlaylistManagerState,
     pub playing_index: Option<usize>,
@@ -562,7 +563,13 @@ fn render_lyrics_section(f: &mut Frame, area: Rect, params: &PlayerViewParams) {
                     Style::default().fg(Color::Rgb(100, 100, 100))
                 };
 
-                Line::from(Span::styled(lyric.text.clone(), style))
+                crate::ui::views::lyrics_view::lyric_line(
+                    lyric,
+                    track.adjusted_position(params.position, params.lyrics_offset_ms),
+                    style,
+                    params.theme,
+                    is_current,
+                )
             })
             .collect();
 
@@ -877,6 +884,7 @@ mod tests {
             cover_lines_cache: cache,
             lyric_track: None,
             current_lyric_index: 0,
+            lyrics_offset_ms: 0,
             visualizer_data: &[],
             playlist_state,
             playing_index: None,

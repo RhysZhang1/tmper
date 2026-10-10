@@ -28,10 +28,45 @@ pub struct TrackInfo {
 }
 
 pub fn read_metadata(path: &Path) -> AppResult<TrackInfo> {
-    let tagged_file = Probe::open(path)
-        .map_err(|e| crate::error::AppError::Metadata(format!("Failed to open file: {e}")))?
-        .read()
-        .map_err(|e| crate::error::AppError::Metadata(format!("Failed to read tags: {e}")))?;
+    let tagged_file = match Probe::open(path).and_then(|probe| probe.read()) {
+        Ok(file) => file,
+        Err(tag_error) => {
+            // A tag-reader limitation must not reject audio the decoder supports
+            // (notably raw ADTS AAC). Still reject invalid/missing audio.
+            let decoder =
+                crate::audio::decoder::AudioDecoder::open(path).map_err(|audio_error| {
+                    crate::error::AppError::Metadata(format!(
+                        "Cannot read tags ({tag_error}) or audio ({audio_error})"
+                    ))
+                })?;
+            return Ok(TrackInfo {
+                path: path.to_path_buf(),
+                title: path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Unknown")
+                    .into(),
+                artist: None,
+                album: None,
+                album_artist: None,
+                track_number: None,
+                track_total: None,
+                disc_number: None,
+                genre: None,
+                year: None,
+                duration: Duration::from_secs_f64(decoder.duration_secs()),
+                bitrate: 0,
+                sample_rate: decoder.sample_rate,
+                channels: decoder.channels,
+                codec: path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown")
+                    .to_uppercase(),
+                cover_art: None,
+            });
+        }
+    };
 
     let tag = tagged_file
         .primary_tag()

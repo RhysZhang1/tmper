@@ -33,14 +33,33 @@ pub async fn run_control(command: Command) -> AppResult<()> {
 
     let request = request_for(&command).expect("only control verbs get this far");
 
-    // The greeting snapshot describes the state *before* this command. Reading
-    // it first means the snapshot that follows is unambiguously the answer,
-    // with no sleeping and no guessing — the daemon handles the join before
-    // any request, and one socket preserves that order.
+    // Consume the initial state before sending the command; acknowledge with
+    // a requester-only barrier rather than a periodic playback snapshot.
     let _greeting = next_snapshot(&mut handle).await?;
     handle.dispatch(request);
-    next_snapshot(&mut handle).await?;
-    Ok(())
+    // Periodic snapshots can overtake the command; a barrier cannot.
+    handle.dispatch(Request::Sync { id: 1 });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match handle.next_event().await {
+                Some(Event::Synced { id: 1 }) => return Ok(()),
+                // Shutdown may close before a following barrier is handled.
+                Some(Event::Bye) if matches!(command, Command::Quit) => return Ok(()),
+                Some(Event::Notice {
+                    level: crate::ipc::proto::NoticeLevel::Error,
+                    message,
+                }) => {
+                    return Err(AppError::Ipc(message).into());
+                }
+                Some(Event::Bye) | None => {
+                    return Err(AppError::Ipc("the player closed the connection".into()).into())
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .map_err(|_| AppError::Ipc("the player did not acknowledge the command within 5s".into()))?
 }
 
 /// The message a verb sends, or `None` for the one that asks instead of tells.

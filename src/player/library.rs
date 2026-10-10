@@ -54,8 +54,8 @@ pub struct Library {
     /// Where `paths` is written. `None` for an index that never touches disk:
     /// the in-memory fallback, and every test.
     paths_file: Option<PathBuf>,
-    scan_tx: tokio::sync::mpsc::UnboundedSender<ScanUpdate>,
-    scan_rx: tokio::sync::mpsc::UnboundedReceiver<ScanUpdate>,
+    scan_tx: tokio::sync::mpsc::Sender<ScanUpdate>,
+    scan_rx: tokio::sync::mpsc::Receiver<ScanUpdate>,
     /// Flags that stop a running walk at its next file boundary.
     cancels: Vec<Arc<AtomicBool>>,
     /// Scans in flight, for the status line and for the pruning rule.
@@ -93,7 +93,7 @@ impl Library {
     }
 
     fn with_db(db: LibraryDb, paths_file: Option<PathBuf>) -> Self {
-        let (scan_tx, scan_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (scan_tx, scan_rx) = tokio::sync::mpsc::channel(128);
         Self {
             db,
             paths: Vec::new(),
@@ -173,7 +173,7 @@ impl Library {
             .collect();
         match serde_json::to_string_pretty(&paths) {
             Ok(json) => {
-                if let Err(error) = std::fs::write(file, json) {
+                if let Err(error) = crate::storage::atomic_write(file, json.as_bytes()) {
                     tracing::warn!("Failed to write {}: {error}", file.display());
                 }
             }
@@ -350,18 +350,23 @@ impl Library {
     }
 
     /// How many scans are running.
-    #[cfg(test)]
     pub fn scans_active(&self) -> usize {
         self.active
     }
 
     /// Absorb whatever the scanner threads have produced since the last call,
-    /// writing the index on this thread. One call per tick: the queue between
-    /// here and the walkers is unbounded, so a burst of tracks costs one
-    /// slightly longer tick, never a dropped file.
+    /// writing the index on this thread. A bounded mailbox applies backpressure
+    /// to walkers; at most 32 updates are handled per tick, in one transaction.
     pub fn drain(&mut self) -> Vec<ScanNotice> {
         let mut notices = Vec::new();
-        while let Ok(update) = self.scan_rx.try_recv() {
+        if self.scan_rx.is_empty() {
+            return notices;
+        }
+        let batch = self.db.begin_scan_batch().is_ok();
+        for _ in 0..32 {
+            let Ok(update) = self.scan_rx.try_recv() else {
+                break;
+            };
             match update {
                 ScanUpdate::Track(track) => self.index(&track),
                 ScanUpdate::Progress { scanned, changed } => {
@@ -401,6 +406,11 @@ impl Library {
                 }
             }
         }
+        if batch {
+            if let Err(error) = self.db.end_scan_batch() {
+                tracing::warn!("Failed to commit scan batch: {error}");
+            }
+        }
         notices
     }
 
@@ -416,6 +426,14 @@ impl Library {
     }
 }
 
+impl Drop for Library {
+    fn drop(&mut self) {
+        self.cancel_scans();
+        // Wake walkers blocked on a full mailbox before the runtime joins them.
+        self.scan_rx.close();
+    }
+}
+
 fn file_mtime(path: &Path) -> i64 {
     std::fs::metadata(path)
         .ok()
@@ -428,6 +446,54 @@ fn file_mtime(path: &Path) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scan_mailbox_and_per_tick_work_are_bounded() {
+        let mut library = Library::in_memory();
+        for i in 0..128 {
+            library
+                .scan_tx
+                .try_send(ScanUpdate::Progress {
+                    scanned: i,
+                    changed: i,
+                })
+                .unwrap();
+        }
+        assert!(matches!(
+            library.scan_tx.try_send(ScanUpdate::Progress {
+                scanned: 129,
+                changed: 129
+            }),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+        ));
+        assert_eq!(library.drain().len(), 32);
+        assert_eq!(library.scan_rx.len(), 96);
+        assert_eq!(library.drain().len(), 32);
+    }
+
+    #[test]
+    fn dropping_the_library_wakes_a_blocked_scanner() {
+        let library = Library::in_memory();
+        let tx = library.scan_tx.clone();
+        for i in 0..128 {
+            tx.try_send(ScanUpdate::Progress {
+                scanned: i,
+                changed: i,
+            })
+            .unwrap();
+        }
+        let (done, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = tx.blocking_send(ScanUpdate::Progress {
+                scanned: 129,
+                changed: 129,
+            });
+            done.send(result.is_err()).unwrap();
+        });
+        drop(library);
+        assert!(rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap());
+        worker.join().unwrap();
+    }
 
     fn seed(library: &Library, path: &str, title: &str, artist: &str, album: &str) {
         library
@@ -734,7 +800,7 @@ mod tests {
     impl Library {
         /// Feed one scanner message straight in, as if a walk had sent it.
         fn finish_for_test(&mut self, update: ScanUpdate) -> Vec<ScanNotice> {
-            self.scan_tx.send(update).expect("send");
+            self.scan_tx.try_send(update).expect("send");
             self.drain()
         }
 

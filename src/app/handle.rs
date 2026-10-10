@@ -478,8 +478,9 @@ async fn supervise(
     state: watch::Sender<Connection>,
 ) {
     let mut socket = first;
+    let mut preferences = Vec::<Request>::new();
     loop {
-        let Some(reason) = serve(socket, &mut outbox, &inbox).await else {
+        let Some(reason) = serve(socket, &mut outbox, &inbox, &mut preferences).await else {
             return; // the client is gone; so is there anything to reconnect for
         };
         let _ = state.send(Connection::Lost {
@@ -499,7 +500,20 @@ async fn supervise(
         let mut started_one = false;
         loop {
             match DaemonHandle::dial().await {
-                Ok(dialed) => {
+                Ok(mut dialed) => {
+                    let mut restored = true;
+                    for preference in &preferences {
+                        if crate::ipc::write_message_async(&mut dialed.write, preference)
+                            .await
+                            .is_err()
+                        {
+                            restored = false;
+                            break;
+                        }
+                    }
+                    if !restored {
+                        continue;
+                    }
                     socket = dialed;
                     let _ = state.send(Connection::Live);
                     break;
@@ -533,6 +547,7 @@ async fn serve(
     socket: Socket,
     outbox: &mut mpsc::Receiver<Request>,
     inbox: &mpsc::Sender<Event>,
+    preferences: &mut Vec<Request>,
 ) -> Option<String> {
     let (live_tx, live_rx) = mpsc::channel::<Request>(runtime::DAEMON_CLIENT_QUEUE);
     tokio::spawn(write_requests(socket.write, live_rx));
@@ -545,7 +560,13 @@ async fn serve(
                 // means this socket is. The reader will say so; dropping it
                 // here just means the reason comes from the read side, which
                 // is where a socket failure is actually observed.
-                Some(request) => { let _ = live_tx.send(request).await; }
+                Some(request) => {
+                    if matches!(request, Request::SubscribeVisualizer { .. } | Request::SetFftParams { .. }) {
+                        preferences.retain(|old| std::mem::discriminant(old) != std::mem::discriminant(&request));
+                        preferences.push(request.clone());
+                    }
+                    let _ = live_tx.send(request).await;
+                }
                 None => {
                     reader.abort();
                     return None;
@@ -1015,6 +1036,25 @@ mod tests {
             2,
             "the client dialed again by itself"
         );
+    }
+
+    #[tokio::test]
+    async fn reconnect_restores_spectrum_subscription_and_settings() {
+        let (_socket, listener) = listener().await;
+        let mut player = fake_player(listener);
+        let mut handle = DaemonHandle::connect_or_spawn().await.unwrap();
+        let params = Request::SetFftParams {
+            num_bars: 48,
+            smoothing: 0.7,
+        };
+        let subscription = Request::SubscribeVisualizer { on: true };
+        handle.dispatch(params.clone());
+        handle.dispatch(subscription.clone());
+        assert_eq!(player.next_request().await, params);
+        assert_eq!(player.next_request().await, subscription);
+        player.kill();
+        assert_eq!(player.next_request().await, params);
+        assert_eq!(player.next_request().await, subscription);
     }
 
     /// A command given while the player is away is not swallowed: it waits in

@@ -200,7 +200,7 @@ impl Playlists {
         }
         match serde_json::to_string_pretty(&self.entries) {
             Ok(json) => {
-                if let Err(error) = std::fs::write(file, json) {
+                if let Err(error) = crate::storage::atomic_write(file, json.as_bytes()) {
                     tracing::warn!("Failed to write {}: {error}", file.display());
                 }
             }

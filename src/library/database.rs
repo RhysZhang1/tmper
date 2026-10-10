@@ -39,6 +39,16 @@ pub struct LibraryDb {
 }
 
 impl LibraryDb {
+    pub fn begin_scan_batch(&self) -> AppResult<()> {
+        self.conn.execute_batch("SAVEPOINT scan_batch")?;
+        Ok(())
+    }
+
+    pub fn end_scan_batch(&self) -> AppResult<()> {
+        self.conn.execute_batch("RELEASE scan_batch")?;
+        Ok(())
+    }
+
     pub fn open(path: &Path) -> AppResult<Self> {
         let conn = Connection::open(path)
             .map_err(|e| AppError::Config(format!("Failed to open database: {e}")))?;

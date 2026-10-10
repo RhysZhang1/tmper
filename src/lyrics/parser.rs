@@ -33,123 +33,75 @@ fn decode_with_fallback(bytes: &[u8], fallbacks: &[&str]) -> AppResult<String> {
     Err(AppError::Lyrics("All encodings failed".into()).into())
 }
 
+fn timestamp(cap: &regex::Captures<'_>) -> Duration {
+    let min: u64 = cap[1].parse().unwrap_or(0);
+    let sec: u64 = cap[2].parse().unwrap_or(0);
+    let millis = cap
+        .get(3)
+        .map(|frac| {
+            frac.as_str().parse::<u64>().unwrap_or(0) * 10u64.pow(3 - frac.as_str().len() as u32)
+        })
+        .unwrap_or(0);
+    Duration::from_millis(min * 60000 + sec * 1000 + millis)
+}
+
 pub fn parse_lrc(content: &str) -> AppResult<LyricTrack> {
-    let tag_re = Regex::new(r"\[(ti|ar|al|by|offset|length):(.+?)\]").unwrap();
-    let time_re = Regex::new(r"\[(\d{2}):(\d{2})\.(\d{2,3})\]").unwrap();
-    let word_re = Regex::new(r"<(\d{2}):(\d{2})\.(\d{2,3})>").unwrap();
-
+    use std::sync::OnceLock;
+    static TAG: OnceLock<Regex> = OnceLock::new();
+    static TIME: OnceLock<Regex> = OnceLock::new();
+    static WORD: OnceLock<Regex> = OnceLock::new();
+    let tag_re = TAG.get_or_init(|| Regex::new(r"\[(ti|ar|al|by|offset|length):(.+?)\]").unwrap());
+    let time_re =
+        TIME.get_or_init(|| Regex::new(r"\[(\d{1,3}):(\d{2})(?:\.(\d{1,3}))?\]").unwrap());
+    let word_re = WORD.get_or_init(|| Regex::new(r"<(\d{1,3}):(\d{2})(?:\.(\d{1,3}))?>").unwrap());
     let mut metadata = LyricMetadata::default();
-    let mut lines: Vec<LyricLine> = Vec::new();
-
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        let mut has_time_tag = false;
-
-        // Extract metadata tags
+    let mut lines = Vec::new();
+    for line in content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
         for cap in tag_re.captures_iter(line) {
-            let key = cap.get(1).unwrap().as_str();
-            let value = cap.get(2).unwrap().as_str();
-            match key {
-                "ti" => metadata.title = Some(value.to_string()),
-                "ar" => metadata.artist = Some(value.to_string()),
-                "offset" => {
-                    metadata.global_offset_ms = value.parse::<i64>().unwrap_or(0);
-                }
+            match &cap[1] {
+                "ti" => metadata.title = Some(cap[2].to_string()),
+                "ar" => metadata.artist = Some(cap[2].to_string()),
+                "offset" => metadata.global_offset_ms = cap[2].parse().unwrap_or(0),
                 _ => {}
             }
         }
-
-        // Extract time tags
-        let timestamps: Vec<Duration> = time_re
-            .captures_iter(line)
-            .map(|cap| {
-                let min: u64 = cap.get(1).unwrap().as_str().parse().unwrap_or(0);
-                let sec: u64 = cap.get(2).unwrap().as_str().parse().unwrap_or(0);
-                let frac_str = cap.get(3).unwrap().as_str();
-                let frac: u64 = if frac_str.len() == 2 {
-                    frac_str.parse().unwrap_or(0) * 10 // centiseconds to ms
-                } else {
-                    frac_str.parse().unwrap_or(0) // milliseconds
-                };
-                Duration::from_millis(min * 60000 + sec * 1000 + frac)
-            })
-            .collect();
-
-        if !timestamps.is_empty() {
-            has_time_tag = true;
-
-            // Find the last time tag position for text extraction
-            let mut last_end = 0usize;
-            for cap in time_re.captures_iter(line) {
-                if let Some(m) = cap.get(0) {
-                    last_end = last_end.max(m.end());
-                }
-            }
-
-            let text_after_tags = line[last_end..].trim().to_string();
-
-            // Parse word-level timestamps
-            let word_timestamps: Vec<(Duration, String)> = word_re
-                .captures_iter(line)
-                .map(|cap| {
-                    let min: u64 = cap.get(1).unwrap().as_str().parse().unwrap_or(0);
-                    let sec: u64 = cap.get(2).unwrap().as_str().parse().unwrap_or(0);
-                    let frac_str = cap.get(3).unwrap().as_str();
-                    let frac: u64 = if frac_str.len() == 2 {
-                        frac_str.parse().unwrap_or(0) * 10
-                    } else {
-                        frac_str.parse().unwrap_or(0)
-                    };
-                    let ts = Duration::from_millis(min * 60000 + sec * 1000 + frac);
-                    (ts, String::new())
-                })
-                .collect();
-
-            // If we have word timestamps, extract the word text between/before tags
-            let mut word_texts: Vec<String> = Vec::new();
-            if !word_timestamps.is_empty() {
-                let remaining = &line[last_end..];
-                let parts: Vec<&str> = word_re.split(remaining).collect();
-                for p in parts {
-                    let trimmed = p.trim().to_string();
-                    if !trimmed.is_empty() {
-                        word_texts.push(trimmed);
-                    }
-                }
-            }
-
-            let word_timestamps: Vec<(Duration, String)> = word_timestamps
-                .into_iter()
+        let captures: Vec<_> = time_re.captures_iter(line).collect();
+        let Some(last) = captures.last() else {
+            continue;
+        };
+        let raw = line[last.get(0).unwrap().end()..].trim();
+        let words: Vec<_> = word_re.captures_iter(raw).collect();
+        let text = word_re.replace_all(raw, "").into_owned();
+        let base = timestamp(&captures[0]);
+        for cap in &captures {
+            let line_time = timestamp(cap);
+            let word_timestamps = words
+                .iter()
                 .enumerate()
-                .map(|(i, (ts, _))| {
-                    let text = word_texts.get(i).cloned().unwrap_or_default();
-                    (ts, text)
+                .map(|(i, word)| {
+                    let end = words
+                        .get(i + 1)
+                        .map(|next| next.get(0).unwrap().start())
+                        .unwrap_or(raw.len());
+                    let text = raw[word.get(0).unwrap().end()..end].to_string();
+                    let time = timestamp(word)
+                        .saturating_add(line_time)
+                        .saturating_sub(base);
+                    (time, text)
                 })
                 .collect();
-
-            // Create a line for each timestamp (supports multi-timestamp lines)
-            for ts in &timestamps {
-                lines.push(LyricLine {
-                    timestamp: *ts,
-                    text: text_after_tags.clone(),
-                    word_timestamps: word_timestamps.clone(),
-                });
-            }
-        }
-
-        // Lines without time tags but have content are ignored (comments/empty)
-        if !has_time_tag && !line.starts_with('[') {
-            // Plain text line without time tag — skip
+            lines.push(LyricLine {
+                timestamp: line_time,
+                text: text.clone(),
+                word_timestamps,
+            });
         }
     }
-
-    // Sort by timestamp
-    lines.sort_by_key(|l| l.timestamp);
-
+    lines.sort_by_key(|line| line.timestamp);
     Ok(LyricTrack { metadata, lines })
 }
 
@@ -163,6 +115,24 @@ pub fn load_lrc_file(path: &std::path::Path, fallbacks: &[&str]) -> AppResult<Ly
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enhanced_lyrics_preserve_spacing_remove_tags_and_shift_repeated_words() {
+        let track =
+            parse_lrc("[offset:500]\n[0:01][0:11]Intro <0:01.5>你好 <0:02.05>world<0:03.125>")
+                .unwrap();
+        assert_eq!(track.lines[0].text, "Intro 你好 world");
+        assert_eq!(
+            track.lines[0].word_timestamps[0],
+            (Duration::from_millis(1500), "你好 ".into())
+        );
+        assert_eq!(
+            track.lines[1].word_timestamps[0].0,
+            Duration::from_millis(11500)
+        );
+        assert_eq!(track.adjusted_position(1.0, -200), 1.3);
+        assert_eq!(track.adjusted_position(0.0, -1000), 0.0);
+    }
 
     #[test]
     fn test_parse_standard_lrc() {

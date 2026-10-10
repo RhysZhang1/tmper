@@ -255,7 +255,7 @@ impl App {
                 self.ui_state.notification = Some((message, std::time::Instant::now()));
             }
             Event::Bye => self.should_quit = true,
-            Event::Welcome { .. } => {}
+            Event::Welcome { .. } | Event::Synced { .. } => {}
         }
     }
 

@@ -504,7 +504,7 @@ impl AudioEngine {
                     duration_secs,
                     sample_rate,
                 } if generation == current_generation => {
-                    self.duration_secs = Some(duration_secs);
+                    self.duration_secs = (duration_secs > 0.0).then_some(duration_secs);
                     self.sample_rate.store(sample_rate, Ordering::Relaxed);
                     let paused = self.state == PlaybackState::Paused;
                     let base_offset = lock(&self.position).base_offset;

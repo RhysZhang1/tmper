@@ -10,6 +10,7 @@ mod ipc;
 mod paths;
 mod player;
 mod playlist;
+mod storage;
 
 mod audio;
 mod input;

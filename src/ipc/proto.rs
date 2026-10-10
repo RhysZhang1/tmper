@@ -22,7 +22,7 @@ use crate::playlist::PlaylistData;
 /// Bumped whenever an existing field changes meaning or is removed. Additive
 /// changes (a new `Request` variant, a new optional field) do not need a bump;
 /// a client that does not know a tag simply never sends it.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Playback order. Daemon policy — it survives the TUI that set it, and it is
 /// what decides the next track when nobody is attached — so it is declared
@@ -242,6 +242,10 @@ pub enum Request {
     /// Ask for a [`Event::Snapshot`] now — used by `tmper status` and after a
     /// reconnect, where the client needs a state before the next tick.
     GetState,
+    /// A requester-only barrier: all earlier requests on this socket were applied.
+    Sync {
+        id: u64,
+    },
     /// Stop playback, save state, and exit the daemon. `tmper quit`,
     /// `:quit!`, and MPRIS `Quit`.
     Shutdown,
@@ -335,6 +339,10 @@ pub enum Event {
     Notice {
         level: NoticeLevel,
         message: String,
+    },
+    /// Answer to a requester-only synchronization barrier.
+    Synced {
+        id: u64,
     },
     /// The daemon is exiting; clients should leave too.
     Bye,

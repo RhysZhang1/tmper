@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
-use crate::lyrics::types::LyricTrack;
+use crate::lyrics::types::{LyricLine, LyricTrack};
 use crate::ui::theme::Theme;
 
 pub fn render_lyrics_view(
@@ -14,6 +14,7 @@ pub fn render_lyrics_view(
     track: &LyricTrack,
     current_index: usize,
     offset_ms: i64,
+    position_secs: f64,
 ) {
     let visible_lines = area.height.saturating_sub(2) as usize; // borders
     if visible_lines < 3 || track.lines.is_empty() {
@@ -58,7 +59,13 @@ pub fn render_lyrics_view(
                 Style::default().fg(Color::Rgb(100, 100, 100))
             };
 
-            Line::from(Span::styled(lyric.text.clone(), style))
+            lyric_line(
+                lyric,
+                track.adjusted_position(position_secs, offset_ms),
+                style,
+                theme,
+                is_current,
+            )
         })
         .collect();
 
@@ -79,6 +86,51 @@ pub fn render_lyrics_view(
     f.render_widget(para, area);
 }
 
+/// Shared by the player panel and full-screen view so both show the same words.
+pub(crate) fn lyric_line(
+    lyric: &LyricLine,
+    position: f64,
+    style: Style,
+    theme: &Theme,
+    current: bool,
+) -> Line<'static> {
+    if !current {
+        return Line::from(Span::styled(lyric.text.clone(), style));
+    }
+    let pending = Style::default().fg(theme.muted);
+    if lyric.word_timestamps.is_empty() {
+        return Line::from(Span::styled(
+            lyric.text.clone(),
+            if position >= lyric.timestamp.as_secs_f64() {
+                style
+            } else {
+                pending
+            },
+        ));
+    }
+    let word_bytes: usize = lyric
+        .word_timestamps
+        .iter()
+        .map(|(_, word)| word.len())
+        .sum();
+    let prefix = lyric.text.len().saturating_sub(word_bytes);
+    let mut spans = vec![Span::styled(
+        lyric.text.get(..prefix).unwrap_or("").to_string(),
+        style,
+    )];
+    spans.extend(lyric.word_timestamps.iter().map(|(time, word)| {
+        Span::styled(
+            word.clone(),
+            if position >= time.as_secs_f64() {
+                style
+            } else {
+                pending
+            },
+        )
+    }));
+    Line::from(spans)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,6 +138,28 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::time::Duration;
+
+    #[test]
+    fn enhanced_words_change_style_at_their_own_timestamps() {
+        let track =
+            crate::lyrics::parser::parse_lrc("[00:01.00]<00:01.00>Hello <00:02.00>世界").unwrap();
+        let theme = Theme::default();
+        let active = Style::default()
+            .fg(theme.primary)
+            .add_modifier(Modifier::BOLD);
+        let line = lyric_line(&track.lines[0], 1.5, active, &theme, true);
+        assert_eq!(
+            line.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>(),
+            "Hello 世界"
+        );
+        assert_eq!(line.spans[1].style, active);
+        assert_eq!(line.spans[2].style.fg, Some(theme.muted));
+        let later = lyric_line(&track.lines[0], 2.1, active, &theme, true);
+        assert_eq!(later.spans[2].style, active);
+    }
 
     fn make_track(lines: &[&str]) -> LyricTrack {
         LyricTrack {
@@ -106,7 +180,17 @@ mod tests {
     fn render(track: &LyricTrack, idx: usize, offset_ms: i64) -> String {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal
-            .draw(|f| render_lyrics_view(f, f.area(), &Theme::default(), track, idx, offset_ms))
+            .draw(|f| {
+                render_lyrics_view(
+                    f,
+                    f.area(),
+                    &Theme::default(),
+                    track,
+                    idx,
+                    offset_ms,
+                    idx as f64,
+                )
+            })
             .unwrap();
         let buf = terminal.backend().buffer();
         buf.content().iter().map(|c| c.symbol()).collect()
